@@ -301,6 +301,33 @@ static MtkType check_builtin_call(Sema* s, AstExpr* e, b32* out_handled) {
         return e->type;
     }
 
+    /* sample_level(tex, uv, level: i32) -> vec4 (açık mip seviyesi) */
+    if (str_eq(name, "sample_level")) {
+        for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
+        e->type = MTK_TYPE_VEC4;
+        if (argc != 3) {
+            sema_error(s, e->line, e->col, "'sample_level' 3 arguman bekler: (texture2d, vec2, i32)");
+            return e->type;
+        }
+        if (e->as.call.args[0]->type != MTK_TYPE_TEXTURE2D) {
+            sema_error(s, e->as.call.args[0]->line, e->as.call.args[0]->col,
+                       "'sample_level' ilk argumani 'texture2d' olmalidir (bulunan '%s')",
+                       mtk_type_name(e->as.call.args[0]->type));
+        }
+        if (e->as.call.args[1]->type != MTK_TYPE_VEC2) {
+            sema_error(s, e->as.call.args[1]->line, e->as.call.args[1]->col,
+                       "'sample_level' ikinci argumani 'vec2' olmalidir (bulunan '%s')",
+                       mtk_type_name(e->as.call.args[1]->type));
+        }
+        if (e->as.call.args[2]->type != MTK_TYPE_I32) {
+            sema_error(s, e->as.call.args[2]->line, e->as.call.args[2]->col,
+                       "'sample_level' ucuncu argumani 'i32' olmalidir (bulunan '%s')",
+                       mtk_type_name(e->as.call.args[2]->type));
+        }
+        e->is_varying = e->as.call.args[1]->is_varying || e->as.call.args[2]->is_varying;
+        return e->type;
+    }
+
     /* tex_size(tex) -> ivec2 */
     if (str_eq(name, "tex_size")) {
         for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
@@ -313,11 +340,13 @@ static MtkType check_builtin_call(Sema* s, AstExpr* e, b32* out_handled) {
     }
 
     /* Tek argümanlı f32/vec* yerleşikleri:
-     * abs, floor, ceil, fract, sqrt, rsqrt, sin, cos, exp2, log2, length, normalize */
+     * abs, floor, ceil, fract, sqrt, rsqrt, sin, cos, exp2, log2, length, normalize,
+     * dFdx, dFdy, fwidth (quad türevleri; uniform argümanda 0) */
     b32 is_unary_math = str_eq(name, "abs") || str_eq(name, "floor") || str_eq(name, "ceil") ||
                         str_eq(name, "fract") || str_eq(name, "sqrt") || str_eq(name, "rsqrt") ||
                         str_eq(name, "sin") || str_eq(name, "cos") || str_eq(name, "exp2") ||
-                        str_eq(name, "log2") || str_eq(name, "length") || str_eq(name, "normalize");
+                        str_eq(name, "log2") || str_eq(name, "length") || str_eq(name, "normalize") ||
+                        str_eq(name, "dFdx") || str_eq(name, "dFdy") || str_eq(name, "fwidth");
     if (is_unary_math) {
         for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
         if (argc != 1) {

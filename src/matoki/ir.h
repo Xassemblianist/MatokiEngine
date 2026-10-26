@@ -69,6 +69,11 @@ typedef enum {
     IR_DISCARD,          /* (a: bool maske) — o lane'ler yazılmaz. Ön uç a'ya aktif bölge maskesini dahil eder */
     IR_OUTPUT,           /* (a: f32) imm.u = kanal 0..3 (r,g,b,a). Her kanal tam olarak bir kez, fonksiyonun sonunda */
 
+    /* --- M8_B eklemeleri (numaralar kaymasın diye sonda) --- */
+    IR_DERIV_X,          /* (a: varying f32) kaba türev: 4 lane'e a[lane1] - a[lane0]. Maskeden bağımsız */
+    IR_DERIV_Y,          /* (a: varying f32) 4 lane'e a[lane2] - a[lane0] */
+    IR_TEX_LEVELS,       /* imm.u = slot → uniform i32 mip seviye sayısı (0 okunursa 1 kabul edilir) */
+
     IR_OP_COUNT
 } IrOp;
 
@@ -115,8 +120,13 @@ void ir_discard(IrFunc* f, u32 mask);
 void ir_output(IrFunc* f, u32 channel, u32 value);
 
 /* sample(tex, u, v) genişletmesi: wrap/clamp + en yakın komşu veya bilinear,
- * RGBA8 → 4 adet f32 (0..1). flags = TEX_FLAG_* (derleme zamanında bilinen örnekleyici durumu). */
+ * RGBA8 → 4 adet f32 (0..1). flags = TEX_FLAG_* (derleme zamanında bilinen örnekleyici durumu).
+ * TEX_FLAG_MIPMAP: seviye u,v'nin quad türevlerinden seçilir (shade_abi.h MIPMAP SEMANTİĞİ). */
 void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4]);
+/* Açık seviyeli örnekleme (level: i32, [0, levels-1]'e kırpılır). flags'teki MIPMAP yok sayılır. */
+void ir_emit_sample_level(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u32 flags, u32 out_rgba[4]);
+/* sample() için mip seviyesi (i32) — C referansı ref_tex_mip_level ile bit-bit aynı */
+u32  ir_emit_mip_level(IrFunc* f, u32 slot, u32 u, u32 v);
 
 /* ---------- Doğrulama ve yazdırma ---------- */
 /* Her operand tanımdan önce mi, tipler tutarlı mı, IF dengeli mi, OUTPUT 4 kanal mı.
@@ -135,6 +145,8 @@ void ir_compact(IrFunc* f);        /* NOP'ları sil, kimlikleri yeniden numarala
 void ir_optimize(IrFunc* f);       /* constfold → cse → dce → compact (sabit noktaya kadar, en fazla 4 tur) */
 
 /* ---------- Anlambilim notları ----------
+ * - DERIV_X/Y: ön uç uniform operand için doğrudan 0 sabiti üretir; ir_op1 de aynısını yapar.
+ *   Varying IF içinde de 4 lane'in hesaplanmış değerlerinden alınır (SPMD: tüm lane'ler hesaplanır).
  * - Atlanmış bir IF bölgesinde tanımlı değerler ÇÖPTÜR. Bölge dışında yalnızca o bölgenin
  *   koşuluna bağlı bir SELECT üzerinden kullanılabilir. Ön uç bunu garanti eder.
  * - Varying IF: codegen "then" bölgesini yalnızca any_true(cond & aktif) ise, "else"i yalnızca

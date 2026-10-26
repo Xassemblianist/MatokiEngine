@@ -1,8 +1,8 @@
-// lit3d.mtk — 3D temel aydınlatma: doku * renk, yönlü ışık (Lambert) + ortam, mesafe sisi
+// lit3d.mtk — 3D temel aydınlatma: mipmap'li doku * renk, yönlü ışık (Lambert) + ortam, mesafe sisi
 uniform light_dir: vec3;     // dünya uzayında, ışığa doğru, birim
 uniform base:      vec4;     // materyal rengi
 uniform fog:       vec4;     // rgb = sis rengi, a = sis yoğunluğu (1/birim)
-uniform tex:       texture2d @bilinear;
+uniform tex:       texture2d @bilinear @mipmap;
 in uv:    vec2;
 in nrm:   vec3;
 in depth: f32;               // görüş uzayı mesafesi

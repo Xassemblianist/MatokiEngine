@@ -6,33 +6,71 @@
 #include "core/math.h"
 #include "core/log.h"
 #include "raster/texture.h"
+#include "core/embed.h"
 #include "gfx3d/mesh.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
 
 #define KEY_C 67
+#define KEY_M 77
 #define GRID_X 40
 #define GRID_Z 25
 
 static Mesh*    g_cube;
 static Mesh*    g_ground;
 static Mesh*    g_sphere;
-static Texture  g_tex[3];      /* 0: zemin damalı, 1: küp, 2: beyaz */
+static Texture  g_tex[3];      /* 0: zemin damalı (mip zincirli), 1: küp, 2: beyaz */
+static Texture  g_tex_ground_nomip;   /* aynı pikseller, MIPMAP bayrağı yok (C referans yolu için) */
+static ManagedShader g_lit_nomip;     /* lit3d.mtk'nin @mipmap'siz varyantı (JIT yolu için) */
+static b32      g_mipmap_on;
+static u8       g_prev_m;
 static Camera   g_cam;
 static G3dStats g_last_stats;
 static u8       g_prev_c;
 
 static const f32 k_sky[3] = { 0.55f, 0.70f, 0.90f };
 
-void scene3d_init(Arena* perm, Framebuffer* fb) {
+/* lit3d.mtk kaynağından " @mipmap" niteliğini çıkarıp ayrı varyant derler */
+static void compile_nomip_variant(Arena* scratch) {
+    __builtin_memset(&g_lit_nomip, 0, sizeof(g_lit_nomip));
+    for (u32 i = 0; i < g_embedded_shader_count; i++) {
+        const EmbeddedFile* ef = &g_embedded_shaders[i];
+        const char* n = ef->name;
+        if (!(n[0] == 'l' && n[1] == 'i' && n[2] == 't' && n[3] == '3' && n[4] == 'd' && n[5] == '.')) continue;
+        char* buf = ARENA_PUSH_ARRAY(scratch, char, ef->len + 1u);
+        static const char k_attr[] = " @mipmap";
+        u32 o = 0;
+        for (u32 k = 0; k < ef->len; k++) {
+            u32 m = 0;
+            while (m < sizeof(k_attr) - 1u && k + m < ef->len && ef->src[k + m] == k_attr[m]) m++;
+            if (m == sizeof(k_attr) - 1u) { k += m - 1u; continue; }
+            buf[o++] = ef->src[k];
+        }
+        buf[o] = 0;
+        MtkDiag diag;
+        if (!shaders_compile_one(&g_lit_nomip, "lit3d_nomip", buf, o, ref_shade_lit3d, scratch, &diag)) {
+            LOG("lit3d_nomip derlenemedi:\n%s", diag.text);
+        }
+        return;
+    }
+}
+
+void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
     if (fb->depth == NULL) fb_init_depth(fb, perm);
 
     g_cube   = mesh_cube(perm, 0.5f);
     g_ground = mesh_plane(perm, 240.0f, 24, 60.0f);   /* 4 m'lik hücreler; düzlemi kesen üçgenler */
     g_sphere = mesh_sphere(perm, 1.0f, 32, 16);
 
-    tex_init(&g_tex[0], perm, 64, 64, TEX_FLAG_BILINEAR);
+    tex_init_mipmapped(&g_tex[0], perm, 64, 64, TEX_FLAG_BILINEAR);
     tex_gen_checker(&g_tex[0], 8, FB_RGBA(235, 235, 228, 255), FB_RGBA(70, 82, 96, 255));
+    tex_build_mips(&g_tex[0]);
+    g_tex_ground_nomip        = g_tex[0];
+    g_tex_ground_nomip.flags &= ~TEX_FLAG_MIPMAP;
+    g_tex_ground_nomip.levels = 1u;
+    g_mipmap_on = TRUE;
+    g_prev_m    = 0;
+    compile_nomip_variant(scratch);
     tex_init(&g_tex[1], perm, 32, 32, TEX_FLAG_BILINEAR);
     tex_gen_gradient(&g_tex[1], FB_RGBA(255, 220, 90, 255), FB_RGBA(255, 120, 60, 255),
                      FB_RGBA(90, 200, 255, 255), FB_RGBA(150, 90, 255, 255));
@@ -80,12 +118,18 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
         }
     }
     g_prev_c = c_down;
+    u8 m_down = in->keys[KEY_M];
+    if (m_down && !g_prev_m) {
+        g_mipmap_on = !g_mipmap_on;
+        LOG("Mipmap: %s", g_mipmap_on ? "acik" : "kapali");
+    }
+    g_prev_m = m_down;
     camera_update(&g_cam, in, dt, look_enabled);
 
     fb_clear(fb, FB_RGBA((u32)(k_sky[0] * 255.0f), (u32)(k_sky[1] * 255.0f), (u32)(k_sky[2] * 255.0f), 255));
     fb_clear_depth(fb, 0.0f);
 
-    const ManagedShader* sh = shaders_find(sm, "lit3d.mtk");
+    const ManagedShader* sh = (g_mipmap_on || !g_lit_nomip.ok) ? shaders_find(sm, "lit3d.mtk") : &g_lit_nomip;
     b32 fused = FALSE;
     ShadeFn fn = shaders_get_fn(sh, use_jit, BLEND_NONE, &fused);
 
@@ -132,7 +176,7 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
         }
     }
 
-    mat.textures = &g_tex[0];
+    mat.textures = g_mipmap_on ? &g_tex[0] : &g_tex_ground_nomip;
     mat.uniforms = make_uniforms(frame, light, vec4(1, 1, 1, 1));
     m = mat4_identity();
     g3d_draw(&ctx, g_ground, &m, &mat);
@@ -153,8 +197,8 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
     i32 y = (i32)fb->h - 22;
     ui_draw_rect(ui, 0, y - 2, (i32)fb->w, 24, FB_RGBA(15, 18, 26, 190));
     ui_draw_text(ui, 4, y, line, FB_RGBA(225, 235, 248, 255), 1);
-    fmt_format(line, sizeof(line), "[C] %s | WASD/QE + surukle, Shift hizli, teker hiz/zoom | (%.1f, %.1f, %.1f)",
-               g_cam.mode == CAM_FLY ? "Ucus" : "Orbit",
+    fmt_format(line, sizeof(line), "[C] %s [M] mip %s | WASD/QE + surukle, Shift hizli | (%.1f, %.1f, %.1f)",
+               g_cam.mode == CAM_FLY ? "Ucus" : "Orbit", g_mipmap_on ? "acik" : "kapali",
                (f64)camera_eye(&g_cam).x, (f64)camera_eye(&g_cam).y, (f64)camera_eye(&g_cam).z);
     ui_draw_text(ui, 4, y + 11, line, FB_RGBA(150, 200, 255, 255), 1);
 }

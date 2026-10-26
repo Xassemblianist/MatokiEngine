@@ -25,11 +25,23 @@ typedef struct Texture {
     u32  w_mask, h_mask;   /* w-1, h-1 */
     u32  log2_w;
     u32  flags;        /* TEX_FLAG_* */
-    u32  _pad;
+    u32  levels;       /* mip seviye sayısı >= 1 (eski _pad; 0 görülürse 1 kabul edilir) */
 } Texture;
 
 #define TEX_FLAG_CLAMP     1u   /* yoksa wrap */
 #define TEX_FLAG_BILINEAR  2u   /* yoksa en yakın komşu */
+#define TEX_FLAG_MIPMAP    4u   /* sample() seviyeyi quad türevlerinden seçer */
+
+/* MIP ZİNCİRİ YERLEŞİMİ (DECISIONS D-086): tüm seviyeler px'ten başlayarak bitişik.
+ *  w = 2^a, h = 2^b; seviye k (0 <= k < levels): wk = w >> k, hk = h >> k;
+ *  levels <= 1 + min(a, b)  (küçük kenar 1'e inince zincir biter → wk, hk >= 1 ve 2'nin kuvveti)
+ *  base_k = Σ_{i<k} wi*hi = (4wh - (4wh >> 2k)) / 3   (tam bölünür)
+ * MIPMAP SEMANTİĞİ (C referansı ve Matoki birebir — bit-bit):
+ *  dudx = dFdx(u)*w, dvdx = dFdx(v)*h, dudy = dFdy(u)*w, dvdy = dFdy(v)*h   (w,h seviye 0, f32)
+ *    dFdx(a) = a[lane1] - a[lane0], dFdy(a) = a[lane2] - a[lane0] (quad'ın 4 lane'inin hepsine)
+ *  rho2 = max(dudx*dudx + dvdx*dvdx, dudy*dudy + dvdy*dvdy)    (f32.max)
+ *  rho2 >= 1 değilse (NaN dahil) level = 0; aksi level = ((bits(rho2) >> 23) - 127) >> 1
+ *  level = min(level, levels - 1); sonra seçilen seviyede (wk, hk) yukarıdaki en yakın/bilinear kuralı. */
 
 /* ÖRNEKLEME SEMANTİĞİ (C referansı ve Matoki sample() birebir uyar):
  *  En yakın:  tx = trunc_sat(floor(u * w)), ty = trunc_sat(floor(v * h))
@@ -76,6 +88,7 @@ typedef void (*ShadeFn)(ShadeBatch* batch);   /* wasm tipi: (i32) -> () */
 #define TEX_OFF_H_MASK           16
 #define TEX_OFF_LOG2_W           20
 #define TEX_OFF_FLAGS            24
+#define TEX_OFF_LEVELS           28
 #define TEX_SIZE                 32
 
 #if defined(__wasm32__)
@@ -93,6 +106,7 @@ _Static_assert(__builtin_offsetof(QuadHeader, x) == QUAD_OFF_X, "abi");
 _Static_assert(__builtin_offsetof(QuadHeader, y) == QUAD_OFF_Y, "abi");
 _Static_assert(sizeof(Texture) == TEX_SIZE, "abi");
 _Static_assert(__builtin_offsetof(Texture, flags) == TEX_OFF_FLAGS, "abi");
+_Static_assert(__builtin_offsetof(Texture, levels) == TEX_OFF_LEVELS, "abi");
 #endif
 
 #endif

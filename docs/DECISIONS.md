@@ -241,7 +241,7 @@ Kapsam çok büyüktü (glTF, şehir, gölge…). 3D yine hedef ama **temel** od
 
 ---
 
-## I. 3D boru hattı (M8_A)
+## I. 3D boru hattı (M8_A, M8_B)
 
 ### D-080 — Reverse-Z + sonsuz uzak düzlem, `DEPTH_GREATER`, temizleme 0
 **KABUL** · 2026-10-27 · M8_A
@@ -274,6 +274,22 @@ Hata: derinlik test anında okunuyor ama batch (≤256 quad) boşaltılınca yaz
 test geçen lane'lerin derinliği quad üretilirken yazılır. Discard'lı (alfa testli) shader'lar için
 `raster_set_depth_ex(..., late_write=TRUE)`: derinlik shade sonrası yalnız hayatta kalan lane'lere
 yazılır ve doğruluk için her üçgenden sonra batch boşaltılır (`G3dMaterial.alpha_test`).
+
+### D-086 — Mip zinciri: bitişik, küçük kenarda biter, kapalı form taban ofseti
+**KABUL** · 2026-10-27 · M8_B
+`Texture._pad` → `levels` (ABI boyutu/ofsetleri değişmedi, `TEX_OFF_LEVELS = 28`), `TEX_FLAG_MIPMAP = 4`.
+Seviyeler `px`'ten bitişik; `levels <= 1 + min(log2 w, log2 h)`. Bu sınır sayesinde seviye k tabanı
+`(4wh - (4wh >> 2k)) / 3` kapalı formuyla (3'ün mod 2^32 tersiyle çarpma) IR'da döngüsüz hesaplanır.
+Bedeli: kare olmayan dokularda en küçük birkaç seviye yok (256×16 → 5 seviye, 9 değil).
+
+### D-087 — Türevler kaba (coarse), seviye seçimi tamsayı, yardımcı lane'ler çalışır
+**KABUL** · M8_B
+`IR_DERIV_X/Y` (enum sonuna eklendi) = `a[lane1|lane2] - a[lane0]`, 2 shuffle + 1 sub. Mip seviyesi
+`rho2`'nin f32 üs bitlerinden (`>> 23`, `-127`, `>> 1`); `rho2 >= 1` değilse (NaN dahil) 0 →
+C referansı ile bit-bit. Türev içeren shader'larda varying `if` atlaması kapsama maskesine değil 4 lane'e
+göre yapılır (codegen: `loc_active` başta tüm-1; ir_eval aynısı). Aksi halde atlanan bölgelerden
+kapsanmayan lane'lere çöp değer girer ve türev bunu kapsanan lane'lere taşır — diferansiyel test bunu
+yakaladı (opt öncesi/sonrası farklı sonuç).
 
 ### D-085 — Raster çözünürlük sınırı (bilgi)
 **ÖNERİ** · M8_A

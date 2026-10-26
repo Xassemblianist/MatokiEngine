@@ -491,7 +491,7 @@ static AstDecl* parse_uniform_decl(Parser* p) {
     }
     d->type = parse_type_name(p, &d->type_line, &d->type_col);
 
-    /* Opsiyonel @bilinear, @clamp, @nearest, @wrap nitelikleri */
+    /* Opsiyonel @bilinear, @clamp, @nearest, @wrap, @mipmap nitelikleri */
     while (parser_match(p, TOK_AT)) {
         Token attr_tok = p->cur;
         if (!parser_consume(p, TOK_IDENT, "'@' sonrasinda nitelik ismi bekleniyordu")) {
@@ -509,6 +509,8 @@ static AstDecl* parse_uniform_decl(Parser* p) {
             d->as.uniform_decl.tex_flags &= ~TEX_FLAG_BILINEAR;
         } else if (str_eq(attr, "wrap")) {
             d->as.uniform_decl.tex_flags &= ~TEX_FLAG_CLAMP;
+        } else if (str_eq(attr, "mipmap")) {
+            d->as.uniform_decl.tex_flags |= TEX_FLAG_MIPMAP;
         } else {
             parser_error_at(p, &attr_tok, "bilinmeyen ornekleme niteligi '@%s'", attr);
         }
