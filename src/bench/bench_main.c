@@ -146,7 +146,7 @@ static b32 init_kernels_and_data(void) {
     g_kctx.tex.h_mask = BENCH_TEX_DIM - 1u;
     g_kctx.tex.log2_w = 6u;
     g_kctx.tex.flags  = TEX_FLAG_BILINEAR;
-    g_kctx.tex._pad   = 0u;
+    g_kctx.tex.levels = 1u;
 
     /* 3 kenar fonksiyonu katsayıları (8x8 bloğu kısmen kesen üçgen) */
     g_kctx.edge_coeffs[0] =  12; g_kctx.edge_coeffs[1] = -7;  g_kctx.edge_coeffs[2] = -140;

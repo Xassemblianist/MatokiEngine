@@ -81,7 +81,8 @@ static b32 ed_is_builtin_ident(const char* s, u32 len) {
     static const char* const k_builtins[] = {
         "abs", "min", "max", "clamp", "mix", "step", "smoothstep",
         "floor", "fract", "sqrt", "rsqrt", "dot", "cross", "length",
-        "normalize", "sin", "cos", "pow", "exp2", "log2", "sample", "frag"
+        "normalize", "sin", "cos", "pow", "exp2", "log2", "sample", "frag",
+        "sample_level", "dFdx", "dFdy", "fwidth", "tex_size"
     };
     for (u32 i = 0; i < ARRAY_LEN(k_builtins); i++) {
         if (ed_str_eq_len(s, len, k_builtins[i])) return TRUE;

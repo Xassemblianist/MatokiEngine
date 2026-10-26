@@ -27,7 +27,50 @@ void tex_init(Texture* tex, Arena* arena, u32 w, u32 h, u32 flags) {
     tex->h_mask = h - 1u;
     tex->log2_w = u32_log2_pow2(w);
     tex->flags  = flags;
-    tex->_pad   = 0;
+    tex->levels = 1;
+}
+
+u32 tex_mip_offset(const Texture* tex, u32 level) {
+    u32 wh4 = (tex->w * tex->h) << 2;
+    return (wh4 - (wh4 >> (2u * level))) * 0xAAAAAAABu;   /* Σ_{i<level} wi*hi = (4wh - 4wh/4^level) / 3 */
+}
+
+void tex_init_mipmapped(Texture* tex, Arena* arena, u32 w, u32 h, u32 flags) {
+    ASSERT(tex != NULL && arena != NULL);
+    ASSERT(IS_POW2(w) && IS_POW2(h));
+    u32 lw = u32_log2_pow2(w), lh = u32_log2_pow2(h);
+    u32 levels = 1u + (lw < lh ? lw : lh);
+    tex->w      = w;
+    tex->h      = h;
+    tex->w_mask = w - 1u;
+    tex->h_mask = h - 1u;
+    tex->log2_w = lw;
+    tex->flags  = flags | TEX_FLAG_MIPMAP;
+    tex->levels = levels;
+    tex->px     = (u32*)arena_push(arena, (usize)tex_mip_offset(tex, levels) * sizeof(u32), 16);
+}
+
+void tex_build_mips(Texture* tex) {
+    ASSERT(tex != NULL && tex->px != NULL);
+    for (u32 k = 1; k < tex->levels; k++) {
+        const u32* src = tex->px + tex_mip_offset(tex, k - 1u);
+        u32*       dst = tex->px + tex_mip_offset(tex, k);
+        u32 sw = tex->w >> (k - 1u);
+        u32 dw = tex->w >> k, dh = tex->h >> k;
+        for (u32 y = 0; y < dh; y++) {
+            for (u32 x = 0; x < dw; x++) {
+                const u32* s0 = src + (2u * y) * sw + 2u * x;
+                const u32* s1 = s0 + sw;
+                u32 out = 0;
+                for (u32 c = 0; c < 32; c += 8) {
+                    u32 sum = ((s0[0] >> c) & 0xFFu) + ((s0[1] >> c) & 0xFFu) +
+                              ((s1[0] >> c) & 0xFFu) + ((s1[1] >> c) & 0xFFu) + 2u;
+                    out |= (sum >> 2) << c;
+                }
+                dst[y * dw + x] = out;
+            }
+        }
+    }
 }
 
 Texture tex_create(Arena* arena, u32 w, u32 h, u32 flags) {

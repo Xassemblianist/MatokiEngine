@@ -17,8 +17,15 @@ typedef struct {
     _Alignas(16) Vec4 tint;
 } RefSpriteUniforms;
 
-/* shade_abi.h örnekleme semantiğinin birebir C referansı */
+/* shade_abi.h örnekleme semantiğinin birebir C referansı (seviye 0; MIPMAP bayrağı yok sayılır) */
 void ref_sample_tex(const Texture* tex, f32 u, f32 v, f32 out_rgba[4]);
+
+/* Mip seviyesi: quad'ın 4 lane'indeki u, v'den (shade_abi.h MIPMAP SEMANTİĞİ, Matoki ile bit-bit) */
+i32  ref_tex_mip_level(const Texture* tex, const f32 u[4], const f32 v[4]);
+/* Seviye k'yı ayrı bir Texture görünümü olarak döndürür (level [0, levels-1]'e kırpılır) */
+Texture ref_tex_level_view(const Texture* tex, i32 level);
+/* Açık seviyede örnekleme */
+void ref_sample_tex_level(const Texture* tex, f32 u, f32 v, i32 level, f32 out_rgba[4]);
 
 /* C referans ShadeFn'leri */
 void ref_shade_solid(ShadeBatch* batch);

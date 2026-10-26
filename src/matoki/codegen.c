@@ -80,6 +80,7 @@ typedef struct {
     b32 has_frag_y;
     b32 has_discard;
     b32 has_discard_in_if;
+    b32 has_deriv;           /* DERIV_X/Y var: yardımcı (kapsanmayan) lane'ler de bölgeleri çalıştırır */
     b32 need_qhdr;
     b32 need_active_mask;
     b32 need_q16;
@@ -241,7 +242,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             ctx->has_any_varying = TRUE;
         } else if (op == IR_UNIFORM_F32 || op == IR_UNIFORM_I32) {
             ctx->has_any_uniform = TRUE;
-        } else if (op == IR_TEX_W || op == IR_TEX_H || op == IR_TEX_FLAGS) {
+        } else if (op == IR_TEX_W || op == IR_TEX_H || op == IR_TEX_FLAGS || op == IR_TEX_LEVELS) {
             if (in->imm.u < SHADE_MAX_TEXTURES) ctx->used_tex_info[in->imm.u] = TRUE;
             ctx->has_any_tex = TRUE;
         } else if (op == IR_TEXEL_LOAD) {
@@ -254,6 +255,8 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             ctx->has_frag_x = TRUE;
         } else if (op == IR_FRAG_Y) {
             ctx->has_frag_y = TRUE;
+        } else if (op == IR_DERIV_X || op == IR_DERIV_Y) {
+            ctx->has_deriv = TRUE;
         } else if (op == IR_DISCARD) {
             ctx->has_discard = TRUE;
             if (stk_d > 0) ctx->has_discard_in_if = TRUE;
@@ -265,7 +268,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
          * saf uniform komutlar da döngü önünde bir kez hesaplanır. */
         if (!(in->flags & IR_FLAG_VARYING) && in->type != IR_T_VOID) {
             if (is_const_op(op) || op == IR_UNIFORM_F32 || op == IR_UNIFORM_I32 ||
-                op == IR_TEX_W || op == IR_TEX_H || op == IR_TEX_FLAGS) {
+                op == IR_TEX_W || op == IR_TEX_H || op == IR_TEX_FLAGS || op == IR_TEX_LEVELS) {
                 ctx->is_preheader[i] = TRUE;
             } else if ((stk_d == 0 || (in->flags & IR_FLAG_HOISTED)) &&
                        (op != IR_TEXEL_LOAD || stk_d == 0)) {
@@ -1133,6 +1136,33 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
         mb_local_get(mf, ctx->loc_textures);
         mb_i32_load(mf, 2, in->imm.u * TEX_SIZE + TEX_OFF_FLAGS);
         break;
+    case IR_TEX_LEVELS:
+        mb_local_get(mf, ctx->loc_textures);
+        mb_i32_load(mf, 2, in->imm.u * TEX_SIZE + TEX_OFF_LEVELS);
+        break;
+
+    case IR_DERIV_X:
+    case IR_DERIV_Y: {
+        if (!is_var) {
+            mb_f32_const(mf, 0.0f);   /* uniform'un türevi (ir_eval ile aynı) */
+            break;
+        }
+        /* lane yayma: shuffle(v, v, [L L L L]) - shuffle(v, v, [0 0 0 0]) */
+        u8 src = (op == IR_DERIV_X) ? 1u : 2u;
+        u8 lanes_hi[16], lanes_lo[16];
+        for (u8 k = 0; k < 16; k++) {
+            lanes_hi[k] = (u8)(src * 4u + (k & 3u));
+            lanes_lo[k] = (u8)(k & 3u);
+        }
+        emit_push_operand(ctx, in->a, TRUE);
+        mb_local_tee(mf, ctx->loc_tmp_v0);
+        mb_local_get(mf, ctx->loc_tmp_v0);
+        mb_i8x16_shuffle(mf, lanes_hi);
+        mb_local_get(mf, ctx->loc_tmp_v0);
+        mb_local_get(mf, ctx->loc_tmp_v0);
+        mb_i8x16_shuffle(mf, lanes_lo);
+        mb_f32x4_sub(mf);
+    } break;
 
     case IR_TEXEL_LOAD: {
         u32 slot = in->imm.u;
@@ -1758,7 +1788,22 @@ u32 mtk_codegen(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
 
     mb_loop(mf, MB_BLOCK_VOID);
 
-    if (ctx->need_active_mask || opts->fuse_blend != MTK_FUSE_NONE) {
+    if (ctx->has_deriv && ctx->need_active_mask) {
+        /* Türev kullanan shader: kontrol akışı 4 lane'in hepsiyle (yardımcı lane'ler dahil) yürür;
+         * kapsama maskesi yalnızca yazımı (discard / füzyonlu blend) belirler. */
+        if (opts->fuse_blend != MTK_FUSE_NONE) {
+            mb_local_get(mf, ctx->loc_qhdr);
+            mb_i32_load(mf, 2, QUAD_OFF_MASK);
+            mb_i32x4_splat(mf);
+            mb_local_get(mf, ctx->loc_v_mask_bits);
+            mb_v128_and(mf);
+            mb_local_get(mf, ctx->loc_v_mask_bits);
+            mb_i32x4_eq(mf);
+            mb_local_set(mf, ctx->loc_blend_mask);
+        }
+        mb_i32x4_const(mf, -1, -1, -1, -1);
+        mb_local_set(mf, ctx->loc_active);
+    } else if (ctx->need_active_mask || opts->fuse_blend != MTK_FUSE_NONE) {
         mb_local_get(mf, ctx->loc_qhdr);
         mb_i32_load(mf, 2, QUAD_OFF_MASK);
         mb_i32x4_splat(mf);

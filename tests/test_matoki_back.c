@@ -248,7 +248,10 @@ static b32 write_batch_bin(const char* path, const ShadeBatch* b, u32 uniform_by
         fwrite(&tx->w, 4, 1, fp);
         fwrite(&tx->h, 4, 1, fp);
         fwrite(&tx->flags, 4, 1, fp);
-        fwrite(tx->px, sizeof(u32), tx->w * tx->h, fp);
+        fwrite(&tx->levels, 4, 1, fp);
+        u32 texels = 0;
+        for (u32 k = 0; k < (tx->levels ? tx->levels : 1u); k++) texels += (tx->w >> k) * (tx->h >> k);
+        fwrite(tx->px, sizeof(u32), texels, fp);
     }
     if (fb_w > 0 && fb_h > 0 && fb_px) {
         fwrite(&fb_w, 4, 1, fp);
@@ -311,6 +314,7 @@ static void gen_random_ir(IrFunc* f, Rng* rng, u32 prog_idx) {
     i32_vals[n_i32++] = ir_tex_info(f, IR_TEX_W, 0);
     i32_vals[n_i32++] = ir_tex_info(f, IR_TEX_H, 0);
     i32_vals[n_i32++] = ir_tex_info(f, IR_TEX_FLAGS, 0);
+    i32_vals[n_i32++] = ir_tex_info(f, IR_TEX_LEVELS, 1);
 
     bool_vals[n_bool++] = ir_const_bool(f, FALSE);
     bool_vals[n_bool++] = ir_const_bool(f, TRUE);
@@ -330,7 +334,8 @@ static void gen_random_ir(IrFunc* f, Rng* rng, u32 prog_idx) {
             if (n_f32 < ARRAY_LEN(f32_vals)) f32_vals[n_f32++] = ir_op2(f, op, a, b);
         } else if (kind < 40) {
             /* f32 tekli işlem */
-            static const IrOp f1_ops[] = { IR_FNEG, IR_FABS, IR_FSQRT, IR_FFLOOR, IR_FCEIL, IR_FTRUNC, IR_FNEAREST };
+            static const IrOp f1_ops[] = { IR_FNEG, IR_FABS, IR_FSQRT, IR_FFLOOR, IR_FCEIL, IR_FTRUNC, IR_FNEAREST,
+                                           IR_DERIV_X, IR_DERIV_Y };
             IrOp op = f1_ops[rng_range(rng, 0, ARRAY_LEN(f1_ops))];
             u32 a = f32_vals[rng_range(rng, 0, (i32)n_f32)];
             if (n_f32 < ARRAY_LEN(f32_vals)) f32_vals[n_f32++] = ir_op1(f, op, a);
@@ -415,9 +420,15 @@ static void gen_random_ir(IrFunc* f, Rng* rng, u32 prog_idx) {
             u32 slot  = (u32)rng_range(rng, 0, 2);
             u32 u_val = f32_vals[rng_range(rng, 0, (i32)n_f32)];
             u32 v_val = f32_vals[rng_range(rng, 0, (i32)n_f32)];
-            u32 flags = (u32)rng_range(rng, 0, 4); /* 0..3: wrap/clamp x nearest/bilinear */
+            u32 flags = (u32)rng_range(rng, 0, 8); /* wrap/clamp x nearest/bilinear x mipmap */
             u32 rgba[4];
-            ir_emit_sample(f, slot, u_val, v_val, flags, rgba);
+            if (rng_range(rng, 0, 4) == 0) {
+                /* açık seviye: rastgele i32 (kırpma yolunu da sınar) */
+                u32 lv = i32_vals[rng_range(rng, 0, (i32)n_i32)];
+                ir_emit_sample_level(f, slot, u_val, v_val, lv, flags, rgba);
+            } else {
+                ir_emit_sample(f, slot, u_val, v_val, flags, rgba);
+            }
             for (u32 c = 0; c < 4 && n_f32 < ARRAY_LEN(f32_vals); c++) {
                 f32_vals[n_f32++] = rgba[c];
             }
@@ -515,9 +526,10 @@ TEST(matoki_differential_500) {
         memcpy(uniforms + 8,  &u_i0, 4);
         memcpy(uniforms + 12, &u_i1, 4);
 
-        u32 tex0_px[4 * 4], tex1_px[8 * 8];
-        for (u32 i = 0; i < 16; i++) tex0_px[i] = rng_u32(&rng);
-        for (u32 i = 0; i < 64; i++) tex1_px[i] = rng_u32(&rng);
+        /* mip zincirleri: 4x4 (16+4+1) ve 8x8 (64+16+4+1) */
+        u32 tex0_px[21], tex1_px[85];
+        for (u32 i = 0; i < 21; i++) tex0_px[i] = rng_u32(&rng);
+        for (u32 i = 0; i < 85; i++) tex1_px[i] = rng_u32(&rng);
 
         u32 fb_init[DIFF_FB_PIXELS];
         for (u32 i = 0; i < DIFF_FB_PIXELS; i++) {
@@ -530,10 +542,12 @@ TEST(matoki_differential_500) {
         textures[0].px = tex0_px; textures[0].w = 4; textures[0].h = 4;
         textures[0].w_mask = 3; textures[0].h_mask = 3; textures[0].log2_w = 2;
         textures[0].flags = (u32)rng_range(&rng, 0, 4);
+        textures[0].levels = (u32)rng_range(&rng, 0, 4);   /* 0 → 1 kabul edilir */
 
         textures[1].px = tex1_px; textures[1].w = 8; textures[1].h = 8;
         textures[1].w_mask = 7; textures[1].h_mask = 7; textures[1].log2_w = 3;
         textures[1].flags = (u32)rng_range(&rng, 0, 4);
+        textures[1].levels = (u32)rng_range(&rng, 1, 5);
 
         ShadeBatch batch_u = {0};
         batch_u.count         = qcount;

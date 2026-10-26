@@ -14,7 +14,8 @@
  *   - varyings : varying_count * count * 16 byte (f32x4 SoA)
  *   - uniforms : uniform_bytes byte
  *   - her doku (0..tex_count-1) için:
- *       u32 w, u32 h, u32 flags, ardından w * h * 4 byte RGBA8 piksel verisi.
+ *       u32 w, u32 h, u32 flags, u32 levels, ardından mip zincirinin tamamı
+ *       (Σ_{k<levels} (w>>k)*(h>>k)) * 4 byte RGBA8 piksel verisi (shade_abi.h yerleşimi).
  *
  * Çıktı ikili formatı (little-endian):
  *   - out_rgba : 4 * count * 16 byte (f32x4 SoA, 4 kanal)
@@ -89,7 +90,10 @@ function runOne(wasmPath, inPath, outPath) {
         const w = inView.getUint32(pos, true); pos += 4;
         const h = inView.getUint32(pos, true); pos += 4;
         const flags = inView.getUint32(pos, true); pos += 4;
-        const pxBytes = w * h * 4;
+        const levels = inView.getUint32(pos, true); pos += 4;
+        let texels = 0;
+        for (let k = 0; k < Math.max(levels, 1); k++) texels += (w >>> k) * (h >>> k);
+        const pxBytes = texels * 4;
         const pxPtr = alignUp(heapPtr, 16);
         heapPtr = pxPtr + pxBytes;
         memU8.set(new Uint8Array(inBuf.buffer, inBuf.byteOffset + pos, pxBytes), pxPtr);
@@ -103,7 +107,7 @@ function runOne(wasmPath, inPath, outPath) {
         memView.setUint32(tOff + 16, h - 1, true);      /* h_mask */
         memView.setUint32(tOff + 20, Math.clz32(1) - Math.clz32(w), true); /* log2_w */
         memView.setUint32(tOff + 24, flags, true);      /* flags */
-        memView.setUint32(tOff + 28, 0, true);          /* _pad */
+        memView.setUint32(tOff + 28, levels, true);     /* levels */
     }
 
     /* İsteğe bağlı framebuffer (Blend Fusion testi için): u32 fb_w, u32 fb_h, ardından fb_w * fb_h * 4 byte */

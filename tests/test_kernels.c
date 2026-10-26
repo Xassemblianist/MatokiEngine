@@ -68,7 +68,7 @@ TEST(kernels_c_host_correctness) {
     tex.w_mask = 1; tex.h_mask = 1;
     tex.log2_w = 1;
     tex.flags = TEX_FLAG_BILINEAR;
-    tex._pad = 0;
+    tex.levels = 1;
     f32 u_arr[4] = { 0.25f, 0.75f, 0.25f, 0.75f };
     f32 v_arr[4] = { 0.25f, 0.25f, 0.75f, 0.75f };
     f32 out_rgba[16];

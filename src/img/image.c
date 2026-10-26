@@ -25,7 +25,7 @@ void img_tex_init(Texture* tex, Arena* arena, u32 w, u32 h, u32 flags) {
     tex->h_mask = h - 1u;
     tex->log2_w = u32_log2(w);
     tex->flags  = flags;
-    tex->_pad   = 0u;
+    tex->levels = 1u;
 }
 
 static inline u8 clamp_u8(f32 v) {

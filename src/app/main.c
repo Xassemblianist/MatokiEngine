@@ -271,11 +271,11 @@ EXPORT(engine_init) void engine_init(u32 seed) {
 
     ui_init(&g_ui, &g_fb);
     init_procedural_textures();
-    scene3d_init(&g_perm_arena, &g_fb);
 
     /* Gömülü tüm Matoki shader'larını ve WAT çekirdeklerini derle ve JIT'e yükle */
     shaders_init(&g_shaders, &g_frame_arena);
     init_wat_raster_kernels();
+    scene3d_init(&g_perm_arena, &g_frame_arena, &g_fb);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
     const char* default_ed_src =

@@ -166,6 +166,7 @@ static void remap_inst_operands(const IrFunc* f, IrInst* in, const u32* remap) {
     case IR_TEX_W:
     case IR_TEX_H:
     case IR_TEX_FLAGS:
+    case IR_TEX_LEVELS:
     case IR_ELSE:
     case IR_IF_END:
     case IR_NOP:
@@ -674,6 +675,12 @@ void ir_opt_constfold(IrFunc* f) {
             else if (ia->op == IR_BITCAST_F2I) remap[i] = ia->a;
             break;
 
+        case IR_DERIV_X:
+        case IR_DERIV_Y:
+            /* uniform (sadeleşmeyle uniform'a düşmüş olabilir) değerin türevi 0 */
+            if (!(ia->flags & IR_FLAG_VARYING)) make_const_f32(in, 0.0f);
+            break;
+
         case IR_DISCARD:
             if (ca_b && !ia->imm.i) {
                 /* discard(false) etkisizdir */
@@ -747,6 +754,7 @@ static b32 insts_equal(const IrInst* x, const IrInst* y) {
     case IR_TEX_W:
     case IR_TEX_H:
     case IR_TEX_FLAGS:
+    case IR_TEX_LEVELS:
         return x->imm.u == y->imm.u;
     case IR_FRAG_X:
     case IR_FRAG_Y:

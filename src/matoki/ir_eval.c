@@ -182,6 +182,11 @@ void ir_eval_ex(const IrFunc* f, ShadeBatch* batch, u32 fuse_blend) {
     EvalVal vals[EVAL_STACK_CAP];
     __builtin_memset(vals, 0, sizeof(EvalVal) * f->count);
 
+    b32 has_deriv = FALSE;
+    for (u32 i = 0; i < f->count; i++) {
+        if (f->insts[i].op == IR_DERIV_X || f->insts[i].op == IR_DERIV_Y) has_deriv = TRUE;
+    }
+
     u32 count = batch->count;
     for (u32 q = 0; q < count; q++) {
         __builtin_memset(vals, 0, sizeof(EvalVal) * f->count);
@@ -208,6 +213,7 @@ void ir_eval_ex(const IrFunc* f, ShadeBatch* batch, u32 fuse_blend) {
          * v_mask:   varying kontrol akışı için aktif lane maskesi (başta quad.mask & 0xF) */
         b32 u_active = TRUE;
         u32 v_mask   = batch->quads ? (batch->quads[q].mask & 0xFu) : 0xFu;
+        if (has_deriv) v_mask = 0xFu;   /* yardımcı lane'ler de kontrol akışına katılır (codegen ile aynı) */
 
         for (u32 pc = 0; pc < f->count; pc++) {
             const IrInst* in = &f->insts[pc];
@@ -461,6 +467,17 @@ void ir_eval_ex(const IrFunc* f, ShadeBatch* batch, u32 fuse_blend) {
             case IR_TEX_FLAGS: {
                 i32 fl = batch->textures ? (i32)batch->textures[in->imm.u].flags : 0;
                 for (u32 l = 0; l < 4; l++) r.i[l] = fl;
+            } break;
+            case IR_TEX_LEVELS: {
+                i32 lv = batch->textures ? (i32)batch->textures[in->imm.u].levels : 0;
+                for (u32 l = 0; l < 4; l++) r.i[l] = lv;
+            } break;
+            case IR_DERIV_X:
+            case IR_DERIV_Y: {
+                /* kaba türev: lane1 (x) veya lane2 (y) eksi lane0; uniform → 0 (codegen ile aynı) */
+                u32 o = (op == IR_DERIV_X) ? 1u : 2u;
+                f32 d = (in->flags & IR_FLAG_VARYING) ? wasm_fsub(va->f[o], va->f[0]) : 0.0f;
+                for (u32 l = 0; l < 4; l++) r.f[l] = d;
             } break;
             case IR_TEXEL_LOAD: {
                 const Texture* tex = &batch->textures[in->imm.u];

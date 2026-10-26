@@ -67,9 +67,37 @@ fn frag() -> rgba {
 ## 7. Yerleşik fonksiyonlar
 
 `abs min max clamp mix step smoothstep floor fract sqrt rsqrt dot cross length normalize
- sin cos (polinom, inline) pow exp2 log2 sample(tex, uv)`
+ sin cos (polinom, inline) pow exp2 log2 sample(tex, uv) sample_level(tex, uv, level) tex_size(tex)
+ dFdx dFdy fwidth`
 
-`sample`: örnekleyici davranışı `texture2d` uniform bildirimindeki `@bilinear` ve `@clamp` nitelikleriyle derleme zamanında seçilir (varsayılan: en yakın komşu + wrap). v2'de quad türevleriyle mipmap.
+`sample`: örnekleyici davranışı `texture2d` uniform bildirimindeki `@bilinear`, `@clamp` ve `@mipmap`
+nitelikleriyle derleme zamanında seçilir (varsayılan: en yakın komşu + wrap, mip yok).
+
+### 7.1 Türevler (v1)
+`dFdx(x)`, `dFdy(x)`: **kaba (coarse)** quad türevi — 2×2 quad'ın 4 lane'inin hepsine
+`x[lane1] - x[lane0]` (dFdx) ve `x[lane2] - x[lane0]` (dFdy). `fwidth(x) = abs(dFdx(x)) + abs(dFdy(x))`.
+f32 ve vec2/3/4 için bileşen bazında. Uniform argümanda sonuç 0.
+
+Yardımcı lane'ler: türev kullanan bir shader'da, üçgenin kapsamadığı lane'ler de ("yardımcı lane")
+hesaplamaya katılır — varying `if` bölgeleri kapsama maskesine göre değil 4 lane'e göre atlanır,
+rasterizer da kapsanmayan lane'lerin varying'lerini düzlem denkleminden doldurur. Böylece türevler her
+zaman tanımlı ve deterministiktir. `discard` yalnızca yazımı etkiler.
+
+```matoki
+// uzaklığa göre kenarı yumuşayan ızgara çizgisi
+let g = abs(fract(uv * 16.0) - vec2(0.5, 0.5));
+let w = fwidth(uv * 16.0);
+let line = min(g.x / w.x, g.y / w.y);
+```
+
+### 7.2 Mipmap (v1)
+`uniform t: texture2d @mipmap;` → `sample(t, uv)` seviyeyi uv'nin quad türevlerinden seçer:
+`rho² = max(|∂uv/∂x|², |∂uv/∂y|²)` (texel cinsinden), `seviye = floor(log2(rho))` — f32 üs bitlerinden
+tamsayı olarak (karekök/log yok, C referansıyla bit-bit aynı). Trilinear yok (v1: tek seviye).
+Dokunun mip zinciri `tex_init_mipmapped` + `tex_build_mips` ile kurulur; yerleşim `shade_abi.h`'de.
+Zincir küçük kenar 1'e inince biter (256×16 → 5 seviye).
+
+`sample_level(t, uv, level: i32)`: açık seviye; `[0, seviye_sayısı-1]` aralığına kırpılır.
 
 ## 8. Derleyici hattı
 
@@ -91,5 +119,6 @@ kaynak → lexer → parser → AST → sema (tip + uniform/varying analizi)
 
 ## 10. v0'da OLMAYANLAR (bilinçli)
 
-Struct, dizi, pointer, özyineleme, vertex shader (vertex dönüşümü v0'da C'de), compute kernel'leri.
+Struct, dizi, pointer, özyineleme, vertex shader (vertex dönüşümü v0'da C'de), compute kernel'leri,
+trilinear filtreleme, ince (fine) türevler.
 Bunlar v1+ için `DECISIONS.md`'de tartışılır.

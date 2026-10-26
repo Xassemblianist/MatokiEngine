@@ -81,6 +81,63 @@ void ref_sample_tex(const Texture* tex, f32 u, f32 v, f32 out_rgba[4]) {
     }
 }
 
+static inline u32 ref_f32_bits(f32 x) {
+    u32 u;
+    __builtin_memcpy(&u, &x, 4);
+    return u;
+}
+
+/* wasm f32.max: NaN yayılır */
+static inline f32 ref_wasm_fmax(f32 a, f32 b) {
+    if (a != a || b != b) return a + b;
+    return a > b ? a : b;
+}
+
+static inline i32 ref_clamp_level(const Texture* tex, i32 level) {
+    i32 levels = (tex->levels > 1u) ? (i32)tex->levels : 1;
+    if (level > levels - 1) level = levels - 1;
+    if (level < 0) level = 0;
+    return level;
+}
+
+i32 ref_tex_mip_level(const Texture* tex, const f32 u[4], const f32 v[4]) {
+    f32 wf = (f32)(i32)tex->w;
+    f32 hf = (f32)(i32)tex->h;
+    f32 dudx = (u[1] - u[0]) * wf;
+    f32 dvdx = (v[1] - v[0]) * hf;
+    f32 dudy = (u[2] - u[0]) * wf;
+    f32 dvdy = (v[2] - v[0]) * hf;
+    f32 px2  = dudx * dudx + dvdx * dvdx;
+    f32 py2  = dudy * dudy + dvdy * dvdy;
+    f32 rho2 = ref_wasm_fmax(px2, py2);
+    i32 level = 0;
+    if (rho2 >= 1.0f) {
+        i32 e = (i32)(ref_f32_bits(rho2) >> 23) - 127;
+        level = e >> 1;
+    }
+    return ref_clamp_level(tex, level);
+}
+
+Texture ref_tex_level_view(const Texture* tex, i32 level) {
+    level = ref_clamp_level(tex, level);
+    u32 wh4  = (tex->w * tex->h) << 2;
+    u32 base = (wh4 - (wh4 >> (2u * (u32)level))) * 0xAAAAAAABu;   /* / 3 (tam bölünür) */
+    Texture t = *tex;
+    t.px     = tex->px + base;
+    t.w      = tex->w >> level;
+    t.h      = tex->h >> level;
+    t.w_mask = t.w - 1u;
+    t.h_mask = t.h - 1u;
+    t.log2_w = tex->log2_w - (u32)level;
+    t.levels = 1u;
+    return t;
+}
+
+void ref_sample_tex_level(const Texture* tex, f32 u, f32 v, i32 level, f32 out_rgba[4]) {
+    Texture t = ref_tex_level_view(tex, level);
+    ref_sample_tex(&t, u, v, out_rgba);
+}
+
 void ref_shade_solid(ShadeBatch* batch) {
     u32 count = batch->count;
     if (count == 0) return;

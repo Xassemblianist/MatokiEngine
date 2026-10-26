@@ -123,7 +123,18 @@ u32 ir_op1(IrFunc* f, IrOp op, u32 a) {
     IrType exp_in = IR_T_VOID;
     IrType res_t  = IR_T_VOID;
 
+    if (op == IR_DERIV_X || op == IR_DERIV_Y) {
+        if (ia->type != IR_T_F32) {
+            PANIC("ir_op1: deriv operand must be F32, got %u", (u32)ia->type);
+        }
+        if (!(ia->flags & IR_FLAG_VARYING)) {
+            return ir_const_f32(f, 0.0f);   /* uniform'un türevi 0 */
+        }
+    }
+
     switch (op) {
+    case IR_DERIV_X:
+    case IR_DERIV_Y:
     case IR_FNEG:
     case IR_FABS:
     case IR_FSQRT:
@@ -262,7 +273,7 @@ u32 ir_select(IrFunc* f, u32 cond, u32 t, u32 e) {
 }
 
 u32 ir_tex_info(IrFunc* f, IrOp op, u32 slot) {
-    if (op != IR_TEX_W && op != IR_TEX_H && op != IR_TEX_FLAGS) {
+    if (op != IR_TEX_W && op != IR_TEX_H && op != IR_TEX_FLAGS && op != IR_TEX_LEVELS) {
         PANIC("ir_tex_info: invalid op %u", (u32)op);
     }
     if (slot >= SHADE_MAX_TEXTURES) {
@@ -371,7 +382,7 @@ void ir_output(IrFunc* f, u32 channel, u32 value) {
 
 /* Yardımcı: tek bir (tx, ty) koordinat çiftini wrap veya clamp ile sarıp texel yükler ve RGBA açar */
 static void ir_unpack_texel(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_m1, u32 h_m1,
-                            u32 zero_i, u32 c255_i, u32 s8_i, u32 s16_i, u32 s24_i,
+                            u32 base, u32 zero_i, u32 c255_i, u32 s8_i, u32 s16_i, u32 s24_i,
                             u32 inv255_f, u32 flags, u32 out_rgba[4]) {
     u32 wx, wy;
     if (flags & TEX_FLAG_CLAMP) {
@@ -382,6 +393,7 @@ static void ir_unpack_texel(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_
         wy = ir_op2(f, IR_IAND, ty, h_m1);
     }
     u32 idx = ir_op2(f, IR_IADD, ir_op2(f, IR_IMUL, wy, w_i), wx);
+    if (base != IR_NONE) idx = ir_op2(f, IR_IADD, base, idx);
     u32 px  = ir_texel_load(f, slot, idx);
 
     u32 r_i = ir_op2(f, IR_IAND, px, c255_i);
@@ -395,9 +407,21 @@ static void ir_unpack_texel(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_
     out_rgba[3] = ir_op2(f, IR_FMUL, ir_op1(f, IR_I2F, a_i), inv255_f);
 }
 
-void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4]) {
+/* Ortak örnekleme gövdesi. level == IR_NONE: seviye 0 (eski yol, komut dizisi değişmedi).
+ * level != IR_NONE: wk = w >> level, hk = h >> level, taban = (4wh - (4wh >> 2*level)) / 3. */
+static void ir_emit_sample_impl(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u32 flags, u32 out_rgba[4]) {
     u32 w_i      = ir_tex_info(f, IR_TEX_W, slot);
     u32 h_i      = ir_tex_info(f, IR_TEX_H, slot);
+    u32 base     = IR_NONE;
+    if (level != IR_NONE) {
+        u32 two_i  = ir_const_i32(f, 2);
+        u32 wh4    = ir_op2(f, IR_ISHL, ir_op2(f, IR_IMUL, w_i, h_i), two_i);
+        u32 tail   = ir_op2(f, IR_ISHR_U, wh4, ir_op2(f, IR_ISHL, level, ir_const_i32(f, 1)));
+        /* 3'e tam bölme = 3'ün mod 2^32 tersiyle çarpma */
+        base = ir_op2(f, IR_IMUL, ir_op2(f, IR_ISUB, wh4, tail), ir_const_i32(f, (i32)0xAAAAAAABu));
+        w_i  = ir_op2(f, IR_ISHR_S, w_i, level);
+        h_i  = ir_op2(f, IR_ISHR_S, h_i, level);
+    }
     u32 w_f      = ir_op1(f, IR_I2F, w_i);
     u32 h_f      = ir_op1(f, IR_I2F, h_i);
     u32 one_i    = ir_const_i32(f, 1);
@@ -415,7 +439,7 @@ void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4
         u32 vf = ir_op1(f, IR_FFLOOR, ir_op2(f, IR_FMUL, v, h_f));
         u32 tx = ir_op1(f, IR_F2I, uf);
         u32 ty = ir_op1(f, IR_F2I, vf);
-        ir_unpack_texel(f, slot, tx, ty, w_i, w_m1, h_m1,
+        ir_unpack_texel(f, slot, tx, ty, w_i, w_m1, h_m1, base,
                         zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, out_rgba);
     } else {
         u32 half_f = ir_const_f32(f, 0.5f);
@@ -432,13 +456,13 @@ void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4
         u32 y1 = ir_op2(f, IR_IADD, y0, one_i);
 
         u32 t00[4], t10[4], t01[4], t11[4];
-        ir_unpack_texel(f, slot, x0, y0, w_i, w_m1, h_m1,
+        ir_unpack_texel(f, slot, x0, y0, w_i, w_m1, h_m1, base,
                         zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t00);
-        ir_unpack_texel(f, slot, x1, y0, w_i, w_m1, h_m1,
+        ir_unpack_texel(f, slot, x1, y0, w_i, w_m1, h_m1, base,
                         zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t10);
-        ir_unpack_texel(f, slot, x0, y1, w_i, w_m1, h_m1,
+        ir_unpack_texel(f, slot, x0, y1, w_i, w_m1, h_m1, base,
                         zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t01);
-        ir_unpack_texel(f, slot, x1, y1, w_i, w_m1, h_m1,
+        ir_unpack_texel(f, slot, x1, y1, w_i, w_m1, h_m1, base,
                         zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t11);
 
         for (u32 c = 0; c < 4; c++) {
@@ -447,6 +471,45 @@ void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4
             out_rgba[c] = ir_op2(f, IR_FADD, top, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, bot, top), ay));
         }
     }
+}
+
+/* Seviyeyi [0, levels-1] aralığına kırpar (levels 0 okunursa 1) */
+static u32 ir_clamp_level(IrFunc* f, u32 slot, u32 level) {
+    u32 one_i  = ir_const_i32(f, 1);
+    u32 levels = ir_op2(f, IR_IMAX_S, ir_tex_info(f, IR_TEX_LEVELS, slot), one_i);
+    u32 lvl    = ir_op2(f, IR_IMIN_S, level, ir_op2(f, IR_ISUB, levels, one_i));
+    return ir_op2(f, IR_IMAX_S, lvl, ir_const_i32(f, 0));
+}
+
+u32 ir_emit_mip_level(IrFunc* f, u32 slot, u32 u, u32 v) {
+    u32 w_f  = ir_op1(f, IR_I2F, ir_tex_info(f, IR_TEX_W, slot));
+    u32 h_f  = ir_op1(f, IR_I2F, ir_tex_info(f, IR_TEX_H, slot));
+    u32 dudx = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_X, u), w_f);
+    u32 dvdx = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_X, v), h_f);
+    u32 dudy = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_Y, u), w_f);
+    u32 dvdy = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_Y, v), h_f);
+    u32 px2  = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, dudx, dudx), ir_op2(f, IR_FMUL, dvdx, dvdx));
+    u32 py2  = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, dudy, dudy), ir_op2(f, IR_FMUL, dvdy, dvdy));
+    u32 rho2 = ir_op2(f, IR_FMAX, px2, py2);
+    u32 bits = ir_op1(f, IR_BITCAST_F2I, rho2);
+    u32 e    = ir_op2(f, IR_ISUB, ir_op2(f, IR_ISHR_U, bits, ir_const_i32(f, 23)), ir_const_i32(f, 127));
+    u32 lvl  = ir_op2(f, IR_ISHR_S, e, ir_const_i32(f, 1));
+    u32 ok   = ir_op2(f, IR_FGE, rho2, ir_const_f32(f, 1.0f));   /* NaN → yanlış → seviye 0 */
+    lvl = ir_select(f, ok, lvl, ir_const_i32(f, 0));
+    return ir_clamp_level(f, slot, lvl);
+}
+
+void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4]) {
+    if (flags & TEX_FLAG_MIPMAP) {
+        u32 level = ir_emit_mip_level(f, slot, u, v);
+        ir_emit_sample_impl(f, slot, u, v, level, flags, out_rgba);
+    } else {
+        ir_emit_sample_impl(f, slot, u, v, IR_NONE, flags, out_rgba);
+    }
+}
+
+void ir_emit_sample_level(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u32 flags, u32 out_rgba[4]) {
+    ir_emit_sample_impl(f, slot, u, v, ir_clamp_level(f, slot, level), flags & ~TEX_FLAG_MIPMAP, out_rgba);
 }
 
 static b32 verify_fail(char* err, u32 err_cap, const char* fmt, ...) {
@@ -630,9 +693,17 @@ b32 ir_verify(const IrFunc* f, char* err, u32 err_cap) {
             exp_var = (f->insts[in->a].flags | f->insts[in->b].flags | f->insts[in->c].flags) & IR_FLAG_VARYING;
             break;
 
+        case IR_DERIV_X:
+        case IR_DERIV_Y:
+            if (!check_operand(f, i, in->a, IR_T_F32, err, err_cap)) return FALSE;
+            exp_t   = IR_T_F32;
+            exp_var = f->insts[in->a].flags & IR_FLAG_VARYING;
+            break;
+
         case IR_TEX_W:
         case IR_TEX_H:
         case IR_TEX_FLAGS:
+        case IR_TEX_LEVELS:
             if (in->imm.u >= SHADE_MAX_TEXTURES) {
                 return verify_fail(err, err_cap, "inst %%%u: texture slot %u out of range", i, in->imm.u);
             }
@@ -780,6 +851,9 @@ static const char* ir_op_name(IrOp op) {
     case IR_TEX_W:       return "tex.w";
     case IR_TEX_H:       return "tex.h";
     case IR_TEX_FLAGS:   return "tex.flags";
+    case IR_TEX_LEVELS:  return "tex.levels";
+    case IR_DERIV_X:     return "dfdx";
+    case IR_DERIV_Y:     return "dfdy";
     case IR_TEXEL_LOAD:  return "texel_load";
     case IR_IF_BEGIN:    return "if";
     case IR_ELSE:        return "else";
@@ -839,6 +913,7 @@ u32 ir_print(const IrFunc* f, char* buf, u32 cap) {
         case IR_TEX_W:
         case IR_TEX_H:
         case IR_TEX_FLAGS:
+        case IR_TEX_LEVELS:
             print_append(buf, cap, &pos, "%%%u = %s%s %u\n", i, name, uv, in->imm.u);
             break;
         case IR_FRAG_X:
@@ -857,6 +932,8 @@ u32 ir_print(const IrFunc* f, char* buf, u32 cap) {
         case IR_I2F:
         case IR_BITCAST_F2I:
         case IR_BITCAST_I2F:
+        case IR_DERIV_X:
+        case IR_DERIV_Y:
             print_append(buf, cap, &pos, "%%%u = %s%s %%%u\n", i, name, uv, in->a);
             break;
         case IR_TEXEL_LOAD:

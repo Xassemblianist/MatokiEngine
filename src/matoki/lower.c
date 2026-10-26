@@ -302,6 +302,15 @@ static LowerVal lower_builtin_call(LowerCtx* ctx, const AstExpr* e, b32* out_han
         return res;
     }
 
+    if (str_eq(name, "sample_level")) {
+        LowerVal tex = lower_expr(ctx, e->as.call.args[0]);
+        LowerVal uv  = lower_expr(ctx, e->as.call.args[1]);
+        LowerVal lv  = lower_expr(ctx, e->as.call.args[2]);
+        LowerVal res = make_val(MTK_TYPE_VEC4);
+        ir_emit_sample_level(f, tex.tex_slot, uv.id[0], uv.id[1], lv.id[0], tex.tex_flags, res.id);
+        return res;
+    }
+
     if (str_eq(name, "tex_size")) {
         LowerVal tex = lower_expr(ctx, e->as.call.args[0]);
         LowerVal res = make_val(MTK_TYPE_IVEC2);
@@ -332,6 +341,19 @@ static LowerVal lower_builtin_call(LowerCtx* ctx, const AstExpr* e, b32* out_han
     }
     if (str_eq(name, "floor")) {
         for (u32 c = 0; c < res.comps; c++) res.id[c] = ir_op1(f, IR_FFLOOR, a[0].id[c]);
+        return res;
+    }
+    if (str_eq(name, "dFdx") || str_eq(name, "dFdy")) {
+        IrOp dop = str_eq(name, "dFdx") ? IR_DERIV_X : IR_DERIV_Y;
+        for (u32 c = 0; c < res.comps; c++) res.id[c] = ir_op1(f, dop, a[0].id[c]);
+        return res;
+    }
+    if (str_eq(name, "fwidth")) {
+        for (u32 c = 0; c < res.comps; c++) {
+            u32 dx = ir_op1(f, IR_FABS, ir_op1(f, IR_DERIV_X, a[0].id[c]));
+            u32 dy = ir_op1(f, IR_FABS, ir_op1(f, IR_DERIV_Y, a[0].id[c]));
+            res.id[c] = ir_op2(f, IR_FADD, dx, dy);
+        }
         return res;
     }
     if (str_eq(name, "ceil")) {
