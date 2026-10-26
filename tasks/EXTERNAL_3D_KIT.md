@@ -1,3 +1,5 @@
+DURUM: CANCELLED (2026-10-27 — dış ajan yok; yalnızca referans belge, bkz. docs/DECISIONS.md D-072)
+
 # MATOKI 3D-KIT — Bağımsız Geliştirme Görevi (dış ajan için)
 
 > **Bu belge tek başına yeterlidir.** Ana projeye (MATOKI) erişimin yok ve olmayacak.

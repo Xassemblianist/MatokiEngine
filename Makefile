@@ -3,6 +3,8 @@
 #  make host   -> build/host/test_runner (native)
 #  make test   -> native testler + wasm-validate
 #  make serve  -> tools/serve.py
+#  make check  -> test + kural denetimi (src/ altında libc include yok)
+#  make status -> görev durum tablosu (tasks/*.md DURUM satırları)
 #
 # Kurallar:
 #  - src/**/*.c otomatik toplanır.
@@ -47,7 +49,7 @@ TOOL_SRC     := $(sort $(wildcard tools/host/tool_*.c))
 TOOL_BINS    := $(TOOL_SRC:tools/host/tool_%.c=build/host/%)
 HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o
 
-.PHONY: all host test serve clean
+.PHONY: all host test serve clean check status
 .SECONDARY:
 
 all: web/engine.wasm
@@ -82,6 +84,17 @@ build/host/%.o: %.c
 test: all host
 	wasm-validate --enable-all build/engine.wasm
 	./build/host/test_runner
+
+# Kural denetimi: src/ altında libc başlığı yasak (derleyici intrinsic başlığı wasm_simd128.h serbest).
+check: test
+	@bad=$$(grep -rn '^[[:space:]]*#[[:space:]]*include[[:space:]]*<' src | grep -v 'wasm_simd128\.h' || true); \
+	if [ -n "$$bad" ]; then echo "HATA: src/ altında libc include:"; echo "$$bad"; exit 1; fi
+	@echo "check: tamam"
+
+status:
+	@for f in $(sort $(wildcard tasks/*.md)); do \
+		printf '%-34s %s\n' "$$(basename $$f .md)" "$$(grep -m1 '^DURUM:' $$f | sed 's/^DURUM: *//')"; \
+	done
 
 serve: all
 	python3 tools/serve.py
