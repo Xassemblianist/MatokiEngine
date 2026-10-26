@@ -329,6 +329,29 @@ karo sınırlarından taşmaz. Batch2D doku değişiminde tüm raster'ı boşalt
 **KABUL** · M7_3
 Kare hızından bağımsız, tekrarlanabilir (coyote time, zıplama tamponu, değişken zıplama yüksekliği).
 
+---
+
+## K. Varlık hattı (M8_C, M8_D)
+
+### D-095 — Vertex aşaması: SoA klip konumu, talep üzerine ClipVert
+**KABUL** · 2026-10-27 · M8_C
+Konum dönüşümü SoA ve wasm'da f32x4 (skalerle bit-bit aynı sıra). 80 baytlık `ClipVert` artık her köşe
+için değil yalnız kırpılan üçgenlerin köşeleri için kurulur. Tamamen görünür nesnede outcode atlanır.
+`g3d_vertex` 1.25 → 0.78 ms. Thread'li ölçümler kareler arasında bekleyerek alınır (art arda çağrı worker'ları aç bırakır).
+
+### D-096 — Kendi JSON / OBJ / glTF ayrıştırıcılarımız
+**KABUL** · M8_D
+JSON: RFC 8259, arena DOM, son anahtar kazanır, derinlik 256, sayılar Clinger hızlı yolu (tam) +
+1e22 parçalı yedek (ölçülen hata: tipik aralıkta ≤1 ULP, ±1e320'de ≤4 ULP). glTF: accessor erişimleri
+u64 ile sınır denetimli; skin/morph/animasyon/sparse/JPEG/uzantılar uyarı (zorunlu uzantı = hata).
+Dokular PNG (kendi çözücümüz) → 2'nin kuvvetine (≤1024) bilinear boyut → mip zinciri.
+Test varlıkları `tests/assets/make_assets.py` ile üretilir (D-063).
+
+### D-097 — Sürükle-bırak: ayrı asset arena + kareler arası yükleme
+**KABUL** · M8_D
+`engine_file_begin/alloc/add/end` export'ları; dosya baytları ve model 48 MB `g_asset_arena`'da
+(her grupta sıfırlanır), geçici bellek kareler arasında frame arena. JS yalnız bayt kopyalar (`web/filedrop.js`).
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -346,3 +369,5 @@ Kare hızından bağımsız, tekrarlanabilir (coyote time, zıplama tamponu, de�
 - **Ö-6** Batch2D'de doku değişimi tüm raster'ı boşaltıyor (`raster_flush`); çok dokulu 2D sahneler
   için doku başına durum (RasterShaderState zaten doku işaretçisi taşıyor) ile boşaltmasız geçiş. — M7_3
 - **Ö-7** Ses render'ını bir worker'a taşımak (ana thread takılmalarına dayanıklılık). — M7_2
+- **Ö-8** JSON sayıları için tam doğru yuvarlama (Eisel-Lemire veya büyük tamsayı yedeği) — şu an ≤4 ULP. — M8_D
+- **Ö-9** glTF: çoklu primitive başına ayrı materyal varyantları, normal haritası/PBR (`pbr.mtk`), KTX/JPEG. — M8_D

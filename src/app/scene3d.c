@@ -7,10 +7,16 @@
 #include "core/log.h"
 #include "raster/texture.h"
 #include "core/embed.h"
+#include "asset/gltf.h"
+#include "asset/obj.h"
+#include "img/png.h"
+#include "img/image.h"
+#include "plat/platform.h"
 #include "gfx3d/mesh.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
 #include "core/profiler.h"
+#include "ui/font.h"
 
 #define KEY_C 67
 #define KEY_M 77
@@ -27,6 +33,20 @@ static b32      g_mipmap_on;
 static u8       g_prev_m;
 static Camera   g_cam;
 static G3dStats g_last_stats;
+
+/* Yüklenen model (sürükle-bırak) */
+typedef struct {
+    Mesh*          mesh;
+    Mat4           world;
+    const Texture* tex;
+    Vec4           color;
+    b32            double_sided;
+} ModelDraw;
+#define MAX_MODEL_DRAWS 512
+static ModelDraw g_model[MAX_MODEL_DRAWS];
+static u32       g_model_count;
+static Mat4      g_model_fit;
+static char      g_model_info[160];
 static u8       g_prev_c;
 
 static const f32 k_sky[3] = { 0.55f, 0.70f, 0.90f };
@@ -179,6 +199,17 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
         }
     }
 
+    /* Sürükle-bırak ile yüklenen model */
+    for (u32 i = 0; i < g_model_count; i++) {
+        const ModelDraw* d = &g_model[i];
+        mat.textures = d->tex;
+        mat.cull     = d->double_sided ? G3D_CULL_NONE : G3D_CULL_BACK;
+        mat.uniforms = make_uniforms(frame, light, d->color);
+        m = mat4_mul(g_model_fit, d->world);
+        g3d_draw(&ctx, d->mesh, &m, &mat);
+    }
+    mat.cull = G3D_CULL_BACK;
+
     mat.textures = g_mipmap_on ? &g_tex[0] : &g_tex_ground_nomip;
     mat.uniforms = make_uniforms(frame, light, vec4(1, 1, 1, 1));
     m = mat4_identity();
@@ -206,4 +237,145 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
                g_cam.mode == CAM_FLY ? "Ucus" : "Orbit", g_mipmap_on ? "acik" : "kapali",
                (f64)camera_eye(&g_cam).x, (f64)camera_eye(&g_cam).y, (f64)camera_eye(&g_cam).z);
     ui_draw_text(ui, 4, y + 11, line, FB_RGBA(150, 200, 255, 255), 1);
+    const char* hint = g_model_info[0] ? g_model_info : ".glb / .gltf / .obj dosyasini pencereye surukle-birak";
+    i32 hw = font_measure_width(hint, 1);
+    ui_draw_rect(ui, (i32)fb->w - hw - 10, 22, hw + 8, 12, FB_RGBA(15, 18, 26, 190));
+    ui_draw_text(ui, (i32)fb->w - hw - 6, 24, hint, FB_RGBA(255, 236, 140, 255), 1);
+}
+
+/* ---------- Model yükleme ---------- */
+
+static b32 name_has_ext(const char* n, const char* ext) {
+    u32 ln = 0, le = 0;
+    while (n[ln]) ln++;
+    while (ext[le]) le++;
+    if (ln < le) return FALSE;
+    for (u32 i = 0; i < le; i++) {
+        char a = n[ln - le + i], b = ext[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != b) return FALSE;
+    }
+    return TRUE;
+}
+
+/* "dizin/ad.png" ile "ad.png" eşleşsin: yalnız son yol bileşeni karşılaştırılır */
+static const char* base_name(const char* s) {
+    const char* b = s;
+    for (const char* p = s; *p; p++) if (*p == '/' || *p == '\\') b = p + 1;
+    return b;
+}
+
+static b32 same_name(const char* a, const char* b) {
+    a = base_name(a);
+    b = base_name(b);
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+typedef struct { const DroppedFile* files; u32 count; } FileSet;
+
+static const u8* resolve_file(void* user, const char* uri, u32* out_len) {
+    const FileSet* fs = (const FileSet*)user;
+    for (u32 i = 0; i < fs->count; i++) {
+        if (same_name(fs->files[i].name, uri)) { *out_len = fs->files[i].len; return fs->files[i].data; }
+    }
+    return NULL;
+}
+
+static b32 png_to_texture(const u8* data, u32 len, Arena* out, Arena* scratch, Texture* t) {
+    u32 w = 0, h = 0;
+    u32* px = png_decode(data, len, &w, &h, scratch);
+    if (!px || !w || !h) return FALSE;
+    u32 nw = 1, nh = 1;
+    while (nw < w && nw < 1024) nw <<= 1;
+    while (nh < h && nh < 1024) nh <<= 1;
+    tex_init_mipmapped(t, out, nw, nh, TEX_FLAG_BILINEAR);
+    if (nw == w && nh == h) { for (u32 i = 0; i < w * h; i++) t->px[i] = px[i]; }
+    else img_resize_bilinear(px, w, h, t->px, nw, nh);
+    tex_build_mips(t);
+    return TRUE;
+}
+
+/* Modeli zemine oturt, en büyük boyutu 4 birime ölçekle, (-6, 0, 2) civarına yerleştir */
+static void fit_model(Vec3 lo, Vec3 hi) {
+    Vec3 ext = vec3_sub(hi, lo);
+    f32 big = m_max(ext.x, m_max(ext.y, ext.z));
+    f32 s = (big > 0.0f) ? 4.0f / big : 1.0f;
+    Vec3 c = vec3((lo.x + hi.x) * 0.5f, lo.y, (lo.z + hi.z) * 0.5f);
+    g_model_fit = mat4_mul(mat4_translate(vec3(-6.0f, 0.0f, 2.0f)),
+                           mat4_mul(mat4_scale(vec3(s, s, s)), mat4_translate(vec3_scale(c, -1.0f))));
+}
+
+b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* scratch) {
+    g_model_count = 0;
+    g_model_info[0] = 0;
+    FileSet fs = { files, count };
+    f64 t0 = plat_time_ms();
+    for (u32 i = 0; i < count; i++) {
+        const DroppedFile* f = &files[i];
+        if (name_has_ext(f->name, ".glb") || name_has_ext(f->name, ".gltf")) {
+            GltfModel gm;
+            if (!gltf_load(f->data, f->len, out, scratch, resolve_file, &fs, &gm)) {
+                fmt_format(g_model_info, sizeof(g_model_info), "%s: HATA %s", base_name(f->name), gm.err);
+                LOG("glTF yuklenemedi: %s", gm.err);
+                return FALSE;
+            }
+            for (u32 k = 0; k < gm.draw_count && g_model_count < MAX_MODEL_DRAWS; k++) {
+                const GltfDraw* gd = &gm.draws[k];
+                ModelDraw* d = &g_model[g_model_count++];
+                d->mesh = gd->mesh;
+                d->world = gd->world;
+                d->tex = &g_tex[2];
+                d->color = vec4(1, 1, 1, 1);
+                d->double_sided = FALSE;
+                if (gd->material >= 0) {
+                    const GltfMaterial* mt = &gm.materials[gd->material];
+                    d->color = mt->base_color;
+                    d->double_sided = mt->double_sided;
+                    if (mt->base_texture >= 0) d->tex = &gm.textures[mt->base_texture];
+                }
+            }
+            fit_model(gm.bounds_min, gm.bounds_max);
+            fmt_format(g_model_info, sizeof(g_model_info), "%s: %u cizim, %u ucgen, %u uyari, %.1f ms",
+                       base_name(f->name), gm.draw_count, gm.triangles, gm.warnings, plat_time_ms() - t0);
+            if (gm.warnings) LOG("glTF uyarilari: %s", gm.warn);
+            LOG("glTF sureleri: JSON %.2f ms, doku (PNG+mip) %.2f ms, mesh %.2f ms", gm.t_json_ms, gm.t_tex_ms, gm.t_mesh_ms);
+            LOG("%s", g_model_info);
+            return TRUE;
+        }
+        if (name_has_ext(f->name, ".obj")) {
+            ObjInfo oi;
+            Mesh* mesh = obj_load((const char*)f->data, f->len, out, scratch, &oi);
+            if (!mesh) {
+                fmt_format(g_model_info, sizeof(g_model_info), "%s: HATA satir %u: %s", base_name(f->name), oi.err_line, oi.err);
+                return FALSE;
+            }
+            ModelDraw* d = &g_model[g_model_count++];
+            d->mesh = mesh;
+            d->world = mat4_identity();
+            d->tex = &g_tex[2];
+            d->color = vec4(1, 1, 1, 1);
+            d->double_sided = FALSE;
+            u32 mlen = 0;
+            const u8* mtl = oi.mtllib[0] ? resolve_file(&fs, oi.mtllib, &mlen) : NULL;
+            if (mtl) {
+                MtlInfo mi;
+                if (mtl_load_first((const char*)mtl, mlen, &mi)) {
+                    d->color = vec4(mi.kd[0], mi.kd[1], mi.kd[2], 1.0f);
+                    u32 plen = 0;
+                    const u8* png = mi.map_kd[0] ? resolve_file(&fs, mi.map_kd, &plen) : NULL;
+                    Texture* t = ARENA_PUSH_STRUCT(out, Texture);
+                    if (png && png_to_texture(png, plen, out, scratch, t)) d->tex = t;
+                }
+            }
+            fit_model(mesh->aabb_min, mesh->aabb_max);
+            fmt_format(g_model_info, sizeof(g_model_info), "%s: %u kose, %u ucgen%s, %.1f ms", base_name(f->name),
+                       mesh->vertex_count, oi.triangles, oi.generated_normals ? " (normal uretildi)" : "",
+                       plat_time_ms() - t0);
+            LOG("%s", g_model_info);
+            return TRUE;
+        }
+    }
+    fmt_format(g_model_info, sizeof(g_model_info), "Model bulunamadi (.glb/.gltf/.obj bekleniyor)");
+    return FALSE;
 }

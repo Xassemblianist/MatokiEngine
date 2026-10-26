@@ -115,6 +115,14 @@ async function init() {
   // Hata ayıklama / benchmark betikleri için (konsoldan engine_* export'larına erişim)
   globalThis.matoki = { exports, memory };
 
+  // Sürükle-bırak model yükleme (opsiyonel)
+  try {
+    const dropMod = await import("./filedrop.js");
+    dropMod.installFileDrop(exports, memory);
+  } catch (_e) {
+    // filedrop.js yoksa devam et
+  }
+
   // Ses (opsiyonel): ilk kullanıcı etkileşiminde AudioWorklet kurulur
   try {
     const audioMod = await import("./audio.js");

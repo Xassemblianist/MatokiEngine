@@ -20,4 +20,14 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
                    const InputState* in, f32 dt, f32 time_sec, b32 use_jit, b32 look_enabled);
 void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb);
 
+/* Sürükle-bırak: bir yükleme grubundaki dosyalar (.glb/.gltf/.obj + .mtl/.png/.bin) */
+typedef struct {
+    const char* name;
+    const u8*   data;
+    u32         len;
+} DroppedFile;
+
+/* Grubu yükler; out: model belleği (bir sonraki yüklemede sıfırlanır), scratch: geçici */
+b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* scratch);
+
 #endif

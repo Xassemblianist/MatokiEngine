@@ -23,6 +23,7 @@
 #include "ui/editor.h"
 #include "app/shaders.h"
 #include "app/scene3d.h"
+#include "asset/json.h"
 #include "gfx3d/pipeline.h"
 #include "app/scene_platformer.h"
 #include "audio/audio.h"
@@ -70,6 +71,7 @@ extern u8 __heap_base;
 
 static Arena         g_perm_arena;
 static Arena         g_frame_arena;
+static Arena         g_asset_arena;    /* sürükle-bırak dosyaları + yüklenen model (her grupta sıfırlanır) */
 static Framebuffer   g_fb;
 static InputState    g_input;
 static Rasterizer    g_raster;
@@ -268,6 +270,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     u8* heap = &__heap_base;
     arena_init(&g_perm_arena, heap, MB(64));
     arena_init(&g_frame_arena, heap + MB(64), MB(128));
+    arena_init(&g_asset_arena, heap + MB(192), MB(48));
 
     fb_init(&g_fb, &g_perm_arena, FB_DEFAULT_W, FB_DEFAULT_H);
     __builtin_memset(&g_input, 0, sizeof(g_input));
@@ -870,6 +873,51 @@ EXPORT(engine_compile_editor_now) f64 engine_compile_editor_now(void) {
     f64 t0 = plat_time_ms();
     compile_editor_shader();
     return plat_time_ms() - t0;
+}
+
+/* ---------- Sürükle-bırak dosya yükleme (web/filedrop.js) ----------
+ * Sıra: engine_file_begin → her dosya için engine_file_alloc(ad) + engine_file_alloc(veri) + engine_file_add
+ * → engine_file_end (modeli yükler, 3D sahnesine geçer). Kareler arasında çağrılır (frame arena geçici bellek). */
+#define MAX_DROP_FILES 32
+static DroppedFile g_drop[MAX_DROP_FILES];
+static u32         g_drop_count;
+
+EXPORT(engine_file_begin) void engine_file_begin(void) {
+    arena_reset(&g_asset_arena);
+    g_drop_count = 0;
+}
+
+EXPORT(engine_file_alloc) u8* engine_file_alloc(u32 len) {
+    return (u8*)arena_push(&g_asset_arena, (usize)len + 1u, 16);
+}
+
+EXPORT(engine_file_add) void engine_file_add(const char* name, u32 name_len, const u8* data, u32 len) {
+    if (g_drop_count >= MAX_DROP_FILES) return;
+    ((char*)name)[name_len] = 0;   /* engine_file_alloc len+1 ayırır */
+    g_drop[g_drop_count].name = name;
+    g_drop[g_drop_count].data = data;
+    g_drop[g_drop_count].len  = len;
+    g_drop_count++;
+}
+
+EXPORT(engine_file_end) b32 engine_file_end(void) {
+    arena_reset(&g_frame_arena);
+    b32 ok = scene3d_load_files(g_drop, g_drop_count, &g_asset_arena, &g_frame_arena);
+    arena_reset(&g_frame_arena);
+    g_scene = SCENE_3D;
+    return ok;
+}
+
+/* Benchmark: verilen metni JSON olarak ayrıştırır (frame arena), süreyi ms döner; hata = -1 */
+EXPORT(engine_bench_json) f64 engine_bench_json(const char* text, u32 len) {
+    arena_reset(&g_frame_arena);
+    JsonValue v;
+    JsonError e;
+    f64 t0 = plat_time_ms();
+    b32 ok = json_parse(text, len, &g_frame_arena, &v, &e);
+    f64 t1 = plat_time_ms();
+    arena_reset(&g_frame_arena);
+    return ok ? t1 - t0 : -1.0;
 }
 
 /* Benchmark betikleri için: 3D vertex aşaması optimizasyon anahtarları (G3D_OPT_*) */
