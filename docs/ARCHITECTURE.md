@@ -19,6 +19,7 @@ web/                      (JS, ~1000 satır sınırı)
  platform.js   wasm yükle, rAF döngüsü, input, framebuffer → canvas
  jit.js        plat_jit_load: byte'ları Module'e çevir, paylaşılan tabloya koy
  worker.js     (Faz 2) raster worker'ları
+ filedrop.js   sürükle-bırak: dosya baytlarını wasm belleğine kopyalar (D-097)
  audio.js      AudioContext + AudioWorklet kurulumu (ilk etkileşimde)
  audio_worklet.js  paylaşılan bellekteki ses halkasını çıkışa kopyalar (D-090)
 
@@ -30,6 +31,7 @@ src/  (C11 → engine.wasm)
  matoki/  lexer, parser, sema, IR, opt, codegen(→mbin), jit köprüsü
  gfx2d/   sprite batch, tilemap + çarpışma, Camera2D, animasyon (M7_1)
  gfx3d/   mesh, kamera, homojen kırpma (guard band), reverse-Z boru hattı (M8_A)
+ asset/   JSON (RFC 8259), base64, OBJ/MTL, glTF 2.0/GLB yükleyicileri — sıfırdan (M8_D)
  audio/   synth (osilatör, ADSR, sıralayıcı) + paylaşılan bellek ses halkası (M7_2)
  img/ ui/ PNG, prosedürel doku, font, immediate-mode UI (M7_0)
  app/     demo uygulamaları, main.c

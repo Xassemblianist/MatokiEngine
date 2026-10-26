@@ -44,6 +44,7 @@ typedef struct {
     Vec3          bounds_min, bounds_max;   /* tüm çizimlerin dünya uzayı AABB'si */
     u32           triangles;
     u32           warnings;
+    f64           t_json_ms, t_tex_ms, t_mesh_ms;   /* ölçüm: JSON, PNG çözme + mip, accessor + mesh */
     char          warn[256];     /* ilk birkaç uyarının özeti */
     char          err[128];
 } GltfModel;

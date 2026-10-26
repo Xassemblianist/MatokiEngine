@@ -9,6 +9,7 @@
 #include "img/image.h"
 #include "raster/texture.h"
 #include "core/log.h"
+#include "plat/platform.h"
 
 typedef struct { const u8* data; u32 len; } GBuf;
 
@@ -362,7 +363,10 @@ b32 gltf_load(const u8* data, u32 len, Arena* out, Arena* scratch,
 
     JsonValue root;
     JsonError je;
-    if (!json_parse(json_text, json_len_b, scratch, &root, &je)) {
+    f64 t0 = plat_time_ms();
+    b32 jok = json_parse(json_text, json_len_b, scratch, &root, &je);
+    model->t_json_ms = plat_time_ms() - t0;
+    if (!jok) {
         g_err(model, "JSON hatasi");
         return FALSE;
     }
@@ -404,7 +408,10 @@ b32 gltf_load(const u8* data, u32 len, Arena* out, Arena* scratch,
     const JsonValue* texs = json_get(&root, "textures");
     model->texture_count = json_len(texs);
     model->textures = ARENA_PUSH_ARRAY(out, Texture, model->texture_count + 1u);
+    t0 = plat_time_ms();
     for (u32 i = 0; i < model->texture_count; i++) load_texture(&g, i, &model->textures[i]);
+    model->t_tex_ms = plat_time_ms() - t0;
+    t0 = plat_time_ms();
 
     const JsonValue* mats = json_get(&root, "materials");
     model->material_count = json_len(mats);
@@ -450,6 +457,7 @@ b32 gltf_load(const u8* data, u32 len, Arena* out, Arena* scratch,
         }
         for (u32 i = 0; i < nc && !model->err[0]; i++) if (!is_child[i]) visit_node(&g, i, mat4_identity(), 0);
     }
+    model->t_mesh_ms = plat_time_ms() - t0;
     if (model->err[0]) return FALSE;
     if (g.draws == 0) { g_err(model, "cizilecek ucgen yok"); return FALSE; }
 
