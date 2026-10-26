@@ -112,6 +112,8 @@ async function init() {
   }
 
   const exports = instance.exports;
+  // Hata ayıklama / benchmark betikleri için (konsoldan engine_* export'larına erişim)
+  globalThis.matoki = { exports, memory };
 
   // B hattı web/threads.js eklediğinde worker'ları opsiyonel olarak başlat
   try {

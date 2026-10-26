@@ -48,8 +48,9 @@ b32                  shaders_compile_one(ManagedShader* out, const char* name,
                                          ShadeFn ref_fallback, Arena* scratch,
                                          MtkDiag* diag);
 
-/* C referans yedek shader'ları (plasma.mtk ve branchy.mtk için) */
+/* C referans yedek shader'ları (plasma.mtk, branchy.mtk, lit3d.mtk için) */
 void ref_shade_plasma(ShadeBatch* batch);
 void ref_shade_branchy(ShadeBatch* batch);
+void ref_shade_lit3d(ShadeBatch* batch);
 
 #endif

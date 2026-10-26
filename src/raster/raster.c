@@ -302,7 +302,7 @@ static void raster_flush_batch(Rasterizer* r, const RasterShaderState* state) {
 #endif
     PROF_END();
 
-    if (state->depth_write && r->fb->depth != NULL) {
+    if (state->depth_write && state->depth_late && r->fb->depth != NULL) {
         raster_commit_depth(r, count);
     }
 
@@ -510,11 +510,21 @@ static inline void emit_quad_scalar(Rasterizer* r, const BinnedTri* tri,
     r->quads[q].y    = qy;
 
     if (has_depth && state->depth_write) {
-        f32* qz = r->quad_z + q * 4u;
-        qz[0] = z_lanes[0];
-        qz[1] = z_lanes[1];
-        qz[2] = z_lanes[2];
-        qz[3] = z_lanes[3];
+        if (state->depth_late) {
+            f32* qz = r->quad_z + q * 4u;
+            qz[0] = z_lanes[0];
+            qz[1] = z_lanes[1];
+            qz[2] = z_lanes[2];
+            qz[3] = z_lanes[3];
+        } else {
+            /* Early-Z yazımı: sonraki üçgenler aynı batch içinde güncel derinliği görür */
+            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
+            f32* d1 = d0 + r->fb->w;
+            if (mask & 1u) d0[0] = z_lanes[0];
+            if (mask & 2u) d0[1] = z_lanes[1];
+            if (mask & 4u) d1[0] = z_lanes[2];
+            if (mask & 8u) d1[1] = z_lanes[3];
+        }
     }
 
     u32 vcount = state->varying_count;
@@ -710,6 +720,7 @@ void raster_begin(Rasterizer* r, Framebuffer* fb, Arena* frame) {
     r->cur_state.depth_test    = FALSE;
     r->cur_state.depth_write   = FALSE;
     r->cur_state.depth_func    = DEPTH_LESS;
+    r->cur_state.depth_late    = FALSE;
 
     r->tiles_x = (fb->w + RASTER_TILE_SIZE - 1u) / RASTER_TILE_SIZE;
     r->tiles_y = (fb->h + RASTER_TILE_SIZE - 1u) / RASTER_TILE_SIZE;
@@ -724,16 +735,22 @@ void raster_set_cull(Rasterizer* r, b32 cull_back) {
     }
 }
 
-void raster_set_depth(Rasterizer* r, b32 test, b32 write, DepthFunc func) {
+void raster_set_depth_ex(Rasterizer* r, b32 test, b32 write, DepthFunc func, b32 late_write) {
     if (r->cur_state.depth_test != test ||
         r->cur_state.depth_write != write ||
-        r->cur_state.depth_func != func) {
+        r->cur_state.depth_func != func ||
+        r->cur_state.depth_late != late_write) {
         raster_process_tri_buf(r);
         r->cur_state.depth_test  = test;
         r->cur_state.depth_write = write;
         r->cur_state.depth_func  = func;
+        r->cur_state.depth_late  = late_write;
         r->pinned_state          = NULL;
     }
+}
+
+void raster_set_depth(Rasterizer* r, b32 test, b32 write, DepthFunc func) {
+    raster_set_depth_ex(r, test, write, func, FALSE);
 }
 
 void raster_set_shader_ex(Rasterizer* r, ShadeFn shade_fn, const void* uniforms,
@@ -803,6 +820,10 @@ static void raster_process_single_tile(Rasterizer* tr, TileBin* bin,
 
             raster_kern_tri_scan(tr, tri, active_state,
                                  tile_x0, tile_y0, tile_x1, tile_y1);
+            /* Geç derinlik yazımı (discard'lı shader): sonraki üçgen güncel derinliği görsün */
+            if (active_state->depth_late && active_state->depth_write && tr->batch_count > 0) {
+                raster_flush_full_batch(tr, active_state);
+            }
         }
     }
 

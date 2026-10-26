@@ -49,6 +49,7 @@ typedef struct RasterShaderState {
     b32            depth_test;
     b32            depth_write;
     DepthFunc      depth_func;
+    b32            depth_late;   /* TRUE: derinlik shade SONRASI yazılır (discard'a saygılı, üçgen başına flush) */
 } RasterShaderState;
 
 typedef struct BinnedTri {
@@ -110,7 +111,11 @@ typedef void (*RasterWatBlendAlphaFn)(u32* dst, const u32* src, u32 count);
 
 void raster_begin(Rasterizer* r, Framebuffer* fb, Arena* frame);
 void raster_set_cull(Rasterizer* r, b32 cull_back);
+/* Derinlik yazımı varsayılan olarak early-Z'dir: test geçen lane'ler quad üretilirken yazılır
+ * (discard edilen lane'ler de yazılır). late_write=TRUE: yazım shade sonrasında, yalnız hayatta kalan
+ * lane'lere; doğruluk için her üçgenden sonra batch boşaltılır (alfa testli materyaller için). */
 void raster_set_depth(Rasterizer* r, b32 test, b32 write, DepthFunc func);
+void raster_set_depth_ex(Rasterizer* r, b32 test, b32 write, DepthFunc func, b32 late_write);
 void raster_set_shader(Rasterizer* r, ShadeFn shade_fn, const void* uniforms,
                        const Texture* textures, u32 varying_count, BlendMode blend);
 void raster_set_shader_ex(Rasterizer* r, ShadeFn shade_fn, const void* uniforms,

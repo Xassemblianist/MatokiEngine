@@ -325,7 +325,20 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
     r->quads[q].y    = qy;
 
     if (has_depth && state->depth_write) {
-        wasm_v128_store(r->quad_z + q * 4u, vz);
+        if (state->depth_late) {
+            wasm_v128_store(r->quad_z + q * 4u, vz);
+        } else {
+            /* Early-Z yazımı: sonraki üçgenler aynı batch içinde güncel derinliği görür */
+            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
+            f32* d1 = d0 + r->fb->w;
+            v128_t old = wasm_v128_load64_zero(d0);
+            old = wasm_v128_load64_lane(d1, old, 1);
+            v128_t lm = wasm_i32x4_ne(wasm_v128_and(wasm_i32x4_splat((i32)mask), wasm_i32x4_make(1, 2, 4, 8)),
+                                      wasm_i32x4_const_splat(0));
+            v128_t nz = wasm_v128_bitselect(vz, old, lm);
+            wasm_v128_store64_lane(d0, nz, 0);
+            wasm_v128_store64_lane(d1, nz, 1);
+        }
     }
 
     u32 vcount = state->varying_count;

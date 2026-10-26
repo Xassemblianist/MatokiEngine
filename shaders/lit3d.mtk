@@ -1,0 +1,20 @@
+// lit3d.mtk — 3D temel aydınlatma: doku * renk, yönlü ışık (Lambert) + ortam, mesafe sisi
+uniform light_dir: vec3;     // dünya uzayında, ışığa doğru, birim
+uniform base:      vec4;     // materyal rengi
+uniform fog:       vec4;     // rgb = sis rengi, a = sis yoğunluğu (1/birim)
+uniform tex:       texture2d @bilinear;
+in uv:    vec2;
+in nrm:   vec3;
+in depth: f32;               // görüş uzayı mesafesi
+
+fn frag() -> rgba {
+    let n = normalize(nrm);
+    let d = max(dot(n, light_dir), 0.0);
+    let c = sample(tex, uv) * base;
+    let l = 0.3 + 0.7 * d;
+    let f = clamp(depth * fog.a, 0.0, 1.0);
+    let r = mix(c.r * l, fog.r, f);
+    let g = mix(c.g * l, fog.g, f);
+    let b = mix(c.b * l, fog.b, f);
+    return vec4(r, g, b, c.a);
+}
