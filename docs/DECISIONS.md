@@ -297,6 +297,38 @@ i32 kenar fonksiyonu ara toplamları 1920×1080'de guard band'siz bile ~2^31'e d
 zararsız ama C'de UB). 1080p hedeflenirse: karo-göreli kenar değerlendirmesi (c'yi karo köşesine göre
 kurmak) önerilir.
 
+---
+
+## J. 2D temeli ve ses (M7_1..M7_3)
+
+### D-090 — Ses: C'de synth, paylaşılan bellekte SPSC halka tampon, AudioWorklet yalnız kopyalar
+**KABUL** · 2026-10-27 · M7_2
+Tüm ses üretimi `src/audio/` (C). `engine_audio_init(sample_rate)` → `AudioRing*`; ana thread her
+karede `audio_pump(0.07 s)` ile halkayı hedef gecikmeye kadar doldurur. Worklet wasm belleğinin
+SharedArrayBuffer'ından doğrudan okur ve `read_pos`'u Atomics ile ilerletir → postMessage/kopya yok.
+JS'te mantık yok (ARCHITECTURE §0.2). AudioContext ilk kullanıcı etkileşiminde başlar (tarayıcı kuralı).
+Bilinen sınır: render ana thread'de; >70 ms'lik kare takılması ses kesintisi yapar (worklet `underruns` sayar).
+
+### D-091 — Synth: polyBLEP kare/testere, 15-bit LFSR gürültü, yumuşak kırpma, deterministik
+**KABUL** · M7_2
+Aynı girdi → örnek-örnek aynı çıktı (test). Karışım rasyonel tanh yaklaşımı + [-1,1] kırpma.
+
+### D-092 — 2D karo çarpışması: eksen ayrık, yarım-karo alt adımlı
+**KABUL** · M7_1
+`tilemap_move` önce x sonra y; adım ≤ 0.45 karo → tek karede 20 karo hızda bile tünelleme yok.
+Tek yönlü platform: yalnız aşağı inerken ve önceki alt kenar karo üstündeyse katı. Rastgele harita
+fuzz testi (10k+ hareket): AABB hiçbir zaman katı karoya girmiyor.
+
+### D-093 — Pixel-art: tamsayı zoom + piksel hizalı kamera + tek atlas
+**KABUL** · M7_3
+Kamera ötelemesi tam piksele yuvarlanır (titreşim ve karo arası aralık olmaz); en yakın komşu örnekleme
+karo sınırlarından taşmaz. Batch2D doku değişiminde tüm raster'ı boşalttığı için sahne başına tek atlas
+(256×256, 16 px) kullanılır; gökyüzü ve paralaks katmanları ayrı (3 doku değişimi/kare).
+
+### D-094 — Oyun fiziği sabit 1/120 s adım
+**KABUL** · M7_3
+Kare hızından bağımsız, tekrarlanabilir (coyote time, zıplama tamponu, değişken zıplama yüksekliği).
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -311,3 +343,6 @@ kurmak) önerilir.
   (c) aynı kareyi CPU+GPU'ya bölmek yerine **cihaza göre arka uç seçimi** (WebGPU yoksa CPU);
   CPU yolu deterministik referans ve yedek olarak kalır. ARCHITECTURE §0.3 gereği karar bu
   dosyadan geçmeden kodlanmaz.
+- **Ö-6** Batch2D'de doku değişimi tüm raster'ı boşaltıyor (`raster_flush`); çok dokulu 2D sahneler
+  için doku başına durum (RasterShaderState zaten doku işaretçisi taşıyor) ile boşaltmasız geçiş. — M7_3
+- **Ö-7** Ses render'ını bir worker'a taşımak (ana thread takılmalarına dayanıklılık). — M7_2

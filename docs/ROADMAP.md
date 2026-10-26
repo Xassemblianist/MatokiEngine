@@ -11,8 +11,8 @@ Her milestone sonunda **çalışan, ölçülmüş** bir şey olmalı.
 | M4 | Matoki v0 | lexer→parser→sema→IR→codegen, `sprite.mtk` JIT'lenir, C referansıyla eşdeğerlik testi |
 | M5 | Hız | SIMD raster, uniform özelleştirme, blend füzyonu, elle WAT vs clang yarışı, benchmark tablosu |
 | M6 | Thread'ler | worker'lar, SAB, karo kuyruğu, JIT modül çoğaltma |
-| M7 | 2D motor | tilemap, kamera, sprite animasyon, ses synth'i → küçük bir 2D oyun |
-| M8 | 3D | derinlik, clipping, perspektif-doğru interpolasyon, mipmap, model yükleme |
+| M7 | 2D motor | tilemap, kamera, sprite animasyon, ses synth'i → küçük bir 2D oyun ✅ (M7_0..M7_3) |
+| M8 | 3D | derinlik, clipping, perspektif-doğru interpolasyon, mipmap ✅ (M8_A, M8_B); model yükleme sırada |
 | M9 | Çatallar | `games/blokca` (voxel), 3D sahne, opsiyonel WebGPU arka ucu |
 
 Görev dosyaları: `tasks/M<milestone>_<sıra>_<isim>.md`
