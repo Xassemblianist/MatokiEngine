@@ -1,0 +1,145 @@
+// web/threads.js — MATOKI Web Worker havuzu başlatıcı ve yöneticisi.
+//
+// E hattı (platform.js) için kullanım arayüzü:
+//   import { startThreads } from "./threads.js";
+//   const pool = await startThreads(n, module, memory, table, { onLog, onPanic, instance });
+//
+// Parametreler:
+//   - n      : İstenen worker sayısı. undefined / null / <= 0 verilirse
+//              Math.min(Math.max((navigator.hardwareConcurrency || 4) - 1, 1), 8) kullanılır.
+//              0 açıkça test/benchmark için tek-thread istendiğinde stopThreads() ile kullanılır.
+//   - module : Derlenmiş WebAssembly.Module (veya ArrayBuffer/Uint8Array wasm baytları).
+//   - memory : Paylaşımlı WebAssembly.Memory ({ initial: 4096, maximum: 16384, shared: true }).
+//   - table  : Ana thread'in WebAssembly.Table nesnesi (boyutu ve mevcut JIT kayıtları okunur;
+//              WebAssembly.Table nesnesi worker'lara kopyalanamadığından jit.js içindeki
+//              JIT kayıt listesi worker'lara gönderilir).
+//   - opts   : Opsiyonel { instance, onLog(text, threadId), onPanic(text, threadId) }.
+
+import { getJitRegistry, registerJitWorker, unregisterJitWorker } from "./jit.js";
+
+let activeWorkers = [];
+let sharedMemory = null;
+
+export async function stopThreads(exportsObj = null) {
+  if (exportsObj && typeof exportsObj.engine_worker_stop === "function") {
+    exportsObj.engine_worker_stop();
+  }
+  for (const w of activeWorkers) {
+    unregisterJitWorker(w);
+    w.terminate();
+  }
+  activeWorkers = [];
+  if (exportsObj && typeof exportsObj.engine_set_worker_count === "function") {
+    exportsObj.engine_set_worker_count(0);
+  }
+  if (exportsObj && typeof exportsObj.engine_reset_ready_workers === "function") {
+    exportsObj.engine_reset_ready_workers();
+  }
+  if (exportsObj && typeof exportsObj.engine_jit_ack_buf === "function" && sharedMemory) {
+    const ackPtr = exportsObj.engine_jit_ack_buf();
+    const view = new Int32Array(sharedMemory.buffer, ackPtr, 1024);
+    view.fill(0);
+  }
+}
+
+export async function startThreads(n, moduleOrBytes, memory, table, opts = {}) {
+  const defaultCount = Math.min(Math.max((navigator.hardwareConcurrency || 4) - 1, 1), 8);
+  const workerCount =
+    typeof n === "number" && !Number.isNaN(n)
+      ? Math.max(0, Math.min(8, Math.floor(n)))
+      : defaultCount;
+
+  const wasmModule =
+    moduleOrBytes instanceof WebAssembly.Module
+      ? moduleOrBytes
+      : await WebAssembly.compile(moduleOrBytes);
+
+  const exportsObj = opts.instance ? opts.instance.exports : opts.exports || null;
+  sharedMemory = memory;
+
+  // Önceki worker'lar varsa temizle
+  await stopThreads(exportsObj);
+
+  if (exportsObj) {
+    if (typeof exportsObj.engine_thread_init === "function") {
+      exportsObj.engine_thread_init(0, 0);
+    }
+    if (typeof exportsObj.engine_set_worker_count === "function") {
+      exportsObj.engine_set_worker_count(workerCount);
+    }
+    if (typeof exportsObj.engine_jit_ack_buf === "function") {
+      const ackPtr = exportsObj.engine_jit_ack_buf();
+      const view = new Int32Array(memory.buffer, ackPtr, 1024);
+      view.fill(0);
+    }
+  }
+
+  if (workerCount === 0) {
+    return { workers: [], count: 0 };
+  }
+
+  const jitEntries = getJitRegistry();
+  const tableSize = table ? table.length : 1;
+
+  const readyPromises = [];
+
+  for (let i = 1; i <= workerCount; i++) {
+    const worker = new Worker(new URL("./worker.js", import.meta.url), {
+      type: "module",
+      name: `matoki-worker-${i}`,
+    });
+
+    activeWorkers.push(worker);
+    registerJitWorker(worker);
+
+    const readyPromise = new Promise((resolve, reject) => {
+      const onMessage = (e) => {
+        const data = e.data;
+        if (!data || typeof data !== "object") return;
+
+        if (data.type === "ready" && data.threadId === i) {
+          resolve(data);
+        } else if (data.type === "error" && data.threadId === i) {
+          reject(new Error(data.message || `Worker ${i} başlatılamadı`));
+        } else if (data.type === "log") {
+          if (typeof opts.onLog === "function") {
+            opts.onLog(data.text, data.threadId);
+          }
+        } else if (data.type === "panic") {
+          if (typeof opts.onPanic === "function") {
+            opts.onPanic(data.text, data.threadId);
+          }
+        }
+      };
+
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", (err) => {
+        reject(new Error(`Worker ${i} script hatası: ${err.message || err}`));
+      });
+    });
+
+    const stackTop =
+      exportsObj && typeof exportsObj.engine_thread_stack_top === "function"
+        ? exportsObj.engine_thread_stack_top(i)
+        : 0;
+
+    worker.postMessage({
+      type: "init",
+      threadId: i,
+      module: wasmModule,
+      memory,
+      tableSize,
+      jitEntries,
+      stackTop,
+    });
+
+    readyPromises.push(readyPromise);
+  }
+
+  await Promise.all(readyPromises);
+
+  return {
+    workers: activeWorkers.slice(),
+    count: workerCount,
+  };
+}

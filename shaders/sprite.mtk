@@ -1,0 +1,12 @@
+// sprite.mtk — Doku örnekleme, alfa eşiği ile discard ve renk tonlama
+uniform tint: vec4;
+uniform tex:  texture2d;
+in uv: vec2;
+
+fn frag() -> rgba {
+    let c = sample(tex, uv);
+    if c.a < 0.01 {
+        discard;
+    }
+    return c * tint;
+}

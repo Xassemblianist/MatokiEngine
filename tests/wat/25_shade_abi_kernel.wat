@@ -1,0 +1,40 @@
+;; 25_shade_abi_kernel.wat — ShadeBatch ABI yerleşimini kullanan tam JIT shader çekirdeği
+(module
+  (import "env" "memory" (memory 4096 16384))
+  (import "env" "__indirect_function_table" (table 1 funcref))
+  (func $shade (export "shade") (param $batch i32)
+    (local $count i32)
+    (local $out_rgba i32)
+    (local $uniforms i32)
+    (local $q i32)
+    (local $stride i32)
+    (local $col_r v128)
+    (local $col_g v128)
+    (local $col_b v128)
+    (local $col_a v128)
+
+    (local.set $count (i32.load offset=0 (local.get $batch)))
+    (local.set $uniforms (i32.load offset=16 (local.get $batch)))
+    (local.set $out_rgba (i32.load offset=20 (local.get $batch)))
+    (local.set $stride (i32.shl (local.get $count) (i32.const 4)))
+
+    (local.set $col_r (f32x4.splat (f32.load offset=0 (local.get $uniforms))))
+    (local.set $col_g (f32x4.splat (f32.load offset=4 (local.get $uniforms))))
+    (local.set $col_b (f32x4.splat (f32.load offset=8 (local.get $uniforms))))
+    (local.set $col_a (v128.const f32x4 1.0 1.0 1.0 1.0))
+
+    (local.set $q (i32.const 0))
+    (block $exit
+      (loop $quad_loop
+        (br_if $exit (i32.ge_u (local.get $q) (local.get $count)))
+        (v128.store (local.get $out_rgba) (local.get $col_r))
+        (v128.store (i32.add (local.get $out_rgba) (local.get $stride)) (local.get $col_g))
+        (v128.store (i32.add (local.get $out_rgba) (i32.shl (local.get $stride) (i32.const 1))) (local.get $col_b))
+        (v128.store (i32.add (local.get $out_rgba) (i32.mul (local.get $stride) (i32.const 3))) (local.get $col_a))
+        (local.set $out_rgba (i32.add (local.get $out_rgba) (i32.const 16)))
+        (local.set $q (i32.add (local.get $q) (i32.const 1)))
+        (br $quad_loop)
+      )
+    )
+  )
+)

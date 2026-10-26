@@ -1,0 +1,18 @@
+;; 11_nested_labels.wat — İç içe etiketli bloklar ve derin dallanma
+(module
+  (func $nested (export "nested") (param $x i32) (result i32)
+    (block $outer (result i32)
+      (block $mid (result i32)
+        (block $inner (result i32)
+          (local.get $x)
+          (br_if $outer (i32.eq (local.get $x) (i32.const 1)))
+          (br_if $mid (i32.eq (local.get $x) (i32.const 2)))
+          (drop)
+          (i32.const 10)
+          (br $inner))
+        (i32.const 20)
+        (i32.add))
+      (i32.const 30)
+      (i32.add))
+  )
+)

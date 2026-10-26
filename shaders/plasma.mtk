@@ -1,0 +1,24 @@
+// plasma.mtk — sin/cos yoğun prosedürel plazma efekti
+uniform time: f32;
+in uv: vec2;
+
+const PI: f32 = 3.14159265;
+
+fn wave(p: vec2, t: f32) -> f32 {
+    let v1 = sin(p.x * 10.0 + t);
+    let v2 = cos(p.y * 10.0 - t * 0.5);
+    let v3 = sin((p.x + p.y) * 7.0 + t * 0.7);
+    let cx = p.x - 0.5;
+    let cy = p.y - 0.5;
+    let d  = sqrt(cx * cx + cy * cy);
+    let v4 = cos(d * 14.0 - t * 1.3);
+    return (v1 + v2 + v3 + v4) * 0.25;
+}
+
+fn frag() -> rgba {
+    let w = wave(uv, time);
+    let r = sin(w * PI) * 0.5 + 0.5;
+    let g = cos(w * PI + 1.0) * 0.5 + 0.5;
+    let b = sin(w * PI + 2.0) * 0.5 + 0.5;
+    return vec4(r, g, b, 1.0);
+}

@@ -1,0 +1,24 @@
+// branchy.mtk — İç içe varying if/else ve koşullu discard testi
+uniform threshold: f32;
+in uv: vec2;
+
+fn frag() -> rgba {
+    var col = vec4(0.1, 0.2, 0.3, 1.0);
+    if uv.x > 0.5 {
+        if uv.y > 0.5 {
+            if uv.x + uv.y > threshold {
+                discard;
+            }
+            col = vec4(1.0, 0.0, 0.0, 1.0);
+        } else {
+            col.g = uv.x;
+        }
+    } else {
+        if uv.y > 0.5 {
+            col.b = uv.y;
+        } else {
+            col = vec4(uv.x, uv.y, 0.5, 1.0);
+        }
+    }
+    return col;
+}

@@ -1,0 +1,7 @@
+// vcolor.mtk — Köşe rengi (varying) ile uniform renk çarpanı
+uniform tint: vec4;
+in v_color: vec4;
+
+fn frag() -> rgba {
+    return v_color * tint;
+}

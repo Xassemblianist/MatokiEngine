@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>MATOKI — M6_1 Threads Selftest &amp; Benchmark</title>
+  <style>
+    body {
+      background: #121418;
+      color: #e2e8f0;
+      font-family: monospace;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    h1 {
+      margin-top: 0;
+    }
+    #status {
+      font-size: 20px;
+      font-weight: bold;
+      margin-bottom: 16px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #1e242d;
+    }
+    .ok { color: #4ade80; }
+    .fail { color: #f87171; }
+    .layout {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+    .panel {
+      flex: 1 1 560px;
+    }
+    pre {
+      background: #1a1f26;
+      padding: 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin-top: 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+      background: #1a1f26;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 10px 14px;
+      text-align: left;
+      border-bottom: 1px solid #2d3748;
+    }
+    th {
+      background: #252d3a;
+      color: #93c5fd;
+    }
+    canvas {
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      width: 384px;
+      height: 384px;
+      background: #0a0c12;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <h1>MATOKI M6_1 &amp; M6_2 — Çoklu Thread, Paralel Rasterizer &amp; WAT Denetimi</h1>
+  <div id="status">Yükleniyor...</div>
+  <div class="layout">
+    <div class="panel">
+      <h3>Paralel Rasterizer Hızlanma Tablosu (1 / 2 / 4 / 6 / 8 Thread)</h3>
+      <table id="raster-table">
+        <thead>
+          <tr>
+            <th>Sahne</th>
+            <th>1T (ms)</th>
+            <th>2T (ms / hız)</th>
+            <th>4T (ms / hız)</th>
+            <th>6T (ms / hız)</th>
+            <th>8T (ms / hız)</th>
+          </tr>
+        </thead>
+        <tbody id="raster-body">
+          <tr><td colspan="6">Ölçüm bekleniyor...</td></tr>
+        </tbody>
+      </table>
+      <h3>Hızlanma Tablosu (1024×1024 Mandelbrot, max_iter=256)</h3>
+      <table id="bench-table">
+        <thead>
+          <tr>
+            <th>Toplam Thread</th>
+            <th>Worker Sayısı</th>
+            <th>C Süre (ms)</th>
+            <th>C Hızlanma</th>
+            <th>WAT Süre (ms)</th>
+            <th>WAT Hızlanma</th>
+          </tr>
+        </thead>
+        <tbody id="bench-body">
+          <tr><td colspan="6">Ölçüm bekleniyor...</td></tr>
+        </tbody>
+      </table>
+      <h3>Günlük (Log)</h3>
+      <pre id="output"></pre>
+    </div>
+    <div>
+      <h3>Paralel Mandelbrot Çıktısı (1024×1024)</h3>
+      <canvas id="mandel-canvas" width="1024" height="1024"></canvas>
+    </div>
+  </div>
+  <script type="module" src="./threads_test.js"></script>
+</body>
+</html>

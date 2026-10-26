@@ -1,0 +1,284 @@
+/* app/shaders.c — Matoki shader yöneticisi ve C referans yedekleri implementasyonu.
+ * Açılışta g_embedded_shaders dizisini derler, derleme süresini ve boyutları ölçer,
+ * D hattının blend füzyonu (fuse_blend) desteğini otomatik algılayarak varyant seçer.
+ */
+#include "app/shaders.h"
+#include "core/embed.h"
+#include "core/math.h"
+#include "core/log.h"
+#include "plat/platform.h"
+#include "raster/ref_shaders.h"
+#include "jit/jit.h"
+
+static b32 str_eq_name(const char* a, const char* b) {
+    if (!a || !b) return FALSE;
+    while (*a && *b) {
+        if (*a != *b) break;
+        a++;
+        b++;
+    }
+    if (*a == '\0' && *b == '\0') return TRUE;
+    /* "sprite" ile "sprite.mtk" eşleşmesini destekle */
+    if (*a == '\0' && b[0] == '.' && b[1] == 'm' && b[2] == 't' && b[3] == 'k' && b[4] == '\0') return TRUE;
+    if (*b == '\0' && a[0] == '.' && a[1] == 'm' && a[2] == 't' && a[3] == 'k' && a[4] == '\0') return TRUE;
+    return FALSE;
+}
+
+static void copy_name(char dst[32], const char* src) {
+    u32 i = 0;
+    if (src) {
+        while (src[i] && i < 31) {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[i] = '\0';
+}
+
+/* ---------- C Referans Shader'ları (plasma ve branchy) ---------- */
+
+static inline f32 plasma_wave(f32 px, f32 py, f32 t) {
+    f32 v1 = m_sin(px * 10.0f + t);
+    f32 v2 = m_cos(py * 10.0f - t * 0.5f);
+    f32 v3 = m_sin((px + py) * 7.0f + t * 0.7f);
+    f32 cx = px - 0.5f;
+    f32 cy = py - 0.5f;
+    f32 d  = m_sqrt(cx * cx + cy * cy);
+    f32 v4 = m_cos(d * 14.0f - t * 1.3f);
+    return (v1 + v2 + v3 + v4) * 0.25f;
+}
+
+void ref_shade_plasma(ShadeBatch* batch) {
+    u32 count = batch->count;
+    if (count == 0) return;
+
+    f32 time = 0.0f;
+    if (batch->uniforms != NULL) {
+        time = *(const f32*)batch->uniforms;
+    }
+
+    u32 total_lanes = count * 4u;
+    const f32* var_u = batch->varyings + 0u * total_lanes;
+    const f32* var_v = batch->varyings + 1u * total_lanes;
+    f32* out_r = batch->out_rgba + 0u * total_lanes;
+    f32* out_g = batch->out_rgba + 1u * total_lanes;
+    f32* out_b = batch->out_rgba + 2u * total_lanes;
+    f32* out_a = batch->out_rgba + 3u * total_lanes;
+
+    const f32 pi = 3.14159265f;
+    for (u32 i = 0; i < total_lanes; i++) {
+        f32 w = plasma_wave(var_u[i], var_v[i], time);
+        f32 w_pi = w * pi;
+        out_r[i] = m_sin(w_pi) * 0.5f + 0.5f;
+        out_g[i] = m_cos(w_pi + 1.0f) * 0.5f + 0.5f;
+        out_b[i] = m_sin(w_pi + 2.0f) * 0.5f + 0.5f;
+        out_a[i] = 1.0f;
+    }
+}
+
+void ref_shade_branchy(ShadeBatch* batch) {
+    u32 count = batch->count;
+    if (count == 0) return;
+
+    f32 threshold = 1.4f;
+    if (batch->uniforms != NULL) {
+        threshold = *(const f32*)batch->uniforms;
+    }
+
+    u32 total_lanes = count * 4u;
+    const f32* var_u = batch->varyings + 0u * total_lanes;
+    const f32* var_v = batch->varyings + 1u * total_lanes;
+    f32* out_r = batch->out_rgba + 0u * total_lanes;
+    f32* out_g = batch->out_rgba + 1u * total_lanes;
+    f32* out_b = batch->out_rgba + 2u * total_lanes;
+    f32* out_a = batch->out_rgba + 3u * total_lanes;
+
+    for (u32 q = 0; q < count; q++) {
+        u32 mask = batch->quads[q].mask;
+        u32 base = q * 4u;
+        for (u32 lane = 0; lane < 4; lane++) {
+            u32 idx = base + lane;
+            f32 ux = var_u[idx];
+            f32 uy = var_v[idx];
+            f32 r = 0.1f, g = 0.2f, b = 0.3f, a = 1.0f;
+
+            if (ux > 0.5f) {
+                if (uy > 0.5f) {
+                    if (ux + uy > threshold) {
+                        mask &= ~(1u << lane);
+                    }
+                    r = 1.0f; g = 0.0f; b = 0.0f; a = 1.0f;
+                } else {
+                    g = ux;
+                }
+            } else {
+                if (uy > 0.5f) {
+                    b = uy;
+                } else {
+                    r = ux; g = uy; b = 0.5f; a = 1.0f;
+                }
+            }
+
+            out_r[idx] = r;
+            out_g[idx] = g;
+            out_b[idx] = b;
+            out_a[idx] = a;
+        }
+        batch->quads[q].mask = mask;
+    }
+}
+
+static ShadeFn default_ref_for_name(const char* name) {
+    if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
+    if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
+    if (str_eq_name(name, "vcolor.mtk"))  return REF_SHADE_VCOLOR_FN;
+    if (str_eq_name(name, "plasma.mtk"))  return ref_shade_plasma;
+    if (str_eq_name(name, "branchy.mtk")) return ref_shade_branchy;
+    return REF_SHADE_SOLID_FN;
+}
+
+b32 shaders_compile_one(ManagedShader* out, const char* name,
+                        const char* src, u32 len,
+                        ShadeFn ref_fallback, Arena* scratch,
+                        MtkDiag* diag) {
+    ASSERT(out != NULL && scratch != NULL);
+    __builtin_memset(out, 0, sizeof(*out));
+    copy_name(out->name, name ? name : "<shader>");
+    out->ref_fn = ref_fallback ? ref_fallback : default_ref_for_name(name);
+
+    usize mark = arena_mark(scratch);
+    MtkDiag local_diag;
+    if (!diag) diag = &local_diag;
+    mtk_diag_init(diag);
+
+    f64 t0 = plat_time_ms();
+
+    IrFunc ir;
+    __builtin_memset(&ir, 0, sizeof(ir));
+    if (!mtk_compile_ir(src, len, out->name, scratch, &ir, &out->layout, diag)) {
+        arena_pop_to(scratch, mark);
+        return FALSE;
+    }
+
+    ir_optimize(&ir);
+
+    /* Aktif IR komut sayısını hesapla (NOP hariç) */
+    u32 live_insts = 0;
+    for (u32 i = 0; i < ir.count; i++) {
+        if (ir.insts[i].op != IR_NOP) {
+            live_insts++;
+        }
+    }
+    out->ir_inst_count = live_insts;
+
+    u32 wasm_cap = 65536;
+    u8* wasm_buf = ARENA_PUSH_ARRAY(scratch, u8, wasm_cap);
+
+    MtkCodegenOpts opts;
+    opts.own_memory    = FALSE;
+#if defined(PLAT_SHARED_MEMORY) && PLAT_SHARED_MEMORY
+    opts.shared_memory = TRUE;
+#else
+    opts.shared_memory = FALSE;
+#endif
+    opts.fuse_blend    = MTK_FUSE_NONE;
+
+    char err[256];
+    err[0] = '\0';
+    u32 wasm_len = mtk_codegen(&ir, &opts, scratch, wasm_buf, wasm_cap, err, sizeof(err));
+    if (wasm_len == 0) {
+        mtk_diag_error(diag, out->name, src, len, 1, 1, "codegen hatasi: %s", err);
+        arena_pop_to(scratch, mark);
+        return FALSE;
+    }
+
+    out->wasm_bytes = wasm_len;
+    ShadeFn fn_none = jit_load_shade(wasm_buf, wasm_len);
+    f64 t1 = plat_time_ms();
+    out->compile_ms = t1 - t0;
+
+    if (fn_none == NULL) {
+        mtk_diag_error(diag, out->name, src, len, 1, 1, "JIT yukleme basarisiz (plat_jit_load)");
+        arena_pop_to(scratch, mark);
+        return FALSE;
+    }
+
+    out->jit_fn[0] = fn_none;
+    out->jit_fn[1] = fn_none;
+    out->jit_fn[2] = fn_none;
+    out->jit_fn[3] = fn_none;
+    out->ok        = TRUE;
+
+    /* D hattının blend füzyonu (MTK_FUSE_REPLACE/ALPHA/ADD) desteğini yokla:
+     * Üretilen wasm ikilisi MTK_FUSE_NONE ikilisiyle birebir aynıysa füzyon henüz
+     * codegen'de yok demektir (has_fused[fm] = FALSE kalır). Farklıysa JIT'e yükle. */
+    u8* fuse_buf = ARENA_PUSH_ARRAY(scratch, u8, wasm_cap);
+    for (u32 fm = 1; fm <= 3; fm++) {
+        opts.fuse_blend = fm;
+        err[0] = '\0';
+        u32 flen = mtk_codegen(&ir, &opts, scratch, fuse_buf, wasm_cap, err, sizeof(err));
+        if (flen > 0 && (flen != wasm_len || __builtin_memcmp(fuse_buf, wasm_buf, wasm_len) != 0)) {
+            ShadeFn ffn = jit_load_shade(fuse_buf, flen);
+            if (ffn != NULL) {
+                out->jit_fn[fm]    = ffn;
+                out->has_fused[fm] = TRUE;
+            }
+        }
+    }
+
+    arena_pop_to(scratch, mark);
+    return TRUE;
+}
+
+void shaders_init(ShaderManager* sm, Arena* scratch) {
+    ASSERT(sm != NULL && scratch != NULL);
+    __builtin_memset(sm, 0, sizeof(*sm));
+
+    u32 count = g_embedded_shader_count;
+    if (count > APP_MAX_SHADERS) count = APP_MAX_SHADERS;
+
+    for (u32 i = 0; i < count; i++) {
+        const EmbeddedFile* ef = &g_embedded_shaders[i];
+        ManagedShader* sh = &sm->items[sm->count++];
+        MtkDiag diag;
+        b32 ok = shaders_compile_one(sh, ef->name, ef->src, ef->len,
+                                     default_ref_for_name(ef->name), scratch, &diag);
+        if (ok) {
+            LOG("JIT shader [%s]: %.3f ms, %u byte wasm, %u IR komut, %u uniformB, %u varying",
+                sh->name, sh->compile_ms, sh->wasm_bytes, sh->ir_inst_count,
+                sh->layout.uniform_bytes, sh->layout.varying_count);
+        } else {
+            LOG("JIT shader HATA [%s]: C referansina dusuldu\n%s",
+                ef->name, diag.text);
+        }
+    }
+}
+
+const ManagedShader* shaders_find(const ShaderManager* sm, const char* name) {
+    if (!sm || !name) return NULL;
+    for (u32 i = 0; i < sm->count; i++) {
+        if (str_eq_name(sm->items[i].name, name)) {
+            return &sm->items[i];
+        }
+    }
+    return NULL;
+}
+
+ShadeFn shaders_get_fn(const ManagedShader* sh, b32 use_jit,
+                       BlendMode blend, b32* out_fused) {
+    if (out_fused) *out_fused = FALSE;
+    if (!sh) return REF_SHADE_SOLID_FN;
+    if (!use_jit || !sh->ok || sh->jit_fn[0] == NULL) {
+        return sh->ref_fn;
+    }
+    u32 idx = 0;
+    if (blend == BLEND_NONE)       idx = 1;
+    else if (blend == BLEND_ALPHA) idx = 2;
+    else if (blend == BLEND_ADD)   idx = 3;
+
+    if (sh->has_fused[idx] && sh->jit_fn[idx] != NULL) {
+        if (out_fused) *out_fused = TRUE;
+        return sh->jit_fn[idx];
+    }
+    return sh->jit_fn[0];
+}

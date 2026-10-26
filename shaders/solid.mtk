@@ -1,0 +1,6 @@
+// solid.mtk — Sabit uniform renk döndüren temel gölgelendirici
+uniform color: vec4;
+
+fn frag() -> rgba {
+    return color;
+}

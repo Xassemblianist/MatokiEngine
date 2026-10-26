@@ -1,0 +1,9 @@
+# Derleme çıktıları (make ile yeniden üretilir)
+build/
+web/engine.wasm
+out/
+
+# Editör / sistem
+*.swp
+.DS_Store
+__pycache__/

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>MATOKI — JIT Selftest &amp; Benchmark</title>
+  <style>
+    body {
+      background: #121418;
+      color: #e2e8f0;
+      font-family: monospace;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    #status {
+      font-size: 20px;
+      font-weight: bold;
+      margin-bottom: 16px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #1e242d;
+    }
+    .ok { color: #4ade80; }
+    .fail { color: #f87171; }
+    pre {
+      background: #1a1f26;
+      padding: 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>MATOKI JIT Köprüsü (mbin + masm + call_indirect)</h1>
+  <div id="status">Yükleniyor...</div>
+  <pre id="output"></pre>
+  <script type="module" src="./jit_test.js"></script>
+</body>
+</html>
