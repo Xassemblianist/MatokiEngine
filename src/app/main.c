@@ -23,6 +23,7 @@
 #include "ui/editor.h"
 #include "app/shaders.h"
 #include "app/scene3d.h"
+#include "gfx3d/pipeline.h"
 #include "app/scene_platformer.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
@@ -869,6 +870,11 @@ EXPORT(engine_compile_editor_now) f64 engine_compile_editor_now(void) {
     f64 t0 = plat_time_ms();
     compile_editor_shader();
     return plat_time_ms() - t0;
+}
+
+/* Benchmark betikleri için: 3D vertex aşaması optimizasyon anahtarları (G3D_OPT_*) */
+EXPORT(engine_g3d_opt) void engine_g3d_opt(u32 mask) {
+    g3d_set_opt(mask);
 }
 
 /* Benchmark betikleri için: profiler bölge tablosunu sıfırla / konsola yaz */

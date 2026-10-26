@@ -10,6 +10,7 @@
 #include "gfx3d/mesh.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
+#include "core/profiler.h"
 
 #define KEY_C 67
 #define KEY_M 77
@@ -126,8 +127,10 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     g_prev_m = m_down;
     camera_update(&g_cam, in, dt, look_enabled);
 
+    PROF_BEGIN("s3d_clear");
     fb_clear(fb, FB_RGBA((u32)(k_sky[0] * 255.0f), (u32)(k_sky[1] * 255.0f), (u32)(k_sky[2] * 255.0f), 255));
     fb_clear_depth(fb, 0.0f);
+    PROF_END();
 
     const ManagedShader* sh = (g_mipmap_on || !g_lit_nomip.ok) ? shaders_find(sm, "lit3d.mtk") : &g_lit_nomip;
     b32 fused = FALSE;
@@ -181,7 +184,9 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     m = mat4_identity();
     g3d_draw(&ctx, g_ground, &m, &mat);
 
+    PROF_BEGIN("s3d_flush");
     raster_flush(r);
+    PROF_END();
     g_last_stats = ctx.stats;
 }
 
