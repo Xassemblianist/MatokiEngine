@@ -19,6 +19,8 @@ web/                      (JS, ~1000 satır sınırı)
  platform.js   wasm yükle, rAF döngüsü, input, framebuffer → canvas
  jit.js        plat_jit_load: byte'ları Module'e çevir, paylaşılan tabloya koy
  worker.js     (Faz 2) raster worker'ları
+ audio.js      AudioContext + AudioWorklet kurulumu (ilk etkileşimde)
+ audio_worklet.js  paylaşılan bellekteki ses halkasını çıkışa kopyalar (D-090)
 
 src/  (C11 → engine.wasm)
  core/    types, mem, arena, math, rng, log, profiler
@@ -26,8 +28,10 @@ src/  (C11 → engine.wasm)
  raster/  framebuffer, üçgen kurulumu, karo binning, rasterizer, blend, doku örnekleme
  mbin/    wasm binary üretici (LEB128, section'lar, opcode yayıcı) = bizim assembler'ımız
  matoki/  lexer, parser, sema, IR, opt, codegen(→mbin), jit köprüsü
- gfx2d/   sprite, tilemap, batch
- gfx3d/   (sonra) kamera, clipping, perspektif-doğru interpolasyon, mipmap
+ gfx2d/   sprite batch, tilemap + çarpışma, Camera2D, animasyon (M7_1)
+ gfx3d/   mesh, kamera, homojen kırpma (guard band), reverse-Z boru hattı (M8_A)
+ audio/   synth (osilatör, ADSR, sıralayıcı) + paylaşılan bellek ses halkası (M7_2)
+ img/ ui/ PNG, prosedürel doku, font, immediate-mode UI (M7_0)
  app/     demo uygulamaları, main.c
 
 tools/host/   native (Linux) test araçları — SADECE burada libc serbest

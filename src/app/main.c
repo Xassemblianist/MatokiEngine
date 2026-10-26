@@ -1,6 +1,7 @@
 /* app/main.c — Entegrasyon demosu: 5 sahne, JIT vs C referans, canlı Matoki editörü,
  * F1 debug overlay (FPS grafiği, profiler tablosu, JIT istatistikleri) ve F12 PNG ekran görüntüsü.
- * Sahneler (Tab): 1) 10k Sprite, 2) Plasma (tam ekran), 3) Branchy, 4) Canlı Shader Editörü, 5) 3D.
+ * Sahneler (Tab): 1) 10k Sprite, 2) Plasma (tam ekran), 3) Branchy, 4) Canlı Shader Editörü, 5) 3D,
+ * 6) Platform oyunu.
  */
 #include "core/types.h"
 #include "core/arena.h"
@@ -22,6 +23,7 @@
 #include "ui/editor.h"
 #include "app/shaders.h"
 #include "app/scene3d.h"
+#include "app/scene_platformer.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
@@ -51,7 +53,8 @@ typedef enum {
     SCENE_BRANCHY = 2,
     SCENE_EDITOR  = 3,
     SCENE_3D      = 4,
-    SCENE_COUNT   = 5
+    SCENE_GAME    = 5,
+    SCENE_COUNT   = 6
 } DemoScene;
 
 typedef struct {
@@ -113,6 +116,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_BRANCHY: return "3:Branchy";
     case SCENE_EDITOR:  return "4:Editor";
     case SCENE_3D:      return "5:3D";
+    case SCENE_GAME:    return "6:Oyun";
     default:            return "?";
     }
 }
@@ -277,6 +281,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     shaders_init(&g_shaders, &g_frame_arena);
     init_wat_raster_kernels();
     scene3d_init(&g_perm_arena, &g_frame_arena, &g_fb);
+    scene_plat_init(&g_perm_arena);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
     const char* default_ed_src =
@@ -616,6 +621,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     b32 want_report     = (!editor_typing && key_pressed(KEY_P));
     b32 want_screenshot = key_pressed(KEY_F12);
 
+    /* Oyun sahnesinden çıkınca müziği durdur */
+    static DemoScene s_prev_scene = SCENE_SPRITES;
+    if (s_prev_scene == SCENE_GAME && g_scene != SCENE_GAME) scene_plat_leave();
+    s_prev_scene = g_scene;
+
     fb_clear(&g_fb, FB_RGBA(18, 20, 28, 255));
     ui_begin(&g_ui, &g_input);
 
@@ -628,6 +638,10 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
         break;
     case SCENE_BRANCHY:
         render_scene_branchy(time_sec);
+        break;
+    case SCENE_GAME:
+        scene_plat_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit);
+        scene_plat_draw_hud(&g_ui, &g_fb);
         break;
     case SCENE_3D:
         scene3d_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, time_sec,

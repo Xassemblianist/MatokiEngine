@@ -20,7 +20,7 @@ export function installAudio(exports, memory) {
       node.port.postMessage({ buffer: memory.buffer, ptr });
       node.connect(ctx.destination);
       if (ctx.state !== "running") await ctx.resume();
-      globalThis.matoki = Object.assign(globalThis.matoki || {}, { audio: ctx });
+      globalThis.matoki = Object.assign(globalThis.matoki || {}, { audio: ctx, audioRing: ptr });
     } catch (err) {
       console.warn("[ses] başlatılamadı:", err);
     }
