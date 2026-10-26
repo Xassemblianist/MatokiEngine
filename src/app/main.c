@@ -22,6 +22,7 @@
 #include "ui/editor.h"
 #include "app/shaders.h"
 #include "app/scene3d.h"
+#include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
 #include "masm/masm.h"
@@ -658,6 +659,9 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     if (want_screenshot) {
         capture_screenshot_png();
     }
+
+    /* Ses: halka tamponu ~70 ms ileriye kadar doldur (ses başlamadıysa işlem yok) */
+    audio_pump(0.07f);
 
     /* Girdi durumunu gelecek kare için sıfırla */
     __builtin_memcpy(g_prev_keys, g_input.keys, sizeof(g_prev_keys));

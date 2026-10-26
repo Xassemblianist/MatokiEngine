@@ -115,6 +115,14 @@ async function init() {
   // Hata ayıklama / benchmark betikleri için (konsoldan engine_* export'larına erişim)
   globalThis.matoki = { exports, memory };
 
+  // Ses (opsiyonel): ilk kullanıcı etkileşiminde AudioWorklet kurulur
+  try {
+    const audioMod = await import("./audio.js");
+    audioMod.installAudio(exports, memory);
+  } catch (_e) {
+    // audio.js yoksa sessiz devam et
+  }
+
   // B hattı web/threads.js eklediğinde worker'ları opsiyonel olarak başlat
   try {
     const threadsMod = await import("./threads.js");
