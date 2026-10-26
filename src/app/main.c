@@ -1,6 +1,6 @@
-/* app/main.c — M5_4 Entegrasyon demosu: 4 sahne, JIT vs C referans, canlı Matoki editörü,
+/* app/main.c — Entegrasyon demosu: 5 sahne, JIT vs C referans, canlı Matoki editörü,
  * F1 debug overlay (FPS grafiği, profiler tablosu, JIT istatistikleri) ve F12 PNG ekran görüntüsü.
- * Sahneler (Tab): 1) 10k Sprite, 2) Plasma (tam ekran), 3) Branchy, 4) Canlı Shader Editörü.
+ * Sahneler (Tab): 1) 10k Sprite, 2) Plasma (tam ekran), 3) Branchy, 4) Canlı Shader Editörü, 5) 3D.
  */
 #include "core/types.h"
 #include "core/arena.h"
@@ -21,6 +21,7 @@
 #include "ui/ui.h"
 #include "ui/editor.h"
 #include "app/shaders.h"
+#include "app/scene3d.h"
 #include "thread/thread.h"
 #include "thread/job.h"
 #include "masm/masm.h"
@@ -48,7 +49,8 @@ typedef enum {
     SCENE_PLASMA  = 1,
     SCENE_BRANCHY = 2,
     SCENE_EDITOR  = 3,
-    SCENE_COUNT   = 4
+    SCENE_3D      = 4,
+    SCENE_COUNT   = 5
 } DemoScene;
 
 typedef struct {
@@ -109,6 +111,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_PLASMA:  return "2:Plasma";
     case SCENE_BRANCHY: return "3:Branchy";
     case SCENE_EDITOR:  return "4:Editor";
+    case SCENE_3D:      return "5:3D";
     default:            return "?";
     }
 }
@@ -268,6 +271,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
 
     ui_init(&g_ui, &g_fb);
     init_procedural_textures();
+    scene3d_init(&g_perm_arena, &g_fb);
 
     /* Gömülü tüm Matoki shader'larını ve WAT çekirdeklerini derle ve JIT'e yükle */
     shaders_init(&g_shaders, &g_frame_arena);
@@ -624,6 +628,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     case SCENE_BRANCHY:
         render_scene_branchy(time_sec);
         break;
+    case SCENE_3D:
+        scene3d_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, time_sec,
+                      g_use_jit, g_input.mouse_y >= 20 && !g_show_debug);
+        scene3d_draw_hud(&g_ui, &g_fb);
+        break;
     case SCENE_EDITOR:
     default:
         render_scene_editor(time_sec, step_dt);
@@ -842,6 +851,15 @@ EXPORT(engine_compile_editor_now) f64 engine_compile_editor_now(void) {
     f64 t0 = plat_time_ms();
     compile_editor_shader();
     return plat_time_ms() - t0;
+}
+
+/* Benchmark betikleri için: profiler bölge tablosunu sıfırla / konsola yaz */
+EXPORT(engine_prof_reset) void engine_prof_reset(void) {
+    prof_reset();
+}
+
+EXPORT(engine_prof_report) void engine_prof_report(void) {
+    prof_report();
 }
 
 EXPORT(engine_last_frame_ms) f32 engine_last_frame_ms(void) {

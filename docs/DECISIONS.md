@@ -239,6 +239,48 @@ Kapsam çok büyüktü (glTF, şehir, gölge…). 3D yine hedef ama **temel** od
 
 ---
 
+---
+
+## I. 3D boru hattı (M8_A)
+
+### D-080 — Reverse-Z + sonsuz uzak düzlem, `DEPTH_GREATER`, temizleme 0
+**KABUL** · 2026-10-27 · M8_A
+`mat4_perspective_rz`: `z_clip = near`, `w_clip = -z_view` → `z/w = near/d` (near'da 1, sonsuzda 0).
+f32 derinlikte hassasiyet uzak mesafede korunur, uzak düzlem kırpması gerekmez (uzak nesneler nesne
+culling / mesafe ile elenir). Eski `mat4_perspective` (0..1, LESS) 2D/test kodu için kalır.
+
+### D-081 — Kırpma: yakın düzlem gerçek, x/y guard band
+**KABUL** · M8_A
+Yakın düzlem (`z <= w`) Sutherland–Hodgman ile her zaman kırpılır (w >= near > 0 garantisi).
+x/y için yalnızca guard band dışına taşan üçgenler kırpılır; band, raster'ın i32 kenar fonksiyonunun
+ara toplamlarda taşmayacağı en büyük kenar payıdır (`clip_guard_margin_px`; 640×360 → 768 px,
+1280×720 → 320 px). Kesişim noktası her zaman içerideki köşeden hesaplanır → ortak kenarlar çatlaksız.
+
+### D-082 — Varying perspektif sözleşmesi
+**KABUL** · M8_A
+Boru hattı `RasterVert.var`'a HAM varying, `inv_w = 1/w_clip` yazar; perspektif-doğru interpolasyonu
+raster yapar (`var*inv_w` düzlemi, piksel başına `1/Σ`). Kırpmada varyingler klip uzayında doğrusal
+interpole edilir. Kapsanmayan (yardımcı) lane'ler de düzlem denkleminden hesaplanır → quad türevleri
+(mipmap) için güvenli.
+
+### D-083 — Arka yüz ayıklama boru hattında, ekran uzayı işaretiyle
+**KABUL** · M8_A
+NDC'de CCW = ön yüz; ekran (y aşağı) alanı negatif olan tutulur. Raster'ın `cull_back`'i 3D'de kapalı.
+
+### D-084 — Early-Z derinlik yazımı (raster düzeltmesi) + geç yazım modu
+**KABUL** · M8_A
+Hata: derinlik test anında okunuyor ama batch (≤256 quad) boşaltılınca yazılıyordu → aynı batch'teki
+örtüşen üçgenler eski derinliği görüp arka yüzleri sızdırıyordu (2D'de görünmüyordu). Düzeltme:
+test geçen lane'lerin derinliği quad üretilirken yazılır. Discard'lı (alfa testli) shader'lar için
+`raster_set_depth_ex(..., late_write=TRUE)`: derinlik shade sonrası yalnız hayatta kalan lane'lere
+yazılır ve doğruluk için her üçgenden sonra batch boşaltılır (`G3dMaterial.alpha_test`).
+
+### D-085 — Raster çözünürlük sınırı (bilgi)
+**ÖNERİ** · M8_A
+i32 kenar fonksiyonu ara toplamları 1920×1080'de guard band'siz bile ~2^31'e dayanır (wasm'da sarma
+zararsız ama C'de UB). 1080p hedeflenirse: karo-göreli kenar değerlendirmesi (c'yi karo köşesine göre
+kurmak) önerilir.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -246,3 +288,10 @@ Kapsam çok büyüktü (glTF, şehir, gölge…). 3D yine hedef ama **temel** od
 - **Ö-2** `simd_clamp01` → `pmin(1, pmax(0, x))`; `simd_pack_rgba8` → `shl 8/16/24 + or` (clang kalıbı, %25–30). — M5_3
 - **Ö-3** `asm/*.wat` → `src/bench/asm_sources.c` otomatik gömme Makefile kuralı. — M5_3
 - **Ö-4** D-027 nöbetçi kimliklerin kaldırılması.
+- **Ö-5 GPU (WebGPU) ikinci arka uç** — 2026-10-27, kullanıcı isteği.
+  (a) Matoki IR'ından **WGSL** üreten ikinci codegen (aynı `.mtk` hem CPU hem GPU'da);
+  (b) `gfx3d` arka uçtan bağımsız kalır: mesh/materyal/çizim listesi üretir, CPU rasterizer bunun
+  bir tüketicisidir, WebGPU arka ucu ikinci tüketici olur;
+  (c) aynı kareyi CPU+GPU'ya bölmek yerine **cihaza göre arka uç seçimi** (WebGPU yoksa CPU);
+  CPU yolu deterministik referans ve yedek olarak kalır. ARCHITECTURE §0.3 gereği karar bu
+  dosyadan geçmeden kodlanmaz.

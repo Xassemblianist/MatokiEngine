@@ -128,12 +128,36 @@ void ref_shade_branchy(ShadeBatch* batch) {
     }
 }
 
+/* lit3d.mtk C referansı. Uniform yerleşimi: light_dir@0 (vec3), base@16, fog@32 (vec4).
+ * Varying: uv(0,1) nrm(2,3,4) depth(5). Transandantal yok; normalize = x / sqrt(dot). */
+void ref_shade_lit3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    for (u32 i = 0; i < n; i++) {
+        f32 nx = v[2u * n + i], ny = v[3u * n + i], nz = v[4u * n + i];
+        f32 inv = 1.0f / m_sqrt(nx * nx + ny * ny + nz * nz);
+        f32 d = m_max((nx * u[0] + ny * u[1] + nz * u[2]) * inv, 0.0f);
+        f32 c[4];
+        ref_sample_tex(&batch->textures[0], v[i], v[n + i], c);
+        f32 l = 0.3f + 0.7f * d;
+        f32 f = m_clamp(v[5u * n + i] * u[11], 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f32 lit = c[k] * u[4 + k] * l;
+            o[k * n + i] = lit + (u[8 + k] - lit) * f;
+        }
+        o[3u * n + i] = c[3] * u[7];
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
     if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
     if (str_eq_name(name, "vcolor.mtk"))  return REF_SHADE_VCOLOR_FN;
     if (str_eq_name(name, "plasma.mtk"))  return ref_shade_plasma;
     if (str_eq_name(name, "branchy.mtk")) return ref_shade_branchy;
+    if (str_eq_name(name, "lit3d.mtk"))   return ref_shade_lit3d;
     return REF_SHADE_SOLID_FN;
 }
 
