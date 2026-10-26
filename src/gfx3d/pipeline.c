@@ -5,6 +5,7 @@
 #include "gfx3d/pipeline.h"
 #include "core/log.h"
 #include "core/profiler.h"
+#include "gfx3d/vertex.h"
 
 u32 g3d_attr_components(G3dAttr a) {
     switch (a) {
@@ -79,6 +80,84 @@ static inline b32 keep_face(G3dCull cull, f32 area2) {
     return TRUE;
 }
 
+u32 g_g3d_opt = G3D_OPT_ALL;
+
+void g3d_set_opt(u32 mask) {
+    g_g3d_opt = mask;
+}
+
+/* Küre 5 düzlemin hepsinin içinde (yarıçap kadar payla) mı */
+static b32 sphere_fully_inside(const G3dContext* c, Vec3 p, f32 radius) {
+    for (u32 i = 0; i < 5; i++) {
+        Vec4 pl = c->planes[i];
+        if (pl.x * p.x + pl.y * p.y + pl.z * p.z + pl.w < radius) return FALSE;
+    }
+    return TRUE;
+}
+
+static inline u32 outcode4(f32 x, f32 y, f32 z, f32 w, ClipGuard g) {
+    u32 code = 0;
+    if (z > w)        code |= CLIP_NEAR;
+    if (x < -w)       code |= CLIP_LEFT;
+    if (x >  w)       code |= CLIP_RIGHT;
+    if (y < -w)       code |= CLIP_BOTTOM;
+    if (y >  w)       code |= CLIP_TOP;
+    if (x < -g.gx * w) code |= CLIP_G_LEFT;
+    if (x >  g.gx * w) code |= CLIP_G_RIGHT;
+    if (y < -g.gy * w) code |= CLIP_G_BOTTOM;
+    if (y >  g.gy * w) code |= CLIP_G_TOP;
+    return code;
+}
+
+typedef struct {
+    const Mesh*        m;
+    const G3dMaterial* mat;
+    const Mat4*        model;
+    const f32*         iv;      /* model^-1 (normal matrisi = iv^T) */
+    const f32 *qx, *qy, *qz, *qw;
+} VertexCtx;
+
+/* Materyalin istediği varying'leri köşe i için out'a yazar (klip w'si qw'dan) */
+static inline void vertex_attrs(const VertexCtx* v, u32 i, f32* out) {
+    const Mesh* m = v->m;
+    const f32* iv = v->iv;
+    u32 k = 0;
+    for (u32 a = 0; a < v->mat->attr_count; a++) {
+        switch ((G3dAttr)v->mat->attrs[a]) {
+        case G3D_ATTR_UV:
+            out[k++] = m->u[i];
+            out[k++] = m->v[i];
+            break;
+        case G3D_ATTR_NORMAL: {
+            f32 nx = m->nx[i], ny = m->ny[i], nz = m->nz[i];
+            out[k++] = iv[0] * nx + iv[1] * ny + iv[2]  * nz;
+            out[k++] = iv[4] * nx + iv[5] * ny + iv[6]  * nz;
+            out[k++] = iv[8] * nx + iv[9] * ny + iv[10] * nz;
+        } break;
+        case G3D_ATTR_VIEW_DEPTH:
+            out[k++] = v->qw[i];
+            break;
+        case G3D_ATTR_COLOR: {
+            u32 col = m->color ? m->color[i] : 0xFFFFFFFFu;
+            out[k++] = (f32)(col & 0xFFu) * (1.0f / 255.0f);
+            out[k++] = (f32)((col >> 8) & 0xFFu) * (1.0f / 255.0f);
+            out[k++] = (f32)((col >> 16) & 0xFFu) * (1.0f / 255.0f);
+            out[k++] = (f32)(col >> 24) * (1.0f / 255.0f);
+        } break;
+        case G3D_ATTR_WORLD_POS: {
+            Vec4 w = mat4_mul_vec4(*v->model, vec4(m->px[i], m->py[i], m->pz[i], 1.0f));
+            out[k++] = w.x; out[k++] = w.y; out[k++] = w.z;
+        } break;
+        }
+    }
+}
+
+/* Kırpma yolu (nadir): klip köşesi talep üzerine kurulur */
+static void make_clipvert(const VertexCtx* v, u32 i, ClipVert* o) {
+    o->x = v->qx[i]; o->y = v->qy[i]; o->z = v->qz[i]; o->w = v->qw[i];
+    vertex_attrs(v, i, o->var);
+}
+
 b32 g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial* mat) {
     c->stats.draws++;
 
@@ -107,53 +186,44 @@ b32 g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial*
     /* --- Vertex aşaması --- */
     Mat4 mvp = mat4_mul(c->view_proj, *model);
     Mat4 inv = mat4_inverse(*model);   /* normal matrisi = inv^T */
-    const f32* iv = inv.m;
+    VertexCtx vx = { m, mat, model, inv.m, NULL, NULL, NULL, NULL };
     u32 vn = m->vertex_count;
-    ClipVert*   cv  = ARENA_PUSH_ARRAY(c->frame, ClipVert, vn);
-    RasterVert* sv  = ARENA_PUSH_ARRAY(c->frame, RasterVert, vn);
-    u32*        oc  = ARENA_PUSH_ARRAY(c->frame, u32, vn);
+    f32* qx = ARENA_PUSH_ARRAY(c->frame, f32, vn);
+    f32* qy = ARENA_PUSH_ARRAY(c->frame, f32, vn);
+    f32* qz = ARENA_PUSH_ARRAY(c->frame, f32, vn);
+    f32* qw = ARENA_PUSH_ARRAY(c->frame, f32, vn);
+    vx.qx = qx; vx.qy = qy; vx.qz = qz; vx.qw = qw;
+    RasterVert* sv = ARENA_PUSH_ARRAY(c->frame, RasterVert, vn);
+    u32*        oc = ARENA_PUSH_ARRAY(c->frame, u32, vn);
 
-    for (u32 i = 0; i < vn; i++) {
-        Vec4 p = vec4(m->px[i], m->py[i], m->pz[i], 1.0f);
-        Vec4 q = mat4_mul_vec4(mvp, p);
-        ClipVert* o = &cv[i];
-        o->x = q.x; o->y = q.y; o->z = q.z; o->w = q.w;
-        u32 k = 0;
-        for (u32 a = 0; a < mat->attr_count; a++) {
-            switch ((G3dAttr)mat->attrs[a]) {
-            case G3D_ATTR_UV:
-                o->var[k++] = m->u[i];
-                o->var[k++] = m->v[i];
-                break;
-            case G3D_ATTR_NORMAL: {
-                f32 nx = m->nx[i], ny = m->ny[i], nz = m->nz[i];
-                o->var[k++] = iv[0] * nx + iv[1] * ny + iv[2]  * nz;
-                o->var[k++] = iv[4] * nx + iv[5] * ny + iv[6]  * nz;
-                o->var[k++] = iv[8] * nx + iv[9] * ny + iv[10] * nz;
-                break;
-            }
-            case G3D_ATTR_VIEW_DEPTH:
-                o->var[k++] = q.w;
-                break;
-            case G3D_ATTR_COLOR: {
-                u32 col = m->color ? m->color[i] : 0xFFFFFFFFu;
-                o->var[k++] = (f32)(col & 0xFFu) * (1.0f / 255.0f);
-                o->var[k++] = (f32)((col >> 8) & 0xFFu) * (1.0f / 255.0f);
-                o->var[k++] = (f32)((col >> 16) & 0xFFu) * (1.0f / 255.0f);
-                o->var[k++] = (f32)(col >> 24) * (1.0f / 255.0f);
-                break;
-            }
-            case G3D_ATTR_WORLD_POS: {
-                Vec4 w = mat4_mul_vec4(*model, p);
-                o->var[k++] = w.x; o->var[k++] = w.y; o->var[k++] = w.z;
-                break;
-            }
-            }
+    if (g_g3d_opt & G3D_OPT_SIMD_XFORM) {
+        g3d_transform_positions(&mvp, m->px, m->py, m->pz, vn, qx, qy, qz, qw);
+    } else {
+        for (u32 i = 0; i < vn; i++) {
+            Vec4 q = mat4_mul_vec4(mvp, vec4(m->px[i], m->py[i], m->pz[i], 1.0f));
+            qx[i] = q.x; qy[i] = q.y; qz[i] = q.z; qw[i] = q.w;
         }
-        oc[i] = clip_outcode(o, c->guard);
-        if (!(oc[i] & CLIP_NEAR)) sv[i] = project(c, o, nvar);
     }
 
+    /* Nesne tamamen görüş hacmi içindeyse köşe başına outcode gereksiz (hepsi 0) */
+    b32 all_inside = (g_g3d_opt & G3D_OPT_INSIDE_SKIP) &&
+                     sphere_fully_inside(c, vec3(wc.x, wc.y, wc.z), m->radius * smax);
+    if (all_inside) c->stats.draws_inside++;
+
+    f32 vpw = (f32)c->vp_w, vph = (f32)c->vp_h;
+    for (u32 i = 0; i < vn; i++) {
+        f32 x = qx[i], y = qy[i], z = qz[i], w = qw[i];
+        u32 code = all_inside ? 0u : outcode4(x, y, z, w, c->guard);
+        oc[i] = code;
+        if (code & CLIP_NEAR) continue;
+        RasterVert* o = &sv[i];
+        f32 iw = 1.0f / w;
+        o->x = (x * iw * 0.5f + 0.5f) * vpw;
+        o->y = (0.5f - y * iw * 0.5f) * vph;
+        o->z = z * iw;
+        o->inv_w = iw;
+        vertex_attrs(&vx, i, o->var);
+    }
     PROF_END();
 
     /* --- Üçgenler --- */
@@ -181,7 +251,9 @@ b32 g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial*
 
         c->stats.tris_clipped++;
         ClipVert in[3], poly[CLIP_MAX_VERTS];
-        in[0] = cv[i0]; in[1] = cv[i1]; in[2] = cv[i2];
+        make_clipvert(&vx, i0, &in[0]);
+        make_clipvert(&vx, i1, &in[1]);
+        make_clipvert(&vx, i2, &in[2]);
         u32 n = clip_triangle(in, must, c->guard, nvar, poly);
         if (n < 3) continue;
         RasterVert pv[CLIP_MAX_VERTS];

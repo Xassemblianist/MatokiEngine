@@ -14,6 +14,7 @@
 #include "gfx3d/clip.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
+#include "gfx3d/vertex.h"
 
 static u8 g_mem[MB(48)];
 
@@ -328,4 +329,26 @@ TEST(gfx3d_alpha_test_late_depth) {
         if (late) CHECK(painted == 200u * 150u);   /* delikler arka yüzeyle dolu */
         else      CHECK(painted < 200u * 150u * 6u / 10u);
     }
+}
+
+/* SoA konum dönüşümü (host: skaler g3d_transform_positions) mat4_mul_vec4 ile bit-bit aynı.
+ * wasm SIMD sürümünün skalerle aynılığı tarayıcıda tam sahne karşılaştırmasıyla doğrulandı (M8_C). */
+TEST(gfx3d_transform_positions_exact) {
+    Rng rng;
+    rng_seed(&rng, 5);
+    Mat4 m = mat4_mul(mat4_perspective_rz(1.1f, 1.7f, 0.05f),
+                      mat4_trs(vec3(1.0f, -2.0f, -7.0f), 0.7f, -0.3f, vec3(1.5f, 0.8f, 2.0f)));
+    f32 px[37], py[37], pz[37], ox[37], oy[37], oz[37], ow[37];
+    for (u32 i = 0; i < 37; i++) {
+        px[i] = rng_f32(&rng) * 20.0f - 10.0f;
+        py[i] = rng_f32(&rng) * 20.0f - 10.0f;
+        pz[i] = rng_f32(&rng) * 20.0f - 10.0f;
+    }
+    g3d_transform_positions(&m, px, py, pz, 37, ox, oy, oz, ow);
+    u32 bad = 0;
+    for (u32 i = 0; i < 37; i++) {
+        Vec4 q = mat4_mul_vec4(m, vec4(px[i], py[i], pz[i], 1.0f));
+        bad += (q.x != ox[i]) + (q.y != oy[i]) + (q.z != oz[i]) + (q.w != ow[i]);
+    }
+    CHECK(bad == 0);
 }

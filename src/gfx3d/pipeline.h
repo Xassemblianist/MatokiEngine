@@ -48,6 +48,7 @@ typedef struct {
 typedef struct {
     u64 draws;           /* g3d_draw çağrısı */
     u64 draws_culled;    /* frustum dışında kalan nesne */
+    u64 draws_inside;    /* tamamen içeride (köşe outcode'u atlandı) */
     u64 tris_in;         /* görünür nesnelerin üçgenleri */
     u64 tris_rejected;   /* tamamen görüş dışı (outcode) */
     u64 tris_clipped;    /* kırpıcıdan geçen */
@@ -65,6 +66,12 @@ typedef struct {
     Vec4        planes[5];   /* dünya uzayı: sol, sağ, alt, üst, yakın (n·p + d >= 0 içeride) */
     G3dStats    stats;
 } G3dContext;
+
+/* Ölçüm için vertex aşaması optimizasyon anahtarları (varsayılan: hepsi açık) */
+#define G3D_OPT_SIMD_XFORM   1u   /* SoA SIMD konum dönüşümü */
+#define G3D_OPT_INSIDE_SKIP  2u   /* tamamen içerideki nesnede outcode atla */
+#define G3D_OPT_ALL          3u
+void g3d_set_opt(u32 mask);
 
 u32  g3d_attr_components(G3dAttr a);
 void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj, Vec3 eye);
