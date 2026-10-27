@@ -69,3 +69,7 @@ yakalama (vertex snapping)** yardımcısı: ekran koordinatlarını piksel ızga
 ### Öneriler / Entegrasyon Notları
 - `pipeline.c` içinde `project()` fonksiyonunda ekran koordinatları üretildikten hemen sonra (veya 24.8 sabit noktaya geçmeden önce) `retro_snap_xy(&o.x, &o.y, snap_subpixel)` çağrılarak PS1 tarzı köşe titremesi (vertex snapping) doğrudan etkinleştirilebilir.
 - Sahne düşük iç çözünürlüklü bir `Framebuffer`'a (ör. `320×180`) çizildikten sonra `engine_frame` sonunda `retro_present(&low_fb, &main_fb, &retro_params)` ile ana `Framebuffer`'a aktarılabilir.
+
+## İnceleme (Claude, 2026-10-27)
+- Sınır kırpma, ölçek/ofset hesapları (i64), yerinde (src == dst) işleme (ters satır sırası), geniş görüntü yedek yolu,
+  scanline/blur ve SIMD↔skaler bit-aynılık testleri incelendi. `make check` 137/137, ASan/UBSan uyarısı yok. Değişiklik gerekmedi.
