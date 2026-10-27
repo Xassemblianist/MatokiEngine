@@ -167,6 +167,14 @@ void r3d_draw_emissive(R3dPass* p, const Mesh* mesh, const Mat4* model, Vec4 col
     g3d_draw(p->ctx, mesh, model, &m);
 }
 
+/* Ertelenmiş + paralel 3D ön uç (D-105); ölçüm için kapatılabilir */
+#define R3D_MAX_DRAWS 1024u
+static b32 g_r3d_parallel = TRUE;
+
+void r3d_set_parallel(b32 on) {
+    g_r3d_parallel = on ? TRUE : FALSE;
+}
+
 /* ---------- Kare ---------- */
 
 void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderManager* sm,
@@ -190,7 +198,9 @@ void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, c
         pass.ctx         = &sctx;
         pass.shadow_pass = TRUE;
         pass.mat         = shadow_caster_material();
+        if (g_r3d_parallel) g3d_set_deferred(&sctx, R3D_MAX_DRAWS);
         scene(&pass, user);
+        g3d_flush(&sctx);
         shadow_end(&rr->shadow, r);
         if (out_shadow) *out_shadow = sctx.stats;
         /* sapma: ~1.5 texel'lik dünya mesafesi, derinlik birimine çevrilmiş (proj z ölçeği) */
@@ -215,6 +225,7 @@ void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, c
     f32 aspect = (f32)fb->w / (f32)fb->h;
     g3d_begin(&ctx, r, frame, camera_view(f->cam), camera_proj(f->cam, aspect), eye);
     if (f->pbr) g3d_set_shadow(&ctx, rr->shadow.world_to_tex);
+    if (g_r3d_parallel) g3d_set_deferred(&ctx, R3D_MAX_DRAWS);
 
     G3dMaterial mat;
     __builtin_memset(&mat, 0, sizeof(mat));
@@ -255,6 +266,7 @@ void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, c
     pass.mat         = mat;
     pass.emissive    = em;
     scene(&pass, user);
+    g3d_flush(&ctx);
 
     PROF_BEGIN("r3d_flush");
     raster_flush(r);

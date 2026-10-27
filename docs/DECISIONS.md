@@ -404,6 +404,19 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
 - Kuyu düşmanları karo ızgarasında oyuncudan BFS akış alanı izler (yer + hava için iki alan); A* yerine akış alanı
   çünkü tüm düşmanların hedefi aynı ve harita küçük (≤ 36×18).
 
+### D-105 — Paralel 3D ön uç: ertelenmiş çizim + g3d_flush
+**KABUL** · M13_B
+- `g3d_set_deferred(ctx, max_draws)` açıkken `g3d_draw` yalnız culling yapar, matris/materyal kopyasıyla komut
+  kaydeder ve raster durumunu kayıtta sabitler (`raster_pin_state`). `g3d_flush` köşe aşamasını (4096 köşelik
+  işler) ve üçgen aşamasını (1024 üçgenlik işler: outcode, kırpma, arka yüz + `raster_setup_tri`) `job_parallel_for`
+  ile çalıştırır; kurulmuş üçgenler iş parçacığı dilimlerinden (frame arena'dan sıfırlamasız `arena_sub`) gönderim
+  sırasıyla `raster_bin_tris` ile karolara dağıtılır. Karo dağıtımı (bin) ana iş parçacığında kalır.
+- Çıktı anlık yolla **bit düzeyinde aynı** (renk, derinlik, istatistik; test `gfx3d_deferred_matches_immediate`).
+  Dilimi yetmeyen iş ana iş parçacığında kesin kapasiteyle (üçgen × 7) yeniden işlenir (`items_fallback`).
+- Workers içinde PROF ve frame arena kullanılmaz. `arena_push_raw` (sıfırlamasız) eklendi; `arena_sub` artık dilimi
+  memset etmez (alt arenanın kendi ayırmaları zaten sıfırlanır).
+- Gölge haritası kodlaması 16384 piksellik işlere bölündü.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü

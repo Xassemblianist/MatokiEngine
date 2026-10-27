@@ -26,6 +26,8 @@
 #define KEY_M 77
 #define KEY_L 76
 #define KEY_N 78
+#define KEY_K 75
+#define KEY_O 79
 #define GRID_X 40
 #define GRID_Z 25
 #define SHADOW_SIZE 1024u
@@ -53,12 +55,28 @@ typedef struct {
     const Texture* tex;
     Vec4           color;
     b32            double_sided;
+    SkinnedMesh*   skinned;      /* skin'li çizimde bağlama pozu + ağırlıklar, yoksa NULL */
+    i32            skin;         /* g_anim.skins indeksi */
 } ModelDraw;
 #define MAX_MODEL_DRAWS 512
 static ModelDraw g_model[MAX_MODEL_DRAWS];
 static u32       g_model_count;
 static Mat4      g_model_fit;
 static char      g_model_info[160];
+
+/* Yüklenen modelin iskelet animasyonu: K sonraki klip, O durdur/sürdür */
+typedef struct {
+    Skeleton* skins;
+    u32       skin_count;
+    AnimClip* clips;
+    u32       clip_count;
+    u32       clip;
+    f32       time;
+    b32       paused;
+    f32       ms;           /* son karede örnekleme + skinning süresi */
+} ModelAnim;
+static ModelAnim g_anim;
+static u8        g_prev_k, g_prev_o;
 static u8       g_prev_c;
 
 void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
@@ -135,6 +153,31 @@ static void draw_scene(R3dPass* p, void* user) {
     r3d_draw_receiver(p, g_ground, &m, g_mipmap_on ? &g_tex[0] : &g_tex_ground_nomip, vec4(1, 1, 1, 1), 0.0f, 0.85f);
 }
 
+/* Animasyonlu çizimleri bu karenin pozuyla günceller: klip yalnız 0. iskelete uygulanır (kanallar glTF
+ * yükleyicide ilk eşleşen iskeletin eklemlerine bağlanır), diğer iskeletler bağlama pozunda kalır. */
+static void animate_model(Arena* frame, f32 dt) {
+    if (g_anim.skin_count == 0u) return;
+    f64 t0 = plat_time_ms();
+    if (!g_anim.paused) g_anim.time += dt;
+    usize mark = arena_mark(frame);
+    for (u32 s = 0; s < g_anim.skin_count; s++) {
+        const Skeleton* sk = &g_anim.skins[s];
+        u32 jc = sk->joint_count;
+        if (jc == 0u) continue;
+        JointPose* poses = ARENA_PUSH_ARRAY(frame, JointPose, jc);
+        Mat4* mats = ARENA_PUSH_ARRAY(frame, Mat4, jc);
+        b32 ok = FALSE;
+        if (s == 0u && g_anim.clip_count > 0u) ok = clip_sample(&g_anim.clips[g_anim.clip], sk, g_anim.time, TRUE, poses);
+        if (!skeleton_compute_matrices(sk, ok ? poses : NULL, NULL, mats)) continue;
+        for (u32 i = 0; i < g_model_count; i++) {
+            ModelDraw* d = &g_model[i];
+            if (d->skinned && d->skin == (i32)s) skin_mesh(d->skinned, mats, jc, d->mesh);
+        }
+        arena_pop_to(frame, mark);
+    }
+    g_anim.ms = (f32)(plat_time_ms() - t0);
+}
+
 static b32 key_pressed(const InputState* in, u32 key, u8* prev) {
     u8 down = in->keys[key];
     b32 hit = down && !*prev;
@@ -168,6 +211,13 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
         g_tod -= m_floor(g_tod);
     }
     camera_update(&g_cam, in, dt, look_enabled);
+    if (key_pressed(in, KEY_K, &g_prev_k) && g_anim.clip_count > 0u) {
+        g_anim.clip = (g_anim.clip + 1u) % g_anim.clip_count;
+        g_anim.time = 0.0f;
+        LOG("Animasyon: %u/%u '%s'", g_anim.clip + 1u, g_anim.clip_count, g_anim.clips[g_anim.clip].name);
+    }
+    if (key_pressed(in, KEY_O, &g_prev_o)) g_anim.paused = !g_anim.paused;
+    animate_model(frame, dt);
 
     /* Gölge: kameranın önündeki 36 birimlik küre */
     Vec3 eye = camera_eye(&g_cam);
@@ -213,6 +263,13 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
                g_pbr_on ? "PBR+golge" : "Lambert", g_day_paused ? "durdu" : "gun", hh, mm,
                (f64)camera_eye(&g_cam).x, (f64)camera_eye(&g_cam).y, (f64)camera_eye(&g_cam).z);
     ui_draw_text(ui, 4, y + 11, line, FB_RGBA(150, 200, 255, 255), 1);
+    if (g_anim.clip_count > 0u) {
+        fmt_format(line, sizeof(line), "[K] klip %u/%u %s  [O] %s  t=%.2f s  poz+skin %.3f ms",
+                   g_anim.clip + 1u, g_anim.clip_count, g_anim.clips[g_anim.clip].name,
+                   g_anim.paused ? "durdu" : "oynuyor", (f64)g_anim.time, (f64)g_anim.ms);
+        ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 12, FB_RGBA(15, 18, 26, 190));
+        ui_draw_text(ui, 4, y - 12, line, FB_RGBA(180, 255, 180, 255), 1);
+    }
     const char* hint = g_model_info[0] ? g_model_info : ".glb / .gltf / .obj dosyasini pencereye surukle-birak";
     i32 hw = font_measure_width(hint, 1);
     ui_draw_rect(ui, (i32)fb->w - hw - 10, 22, hw + 8, 12, FB_RGBA(15, 18, 26, 190));
@@ -284,6 +341,7 @@ static void fit_model(Vec3 lo, Vec3 hi) {
 
 b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* scratch) {
     g_model_count = 0;
+    __builtin_memset(&g_anim, 0, sizeof(g_anim));
     g_model_info[0] = 0;
     FileSet fs = { files, count };
     f64 t0 = plat_time_ms();
@@ -304,6 +362,14 @@ b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* s
                 d->tex = &g_tex[2];
                 d->color = vec4(1, 1, 1, 1);
                 d->double_sided = FALSE;
+                d->skinned = NULL;
+                d->skin = -1;
+                if (gd->skinned && gd->skin >= 0) {
+                    /* Kendi çıktı mesh'i: her kare bağlama pozundan yeniden kaplanır */
+                    d->skinned = gd->skinned;
+                    d->skin = gd->skin;
+                    d->mesh = skin_clone_mesh(out, gd->skinned->bind_mesh);
+                }
                 if (gd->material >= 0) {
                     const GltfMaterial* mt = &gm.materials[gd->material];
                     d->color = mt->base_color;
@@ -312,8 +378,13 @@ b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* s
                 }
             }
             fit_model(gm.bounds_min, gm.bounds_max);
-            fmt_format(g_model_info, sizeof(g_model_info), "%s: %u cizim, %u ucgen, %u uyari, %.1f ms",
-                       base_name(f->name), gm.draw_count, gm.triangles, gm.warnings, plat_time_ms() - t0);
+            g_anim.skins = gm.skins;
+            g_anim.skin_count = gm.skin_count;
+            g_anim.clips = gm.animations;
+            g_anim.clip_count = gm.anim_count;
+            fmt_format(g_model_info, sizeof(g_model_info), "%s: %u cizim, %u ucgen, %u iskelet, %u klip, %u uyari, %.1f ms",
+                       base_name(f->name), gm.draw_count, gm.triangles, gm.skin_count, gm.anim_count, gm.warnings,
+                       plat_time_ms() - t0);
             if (gm.warnings) LOG("glTF uyarilari: %s", gm.warn);
             LOG("glTF sureleri: JSON %.2f ms, doku (PNG+mip) %.2f ms, mesh %.2f ms", gm.t_json_ms, gm.t_tex_ms, gm.t_mesh_ms);
             LOG("%s", g_model_info);
@@ -327,6 +398,8 @@ b32 scene3d_load_files(const DroppedFile* files, u32 count, Arena* out, Arena* s
                 return FALSE;
             }
             ModelDraw* d = &g_model[g_model_count++];
+            d->skinned = NULL;
+            d->skin = -1;
             d->mesh = mesh;
             d->world = mat4_identity();
             d->tex = &g_tex[2];

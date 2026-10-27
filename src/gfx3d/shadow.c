@@ -5,6 +5,7 @@
 #include "gfx3d/shadow.h"
 #include "gfx3d/camera.h"
 #include "core/profiler.h"
+#include "thread/job.h"
 
 void shadow_init(ShadowMap* s, Arena* perm, u32 size) {
     __builtin_memset(s, 0, sizeof(*s));
@@ -74,12 +75,18 @@ f32 shadow_decode_texel(u32 px) {
     return (f32)q * (1.0f / 16777215.0f);
 }
 
-void shadow_end(ShadowMap* s, Rasterizer* r) {
-    raster_flush(r);
-    PROF_BEGIN("shadow_encode");
-    u32 n = s->size * s->size;
-    const f32* d = s->fb.depth;
-    u32* px = s->fb.px;
+typedef struct {
+    const f32* d;
+    u32*       px;
+} EncodeCtx;
+
+#define SHADOW_ENCODE_CHUNK 16384u
+
+static void encode_job(u32 start, u32 end, void* user) {
+    const EncodeCtx* e = (const EncodeCtx*)user;
+    const f32* d = e->d + (usize)start * SHADOW_ENCODE_CHUNK;
+    u32* px = e->px + (usize)start * SHADOW_ENCODE_CHUNK;
+    u32 n = (end - start) * SHADOW_ENCODE_CHUNK;
     /* Dalsız gövde: clang -msimd128 bunu f32x4/i32x4'e vektörleştirir (shadow_encode_depth ile aynı sonuç) */
     for (u32 i = 0; i < n; i++) {
         f32 z = d[i];
@@ -88,6 +95,21 @@ void shadow_end(ShadowMap* s, Rasterizer* r) {
         u32 q = (u32)(z * 16777215.0f + 0.5f);
         q = (q > 0xFFFFFFu) ? 0xFFFFFFu : q;
         px[i] = (q >> 16) | (q & 0xFF00u) | ((q & 0xFFu) << 16) | 0xFF000000u;
+    }
+}
+
+void shadow_end(ShadowMap* s, Rasterizer* r) {
+    raster_flush(r);
+    PROF_BEGIN("shadow_encode");
+    u32 n = s->size * s->size;
+    EncodeCtx e = { s->fb.depth, s->fb.px };
+    /* size bir 2 kuvveti (>= 128) → n parça boyunun katı; değilse kalan tek parça olarak yapılır */
+    u32 chunks = n / SHADOW_ENCODE_CHUNK;
+    if (chunks > 0) job_parallel_for(chunks, 1, encode_job, &e);
+    u32 done = chunks * SHADOW_ENCODE_CHUNK;
+    if (done < n) {
+        EncodeCtx tail = { s->fb.depth + done, s->fb.px + done };
+        for (u32 i = 0; i < n - done; i++) tail.px[i] = shadow_encode_depth(tail.d[i]);
     }
     PROF_END();
 }

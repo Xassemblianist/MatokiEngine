@@ -30,7 +30,7 @@ src/  (C11 → engine.wasm)
  mbin/    wasm binary üretici (LEB128, section'lar, opcode yayıcı) = bizim assembler'ımız
  matoki/  lexer, parser, sema, IR, opt, codegen(→mbin), jit köprüsü
  gfx2d/   sprite batch, tilemap + çarpışma, Camera2D, animasyon (M7_1)
- gfx3d/   mesh, kamera, homojen kırpma (guard band), reverse-Z boru hattı (M8_A)
+ gfx3d/   mesh, kamera, homojen kırpma (guard band), reverse-Z boru hattı (M8_A), paralel ertelenmiş ön uç (D-105)
  asset/   JSON (RFC 8259), base64, OBJ/MTL, glTF 2.0/GLB yükleyicileri — sıfırdan (M8_D)
  audio/   synth (osilatör, ADSR, sıralayıcı) + paylaşılan bellek ses halkası (M7_2)
  img/ ui/ PNG, prosedürel doku, font, immediate-mode UI (M7_0)

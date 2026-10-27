@@ -61,141 +61,134 @@ static inline void setup_edge(Fx8 xa, Fx8 ya, Fx8 xb, Fx8 yb,
     *out_c = (i32)(k >> FX8_SHIFT);
 }
 
-static void raster_process_tri_buf(Rasterizer* r) {
-    u32 count = r->tri_buf_count;
-    if (count == 0) return;
-    r->tri_buf_count = 0;
-
-    RasterShaderState* state = ensure_pinned_state(r);
+/* Tek üçgen kurulumu: kenar denklemleri, derinlik düzlemi, varying katsayıları. Saf ve iş parçacığı
+ * güvenli (yalnız çıktılara yazar). Sıfır alan, ayıklanan arka yüz veya ekran dışı → FALSE. */
+static inline b32 setup_tri_body(const RasterVert* pv0, const RasterVert* pv1, const RasterVert* pv2,
+                                 const RasterShaderState* state, b32 cull_back, i32 fb_w, i32 fb_h,
+                                 BinnedTri* tri, f32* vc) {
     u32 vcount = state->varying_count;
-    i32 fb_w = (i32)r->fb->w;
-    i32 fb_h = (i32)r->fb->h;
+    RasterVert v0 = *pv0;
+    RasterVert v1 = *pv1;
+    RasterVert v2 = *pv2;
 
-    PROF_BEGIN("setup");
-    /* Üçgen başına ayrı arena_push/memset çağrısını önlemek için blok halinde ayır */
-    BinnedTri* tri_pool = ARENA_PUSH_ARRAY(r->frame, BinnedTri, count);
-    f32* vc_pool = (vcount > 0) ? ARENA_PUSH_ARRAY(r->frame, f32, count * vcount * 3u) : NULL;
-    u32 setup_count = 0;
+    Fx8 x0 = fx8_from_f32(v0.x);
+    Fx8 y0 = fx8_from_f32(v0.y);
+    Fx8 x1 = fx8_from_f32(v1.x);
+    Fx8 y1 = fx8_from_f32(v1.y);
+    Fx8 x2 = fx8_from_f32(v2.x);
+    Fx8 y2 = fx8_from_f32(v2.y);
 
-    for (u32 i = 0; i < count; i++) {
-        RasterVert v0 = r->tri_buf[i].v0;
-        RasterVert v1 = r->tri_buf[i].v1;
-        RasterVert v2 = r->tri_buf[i].v2;
+    i64 area2 = (i64)(x1 - x0) * (i64)(y2 - y0) - (i64)(y1 - y0) * (i64)(x2 - x0);
+    if (area2 == 0) return FALSE;
 
-        Fx8 x0 = fx8_from_f32(v0.x);
-        Fx8 y0 = fx8_from_f32(v0.y);
-        Fx8 x1 = fx8_from_f32(v1.x);
-        Fx8 y1 = fx8_from_f32(v1.y);
-        Fx8 x2 = fx8_from_f32(v2.x);
-        Fx8 y2 = fx8_from_f32(v2.y);
+    if (area2 < 0) {
+        if (cull_back) return FALSE;
+        RasterVert tv = v1; v1 = v2; v2 = tv;
+        Fx8 tx = x1; x1 = x2; x2 = tx;
+        Fx8 ty = y1; y1 = y2; y2 = ty;
+        area2 = -area2;
+    }
 
-        i64 area2 = (i64)(x1 - x0) * (i64)(y2 - y0) - (i64)(y1 - y0) * (i64)(x2 - x0);
-        if (area2 == 0) continue;
+    Fx8 min_fx = MIN(x0, MIN(x1, x2));
+    Fx8 max_fx = MAX(x0, MAX(x1, x2));
+    Fx8 min_fy = MIN(y0, MIN(y1, y2));
+    Fx8 max_fy = MAX(y0, MAX(y1, y2));
 
-        if (area2 < 0) {
-            if (r->cull_back) continue;
-            RasterVert tv = v1; v1 = v2; v2 = tv;
-            Fx8 tx = x1; x1 = x2; x2 = tx;
-            Fx8 ty = y1; y1 = y2; y2 = ty;
-            area2 = -area2;
-        }
+    i32 min_px = (min_fx + (FX8_HALF - 1)) >> FX8_SHIFT;
+    i32 max_px = (max_fx - FX8_HALF) >> FX8_SHIFT;
+    i32 min_py = (min_fy + (FX8_HALF - 1)) >> FX8_SHIFT;
+    i32 max_py = (max_fy - FX8_HALF) >> FX8_SHIFT;
 
-        Fx8 min_fx = MIN(x0, MIN(x1, x2));
-        Fx8 max_fx = MAX(x0, MAX(x1, x2));
-        Fx8 min_fy = MIN(y0, MIN(y1, y2));
-        Fx8 max_fy = MAX(y0, MAX(y1, y2));
+    min_px = MAX(min_px, 0);
+    min_py = MAX(min_py, 0);
+    max_px = MIN(max_px, fb_w - 1);
+    max_py = MIN(max_py, fb_h - 1);
 
-        i32 min_px = (min_fx + (FX8_HALF - 1)) >> FX8_SHIFT;
-        i32 max_px = (max_fx - FX8_HALF) >> FX8_SHIFT;
-        i32 min_py = (min_fy + (FX8_HALF - 1)) >> FX8_SHIFT;
-        i32 max_py = (max_fy - FX8_HALF) >> FX8_SHIFT;
+    if (min_px > max_px || min_py > max_py) return FALSE;
 
-        min_px = MAX(min_px, 0);
-        min_py = MAX(min_py, 0);
-        max_px = MIN(max_px, fb_w - 1);
-        max_py = MIN(max_py, fb_h - 1);
+    f32 fx0 = v0.x, fy0 = v0.y;
+    f32 fx1 = v1.x, fy1 = v1.y;
+    f32 fx2 = v2.x, fy2 = v2.y;
+    f32 f_area2 = (fx1 - fx0) * (fy2 - fy0) - (fy1 - fy0) * (fx2 - fx0);
+    if (m_abs(f_area2) < 1e-12f) {
+        fx0 = fx8_to_f32(x0); fy0 = fx8_to_f32(y0);
+        fx1 = fx8_to_f32(x1); fy1 = fx8_to_f32(y1);
+        fx2 = fx8_to_f32(x2); fy2 = fx8_to_f32(y2);
+        f_area2 = (fx1 - fx0) * (fy2 - fy0) - (fy1 - fy0) * (fx2 - fx0);
+    }
+    f32 inv_area = 1.0f / f_area2;
 
-        if (min_px > max_px || min_py > max_py) continue;
+    tri->state = state;
+    tri->min_x = (i16)min_px;
+    tri->min_y = (i16)min_py;
+    tri->max_x = (i16)max_px;
+    tri->max_y = (i16)max_py;
 
-        f32 fx0 = v0.x, fy0 = v0.y;
-        f32 fx1 = v1.x, fy1 = v1.y;
-        f32 fx2 = v2.x, fy2 = v2.y;
-        f32 f_area2 = (fx1 - fx0) * (fy2 - fy0) - (fy1 - fy0) * (fx2 - fx0);
-        if (m_abs(f_area2) < 1e-12f) {
-            fx0 = fx8_to_f32(x0); fy0 = fx8_to_f32(y0);
-            fx1 = fx8_to_f32(x1); fy1 = fx8_to_f32(y1);
-            fx2 = fx8_to_f32(x2); fy2 = fx8_to_f32(y2);
-            f_area2 = (fx1 - fx0) * (fy2 - fy0) - (fy1 - fy0) * (fx2 - fx0);
-        }
-        f32 inv_area = 1.0f / f_area2;
+    setup_edge(x0, y0, x1, y1, &tri->a0, &tri->b0, &tri->c0);
+    setup_edge(x1, y1, x2, y2, &tri->a1, &tri->b1, &tri->c1);
+    setup_edge(x2, y2, x0, y0, &tri->a2, &tri->b2, &tri->c2);
 
-        BinnedTri* tri = &tri_pool[setup_count];
-        tri->state = state;
-        tri->min_x = (i16)min_px;
-        tri->min_y = (i16)min_py;
-        tri->max_x = (i16)max_px;
-        tri->max_y = (i16)max_py;
+    f32 dl1_dx = (fy2 - fy0) * inv_area;
+    f32 dl1_dy = (fx0 - fx2) * inv_area;
+    f32 dl2_dx = (fy0 - fy1) * inv_area;
+    f32 dl2_dy = (fx1 - fx0) * inv_area;
 
-        setup_edge(x0, y0, x1, y1, &tri->a0, &tri->b0, &tri->c0);
-        setup_edge(x1, y1, x2, y2, &tri->a1, &tri->b1, &tri->c1);
-        setup_edge(x2, y2, x0, y0, &tri->a2, &tri->b2, &tri->c2);
+    tri->x0     = fx0;
+    tri->y0     = fy0;
+    tri->dl1_dx = dl1_dx;
+    tri->dl1_dy = dl1_dy;
+    tri->dl2_dx = dl2_dx;
+    tri->dl2_dy = dl2_dy;
 
-        f32 dl1_dx = (fy2 - fy0) * inv_area;
-        f32 dl1_dy = (fx0 - fx2) * inv_area;
-        f32 dl2_dx = (fy0 - fy1) * inv_area;
-        f32 dl2_dy = (fx1 - fx0) * inv_area;
+    /* Derinlik düzlemi: z(x,y) = z0 + (x + 0.5 - x0)*dz_dx + (y + 0.5 - y0)*dz_dy */
+    f32 dz1 = v1.z - v0.z;
+    f32 dz2 = v2.z - v0.z;
+    tri->z0    = v0.z;
+    tri->dz_dx = dz1 * dl1_dx + dz2 * dl2_dx;
+    tri->dz_dy = dz1 * dl1_dy + dz2 * dl2_dy;
 
-        tri->x0     = fx0;
-        tri->y0     = fy0;
-        tri->dl1_dx = dl1_dx;
-        tri->dl1_dy = dl1_dy;
-        tri->dl2_dx = dl2_dx;
-        tri->dl2_dy = dl2_dy;
+    f32 iw0 = (v0.inv_w == 0.0f) ? 1.0f : v0.inv_w;
+    f32 iw1 = (v1.inv_w == 0.0f) ? 1.0f : v1.inv_w;
+    f32 iw2 = (v2.inv_w == 0.0f) ? 1.0f : v2.inv_w;
+    b32 is_affine = (iw0 == 1.0f && iw1 == 1.0f && iw2 == 1.0f);
+    tri->inv_w0    = iw0;
+    tri->inv_w1    = iw1;
+    tri->inv_w2    = iw2;
+    tri->is_affine = is_affine;
 
-        /* Derinlik düzlemi: z(x,y) = z0 + (x + 0.5 - x0)*dz_dx + (y + 0.5 - y0)*dz_dy */
-        f32 dz1 = v1.z - v0.z;
-        f32 dz2 = v2.z - v0.z;
-        tri->z0    = v0.z;
-        tri->dz_dx = dz1 * dl1_dx + dz2 * dl2_dx;
-        tri->dz_dy = dz1 * dl1_dy + dz2 * dl2_dy;
-
-        f32 iw0 = (v0.inv_w == 0.0f) ? 1.0f : v0.inv_w;
-        f32 iw1 = (v1.inv_w == 0.0f) ? 1.0f : v1.inv_w;
-        f32 iw2 = (v2.inv_w == 0.0f) ? 1.0f : v2.inv_w;
-        b32 is_affine = (iw0 == 1.0f && iw1 == 1.0f && iw2 == 1.0f);
-        tri->inv_w0    = iw0;
-        tri->inv_w1    = iw1;
-        tri->inv_w2    = iw2;
-        tri->is_affine = is_affine;
-
-        if (vcount > 0) {
-            f32* vc = vc_pool + setup_count * vcount * 3u;
-            tri->var_coeffs = vc;
-            if (is_affine) {
-                for (u32 k = 0; k < vcount; k++) {
-                    f32 f0 = v0.var[k];
-                    f32 d1 = v1.var[k] - f0;
-                    f32 d2 = v2.var[k] - f0;
-                    vc[k * 3u + 0u] = f0;
-                    vc[k * 3u + 1u] = d1 * dl1_dx + d2 * dl2_dx;
-                    vc[k * 3u + 2u] = d1 * dl1_dy + d2 * dl2_dy;
-                }
-            } else {
-                for (u32 k = 0; k < vcount; k++) {
-                    f32 u0 = v0.var[k] * iw0;
-                    f32 u1 = v1.var[k] * iw1;
-                    f32 u2 = v2.var[k] * iw2;
-                    vc[k * 3u + 0u] = u0;
-                    vc[k * 3u + 1u] = u1 - u0;
-                    vc[k * 3u + 2u] = u2 - u0;
-                }
+    if (vcount > 0) {
+        tri->var_coeffs = vc;
+        if (is_affine) {
+            for (u32 k = 0; k < vcount; k++) {
+                f32 f0 = v0.var[k];
+                f32 d1 = v1.var[k] - f0;
+                f32 d2 = v2.var[k] - f0;
+                vc[k * 3u + 0u] = f0;
+                vc[k * 3u + 1u] = d1 * dl1_dx + d2 * dl2_dx;
+                vc[k * 3u + 2u] = d1 * dl1_dy + d2 * dl2_dy;
+            }
+        } else {
+            for (u32 k = 0; k < vcount; k++) {
+                f32 u0 = v0.var[k] * iw0;
+                f32 u1 = v1.var[k] * iw1;
+                f32 u2 = v2.var[k] * iw2;
+                vc[k * 3u + 0u] = u0;
+                vc[k * 3u + 1u] = u1 - u0;
+                vc[k * 3u + 2u] = u2 - u0;
             }
         }
-
-        setup_count++;
     }
-    PROF_END();
+    return TRUE;
+}
 
+b32 raster_setup_tri(const RasterVert* v0, const RasterVert* v1, const RasterVert* v2,
+                     const RasterShaderState* state, b32 cull_back, i32 fb_w, i32 fb_h,
+                     BinnedTri* out, f32* vc) {
+    return setup_tri_body(v0, v1, v2, state, cull_back, fb_w, fb_h, out, vc);
+}
+
+/* Kurulmuş üçgenleri gönderim sırasıyla karolara dağıtır (yalnız ana iş parçacığı) */
+static void bin_tris(Rasterizer* r, BinnedTri* tri_pool, u32 setup_count) {
     PROF_BEGIN("bin");
     u32 tiles_x = r->tiles_x;
     for (u32 i = 0; i < setup_count; i++) {
@@ -231,6 +224,45 @@ static void raster_process_tri_buf(Rasterizer* r) {
         }
     }
     PROF_END();
+}
+
+static void raster_process_tri_buf(Rasterizer* r) {
+    u32 count = r->tri_buf_count;
+    if (count == 0) return;
+    r->tri_buf_count = 0;
+
+    RasterShaderState* state = ensure_pinned_state(r);
+    u32 vcount = state->varying_count;
+    i32 fb_w = (i32)r->fb->w;
+    i32 fb_h = (i32)r->fb->h;
+
+    PROF_BEGIN("setup");
+    /* Üçgen başına ayrı arena_push/memset çağrısını önlemek için blok halinde ayır */
+    BinnedTri* tri_pool = ARENA_PUSH_ARRAY(r->frame, BinnedTri, count);
+    f32* vc_pool = (vcount > 0) ? ARENA_PUSH_ARRAY(r->frame, f32, count * vcount * 3u) : NULL;
+    u32 setup_count = 0;
+
+    for (u32 i = 0; i < count; i++) {
+        BinnedTri* tri = &tri_pool[setup_count];
+        f32* vc = (vcount > 0) ? vc_pool + setup_count * vcount * 3u : NULL;
+        if (!setup_tri_body(&r->tri_buf[i].v0, &r->tri_buf[i].v1, &r->tri_buf[i].v2, state, r->cull_back,
+                            fb_w, fb_h, tri, vc)) continue;
+        setup_count++;
+    }
+    PROF_END();
+
+    bin_tris(r, tri_pool, setup_count);
+}
+
+void raster_bin_tris(Rasterizer* r, BinnedTri* tris, u32 count, u32 submitted) {
+    raster_process_tri_buf(r);   /* sıra korunur: önce bekleyen anlık üçgenler */
+    r->stat_tris_in += submitted;
+    bin_tris(r, tris, count);
+}
+
+const RasterShaderState* raster_pin_state(Rasterizer* r) {
+    raster_process_tri_buf(r);
+    return ensure_pinned_state(r);
 }
 
 static void raster_commit_depth(Rasterizer* r, u32 count) {

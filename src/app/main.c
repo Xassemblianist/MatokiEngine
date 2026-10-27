@@ -23,6 +23,7 @@
 #include "ui/editor.h"
 #include "app/shaders.h"
 #include "app/scene3d.h"
+#include "app/r3d.h"
 #include "asset/json.h"
 #include "gfx3d/pipeline.h"
 #include "app/scene_platformer.h"
@@ -958,6 +959,11 @@ EXPORT(engine_prof_report) void engine_prof_report(void) {
 /* Ölçüm: JIT/C-ref seçimi ve 3D sahne aydınlatma modu (konsoldan) */
 EXPORT(engine_set_jit) void engine_set_jit(b32 on) {
     g_use_jit = on;
+}
+
+/* Ölçüm: 3D ön ucun paralel (ertelenmiş) yolu açık/kapalı */
+EXPORT(engine_set_g3d_parallel) void engine_set_g3d_parallel(b32 on) {
+    r3d_set_parallel(on);
 }
 
 EXPORT(engine_s3d_bench) void engine_s3d_bench(b32 pbr, f32 tod) {

@@ -11,7 +11,7 @@ void arena_init(Arena* a, void* base, usize cap) {
     a->used = 0;
 }
 
-void* arena_push(Arena* a, usize size, usize align) {
+void* arena_push_raw(Arena* a, usize size, usize align) {
     ASSERT(IS_POW2(align));
     uptr base_addr = (uptr)a->base;
     uptr cur_addr  = base_addr + (uptr)a->used;
@@ -25,7 +25,11 @@ void* arena_push(Arena* a, usize size, usize align) {
 
     usize offset = a->used + pad;
     a->used = offset + size;
-    void* ptr = a->base + offset;
+    return a->base + offset;
+}
+
+void* arena_push(Arena* a, usize size, usize align) {
+    void* ptr = arena_push_raw(a, size, align);
     __builtin_memset(ptr, 0, size);
     return ptr;
 }
@@ -44,7 +48,8 @@ void arena_pop_to(Arena* a, usize mark) {
 }
 
 Arena arena_sub(Arena* parent, usize cap) {
-    void* base = arena_push(parent, cap, 16);
+    /* Alt arenanın kendi ayırmaları zaten sıfırlanır; dilimi burada memset etmek gereksiz */
+    void* base = arena_push_raw(parent, cap, 16);
     Arena sub;
     arena_init(&sub, base, cap);
     return sub;
