@@ -352,6 +352,28 @@ Test varlıkları `tests/assets/make_assets.py` ile üretilir (D-063).
 `engine_file_begin/alloc/add/end` export'ları; dosya baytları ve model 48 MB `g_asset_arena`'da
 (her grupta sıfırlanır), geçici bellek kareler arasında frame arena. JS yalnız bayt kopyalar (`web/filedrop.js`).
 
+## L. Işık ve gölge (M9_A)
+
+### D-098 — Raster yalnız-derinlik kipi: `shade_fn == NULL`
+**KABUL** · 2026-10-27 · M9_A
+Shader'sız çizimde quad kuyruğa girmez; derinlik testi + early-Z yazımı emit sırasında yapılır,
+shade/blend hiç çalışmaz. Gölge haritası geçişi böyle çizilir (skaler ve SIMD emit yollarında aynı).
+
+### D-099 — Gölge haritası: ortografik reverse-Z, 24 bit RGB kodlu derinlik
+**KABUL** · M9_A
+Güneş için tek gölge haritası (1024²), kameranın önündeki 36 birimlik küreye oturtulur; izdüşüm
+merkezi texel ızgarasına hizalanır (kamera dönerken titreme yok). Gölge düşürenler ön yüz ayıklamalı çizilir.
+Matoki dokuları RGBA8 olduğundan derinlik `q = round(d·(2^24−1))` → R,G,B baytlarına kodlanır; shader
+`r·0.99609 + g·0.00389 + b·0.0000152` ile çözer, 2×2 texel çift doğrusal ağırlıklı karşılaştırma (PCF) yapar.
+Sapma: 1.5 texel'lik dünya mesafesi (derinlik birimine çevrilmiş). Bedeli: kodlama 1M piksel/kare (~1.5 ms) — bkz. Ö-10.
+
+### D-100 — PBR modeli (pbr3d.mtk)
+**KABUL** · M9_A
+Metal/pürüzlülük; GGX dağılımı, Schlick-GGX görünürlük (k = (r+1)²/8), Schlick Fresnel (x⁵ çarpımla),
+yarım küre ortam ışığı + metaller için kaba yansıma payı; doğrusal uzayda sis; ACES (Narkowicz) ton eşleme;
+sRGB yerine gama 2 (giriş c², çıkış √c — pow yok). Gece-gündüz: güneş yörüngesi, ufukta turuncu ışık,
+gece ay (soluk mavi, güneşin karşısı). C referansı `ref_shade_pbr3d` aynı formüller.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -371,3 +393,10 @@ Test varlıkları `tests/assets/make_assets.py` ile üretilir (D-063).
 - **Ö-7** Ses render'ını bir worker'a taşımak (ana thread takılmalarına dayanıklılık). — M7_2
 - **Ö-8** JSON sayıları için tam doğru yuvarlama (Eisel-Lemire veya büyük tamsayı yedeği) — şu an ≤4 ULP. — M8_D
 - **Ö-9** glTF: çoklu primitive başına ayrı materyal varyantları, normal haritası/PBR (`pbr.mtk`), KTX/JPEG. — M8_D
+- **Ö-10** Matoki'ye f32 doku biçimi (`texture2d_f32` / `sample_depth`): gölge haritası derinliği kodlamadan
+  doğrudan okunur, ~1.5 ms/kare kodlama ve shader'daki çözme kalkar. — M9_A
+- **Ö-11** Matoki'yi shader dilinden **genel sistem diline** büyütmek (kullanıcı isteği, 2026-10-27): struct, dizi,
+  doğrusal belleğe işaretçi, arena ile bellek, açık SIMD tipleri, çöp toplayıcı ve çalışma zamanı yok; oyun mantığı da
+  Matoki ile yazılır ve JIT ile derlenir. Önce ölçüm: Matoki çıktısı ile elle yazılmış en iyi WAT aynı shader'larda. — M9_A
+- **Ö-12** Retro 3D modu (kullanıcı isteği): düşük iç çözünürlük + tamsayı büyütme, en yakın komşu doku, isteğe bağlı
+  köşe yakalama (vertex snapping) ve renk derinliği azaltma/titreşim (dither) — eski konsol estetiği, yazılımsal raster'da ucuz. — M9_A

@@ -1,0 +1,87 @@
+// pbr3d.mtk — fiziksel tabanlı aydınlatma (metal/pürüzlülük): GGX dağılımı, Schlick-GGX görünürlük,
+// Schlick Fresnel; güneş + yarım küre ortam ışığı; 2×2 PCF gölge haritası (24 bit kodlu reverse-Z derinlik);
+// doğrusal uzayda sis, ACES yaklaşık ton eşleme, gama 2 (sRGB yaklaşığı: giriş c², çıkış √c).
+uniform sun_dir: vec3;       // dünya uzayı, ışığa doğru, birim
+uniform sun_col: vec3;       // güneş ışınımı (doğrusal, ton eşleme öncesi)
+uniform sky_col: vec3;       // yarım küre ortam: yukarı
+uniform gnd_col: vec3;       // yarım küre ortam: aşağı
+uniform eye:     vec3;       // kamera konumu
+uniform base:    vec4;       // albedo çarpanı (sRGB) + alfa
+uniform mat:     vec4;       // x metallik, y pürüzlülük, z gölge sapması, w gölge haritası boyutu (texel)
+uniform fog:     vec4;       // rgb sis rengi (doğrusal), a yoğunluk (1/birim)
+uniform albedo:  texture2d @bilinear @mipmap;
+uniform shadow:  texture2d @clamp;
+in uv:    vec2;
+in nrm:   vec3;
+in depth: f32;
+in wpos:  vec3;
+in spos:  vec3;              // gölge doku uzayı (u, v, derinlik)
+
+const PI = 3.14159265;
+
+fn sdepth(t: vec4) -> f32 {
+    // r*65536 + g*256 + b, kanal = bayt/255 → (bayt) * 255/(2^24-1)
+    return t.r * 0.99609381 + t.g * 0.0038910 + t.b * 0.0000152;
+}
+
+fn lit_tap(p: vec2, z: f32) -> f32 {
+    return step(sdepth(sample(shadow, p)), z);
+}
+
+fn frag() -> rgba {
+    let tc = sample(albedo, uv) * base;
+    let alb = tc.rgb * tc.rgb;
+    let metal = mat.x;
+    let rough = max(mat.y, 0.04);
+
+    let n = normalize(nrm);
+    let v = normalize(eye - wpos);
+    let l = sun_dir;
+    let h = normalize(v + l);
+    let ndl = max(dot(n, l), 0.0);
+    let ndv = max(dot(n, v), 0.0001);
+    let ndh = max(dot(n, h), 0.0);
+    let vdh = max(dot(v, h), 0.0);
+
+    // Gölge: 2×2 texel çift doğrusal ağırlıklı karşılaştırma
+    let sz = mat.w;
+    let st = spos.xy * sz - vec2(0.5, 0.5);
+    let fl = floor(st);
+    let fr = st - fl;
+    let p0 = (fl + vec2(0.5, 0.5)) * (1.0 / sz);
+    let dt = 1.0 / sz;
+    let z = spos.z + mat.z;
+    let s00 = lit_tap(p0, z);
+    let s10 = lit_tap(p0 + vec2(dt, 0.0), z);
+    let s01 = lit_tap(p0 + vec2(0.0, dt), z);
+    let s11 = lit_tap(p0 + vec2(dt, dt), z);
+    let sh = mix(mix(s00, s10, fr.x), mix(s01, s11, fr.x), fr.y);
+
+    // Cook–Torrance
+    let a = rough * rough;
+    let a2 = a * a;
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let dist = a2 / (PI * dd * dd);
+    let k = (rough + 1.0) * (rough + 1.0) * 0.125;
+    let vis = 0.25 / ((ndl * (1.0 - k) + k) * (ndv * (1.0 - k) + k));
+    let f0 = mix(vec3(0.04, 0.04, 0.04), alb, metal);
+    let x = 1.0 - vdh;
+    let x2 = x * x;
+    let fw = x2 * x2 * x;
+    let fres = f0 + (vec3(1.0, 1.0, 1.0) - f0) * fw;
+    let kd = (vec3(1.0, 1.0, 1.0) - fres) * (1.0 - metal);
+    let direct = (kd * alb * (1.0 / PI) + fres * (dist * vis)) * sun_col * (ndl * sh);
+
+    // Ortam: yarım küre, metaller için kaba yansıma payı
+    let hemi = mix(gnd_col, sky_col, n.y * 0.5 + 0.5);
+    let amb = hemi * (alb * (1.0 - metal) + f0 * ((1.0 - rough) * 0.5 + 0.25));
+
+    let col = direct + amb;
+    let f = clamp(depth * fog.a, 0.0, 1.0);
+    let c = mix(col, fog.rgb, f);
+
+    // ACES (Narkowicz) + gama 2
+    let tm = (c * (c * 2.51 + vec3(0.03, 0.03, 0.03))) / (c * (c * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14));
+    let o = sqrt(clamp(tm, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)));
+    return vec4(o.r, o.g, o.b, tc.a);
+}

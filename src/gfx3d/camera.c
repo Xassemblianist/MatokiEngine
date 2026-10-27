@@ -98,3 +98,15 @@ Mat4 mat4_perspective_rz(f32 fov_y_rad, f32 aspect, f32 near_z) {
     }};
     return r;
 }
+
+Mat4 mat4_ortho_rz(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f) {
+    Mat4 m = {{ 0 }};
+    m.m[0]  = 2.0f / (r - l);
+    m.m[5]  = 2.0f / (t - b);
+    m.m[10] = 1.0f / (f - n);
+    m.m[12] = -(r + l) / (r - l);
+    m.m[13] = -(t + b) / (t - b);
+    m.m[14] = f / (f - n);
+    m.m[15] = 1.0f;
+    return m;
+}

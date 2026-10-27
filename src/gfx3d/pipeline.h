@@ -20,7 +20,8 @@ typedef enum {
     G3D_ATTR_NORMAL     = 1,   /* vec3, dünya uzayı (normal matrisiyle) */
     G3D_ATTR_VIEW_DEPTH = 2,   /* f32, kameraya görüş ekseni boyunca uzaklık (= w_clip) */
     G3D_ATTR_COLOR      = 3,   /* vec4, köşe rengi (yoksa 1,1,1,1) */
-    G3D_ATTR_WORLD_POS  = 4    /* vec3 */
+    G3D_ATTR_WORLD_POS  = 4,   /* vec3 */
+    G3D_ATTR_SHADOW_POS = 5    /* vec3, gölge haritası doku uzayı (u, v, derinlik); bkz. g3d_set_shadow */
 } G3dAttr;
 
 #define G3D_MAX_ATTRS 6
@@ -64,6 +65,7 @@ typedef struct {
     u32         vp_w, vp_h;
     ClipGuard   guard;
     Vec4        planes[5];   /* dünya uzayı: sol, sağ, alt, üst, yakın (n·p + d >= 0 içeride) */
+    Mat4        shadow_mat;  /* dünya → gölge doku uzayı (G3D_ATTR_SHADOW_POS için), varsayılan birim */
     G3dStats    stats;
 } G3dContext;
 
@@ -75,6 +77,7 @@ void g3d_set_opt(u32 mask);
 
 u32  g3d_attr_components(G3dAttr a);
 void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj, Vec3 eye);
+void g3d_set_shadow(G3dContext* c, Mat4 world_to_shadow);
 b32  g3d_sphere_visible(const G3dContext* c, Vec3 center, f32 radius);
 /* Mesh'i çizer; nesne frustum dışındaysa FALSE döner. */
 b32  g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial* mat);

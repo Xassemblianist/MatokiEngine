@@ -319,6 +319,22 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
         }
     }
 
+    if (state->shade_fn == NULL) {
+        /* Yalnız derinlik (gölge haritası): shade/blend yok, quad kuyruğa girmez */
+        if (has_depth && state->depth_write) {
+            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
+            f32* d1 = d0 + r->fb->w;
+            v128_t old = wasm_v128_load64_zero(d0);
+            old = wasm_v128_load64_lane(d1, old, 1);
+            v128_t lm = wasm_i32x4_ne(wasm_v128_and(wasm_i32x4_splat((i32)mask), wasm_i32x4_make(1, 2, 4, 8)),
+                                      wasm_i32x4_const_splat(0));
+            v128_t nz = wasm_v128_bitselect(vz, old, lm);
+            wasm_v128_store64_lane(d0, nz, 0);
+            wasm_v128_store64_lane(d1, nz, 1);
+        }
+        return;
+    }
+
     u32 q = r->batch_count++;
     r->quads[q].mask = mask;
     r->quads[q].x    = qx;

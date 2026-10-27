@@ -504,6 +504,19 @@ static inline void emit_quad_scalar(Rasterizer* r, const BinnedTri* tri,
         }
     }
 
+    if (state->shade_fn == NULL) {
+        /* Yalnız derinlik (gölge haritası): shade/blend yok, quad kuyruğa girmez */
+        if (has_depth && state->depth_write) {
+            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
+            f32* d1 = d0 + r->fb->w;
+            if (mask & 1u) d0[0] = z_lanes[0];
+            if (mask & 2u) d0[1] = z_lanes[1];
+            if (mask & 4u) d1[0] = z_lanes[2];
+            if (mask & 8u) d1[1] = z_lanes[3];
+        }
+        return;
+    }
+
     u32 q = r->batch_count++;
     r->quads[q].mask = mask;
     r->quads[q].x    = qx;
