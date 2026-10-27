@@ -26,6 +26,7 @@
 #include "asset/json.h"
 #include "gfx3d/pipeline.h"
 #include "app/scene_platformer.h"
+#include "app/scene_ocak.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
@@ -56,7 +57,8 @@ typedef enum {
     SCENE_EDITOR  = 3,
     SCENE_3D      = 4,
     SCENE_GAME    = 5,
-    SCENE_COUNT   = 6
+    SCENE_OCAK    = 6,
+    SCENE_COUNT   = 7
 } DemoScene;
 
 typedef struct {
@@ -120,6 +122,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_EDITOR:  return "4:Editor";
     case SCENE_3D:      return "5:3D";
     case SCENE_GAME:    return "6:Oyun";
+    case SCENE_OCAK:    return "7:Ocak";
     default:            return "?";
     }
 }
@@ -286,6 +289,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     init_wat_raster_kernels();
     scene3d_init(&g_perm_arena, &g_frame_arena, &g_fb);
     scene_plat_init(&g_perm_arena);
+    scene_ocak_init(&g_perm_arena, &g_frame_arena);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
     const char* default_ed_src =
@@ -628,6 +632,7 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     /* Oyun sahnesinden çıkınca müziği durdur */
     static DemoScene s_prev_scene = SCENE_SPRITES;
     if (s_prev_scene == SCENE_GAME && g_scene != SCENE_GAME) scene_plat_leave();
+    if (s_prev_scene == SCENE_OCAK && g_scene != SCENE_OCAK) scene_ocak_leave();
     s_prev_scene = g_scene;
 
     fb_clear(&g_fb, FB_RGBA(18, 20, 28, 255));
@@ -646,6 +651,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     case SCENE_GAME:
         scene_plat_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit);
         scene_plat_draw_hud(&g_ui, &g_fb);
+        break;
+    case SCENE_OCAK:
+        scene_ocak_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
+                         g_input.mouse_y >= 20 && !g_show_debug);
+        scene_ocak_draw_hud(&g_ui, &g_fb);
         break;
     case SCENE_3D:
         scene3d_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, time_sec,
@@ -941,6 +951,14 @@ EXPORT(engine_set_jit) void engine_set_jit(b32 on) {
 
 EXPORT(engine_s3d_bench) void engine_s3d_bench(b32 pbr, f32 tod) {
     scene3d_bench_set(pbr, tod);
+}
+
+EXPORT(engine_ocak_debug) const f32* engine_ocak_debug(void) {
+    return scene_ocak_debug();
+}
+
+EXPORT(engine_ocak_yaw) void engine_ocak_yaw(f32 yaw) {
+    scene_ocak_debug_set_yaw(yaw);
 }
 
 EXPORT(engine_last_frame_ms) f32 engine_last_frame_ms(void) {

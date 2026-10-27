@@ -1,0 +1,16 @@
+// unlit3d.mtk — kendinden ışıklı (emissive) yüzey: renk × (1 + parlaklık), görüş açısıyla hafif kenar parlaması,
+// mesafe sisi. Kıvılcım, alev, işaret gibi ışıktan etkilenmeyen nesneler için.
+uniform color: vec4;         // rgb (sRGB), a = alfa
+uniform fog:   vec4;         // rgb sis rengi (sRGB), a = yoğunluk (1/birim)
+in nrm:   vec3;
+in depth: f32;
+
+fn frag() -> rgba {
+    let n = normalize(nrm);
+    let rim = 1.0 - abs(n.y) * 0.35;
+    let f = clamp(depth * fog.a * 0.6, 0.0, 1.0);
+    let r = mix(min(color.r * rim, 1.0), fog.r, f);
+    let g = mix(min(color.g * rim, 1.0), fog.g, f);
+    let b = mix(min(color.b * rim, 1.0), fog.b, f);
+    return vec4(r, g, b, color.a);
+}
