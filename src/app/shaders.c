@@ -254,6 +254,47 @@ void ref_shade_unlit3d(ShadeBatch* batch) {
     }
 }
 
+/* dungeon3d.mtk C referansı. Uniform: amb@0 base@16 fog@32, ışık i: konum@48+32i, renk@64+32i;
+ * doku 0 albedo (en yakın + mipmap). Varying: uv nrm depth wpos. */
+void ref_shade_dungeon3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    const Texture* tex = &batch->textures[0];
+    i32 level = 0;
+    for (u32 i = 0; i < n; i++) {
+        if ((i & 3u) == 0u && (tex->flags & TEX_FLAG_MIPMAP)) {
+            level = ref_tex_mip_level(tex, &v[i], &v[n + i]);
+        }
+        f32 tc[4];
+        ref_sample_tex_level(tex, v[i], v[n + i], level, tc);
+        f32 nx = v[2u * n + i], ny = v[3u * n + i], nz = v[4u * n + i];
+        f32 il = 1.0f / m_sqrt(nx * nx + ny * ny + nz * nz);
+        nx *= il; ny *= il; nz *= il;
+        f32 px = v[6u * n + i], py = v[7u * n + i], pz = v[8u * n + i];
+        f32 li[3] = { u[0], u[1], u[2] };
+        for (u32 l = 0; l < 4u; l++) {
+            const f32* lp = &u[12u + l * 8u];
+            const f32* lc = lp + 4;
+            f32 dx = lp[0] - px, dy = lp[1] - py, dz = lp[2] - pz;
+            f32 d2 = dx * dx + dy * dy + dz * dz;
+            f32 w = m_clamp(1.0f - d2 * lp[3], 0.0f, 1.0f);
+            f32 ndl = m_clamp((nx * dx + ny * dy + nz * dz) * (1.0f / m_sqrt(d2 + 0.0001f)) * 0.75f + 0.25f, 0.0f, 1.0f);
+            f32 a = w * w * ndl / (1.0f + d2 * 0.25f);
+            for (u32 k = 0; k < 3; k++) li[k] += lc[k] * a;
+        }
+        f32 f = m_clamp(v[5u * n + i] * u[11], 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f32 t = tc[k] * u[4 + k];
+            f32 c = t * t * li[k];
+            c = c + (u[8 + k] - c) * f;
+            o[k * n + i] = m_sqrt(m_clamp(c, 0.0f, 1.0f));
+        }
+        o[3u * n + i] = tc[3] * u[7];
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
     if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
@@ -263,6 +304,7 @@ static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "lit3d.mtk"))   return ref_shade_lit3d;
     if (str_eq_name(name, "pbr3d.mtk"))   return ref_shade_pbr3d;
     if (str_eq_name(name, "unlit3d.mtk")) return ref_shade_unlit3d;
+    if (str_eq_name(name, "dungeon3d.mtk")) return ref_shade_dungeon3d;
     return REF_SHADE_SOLID_FN;
 }
 

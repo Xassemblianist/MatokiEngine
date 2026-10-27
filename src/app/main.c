@@ -1,7 +1,7 @@
 /* app/main.c — Entegrasyon demosu: 5 sahne, JIT vs C referans, canlı Matoki editörü,
  * F1 debug overlay (FPS grafiği, profiler tablosu, JIT istatistikleri) ve F12 PNG ekran görüntüsü.
  * Sahneler (Tab): 1) 10k Sprite, 2) Plasma (tam ekran), 3) Branchy, 4) Canlı Shader Editörü, 5) 3D,
- * 6) Platform oyunu.
+ * 6) Platform oyunu, 7) Ocak, 8) Kuyu (retro FPS).
  */
 #include "core/types.h"
 #include "core/arena.h"
@@ -27,6 +27,7 @@
 #include "gfx3d/pipeline.h"
 #include "app/scene_platformer.h"
 #include "app/scene_ocak.h"
+#include "app/scene_kuyu.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
@@ -58,7 +59,8 @@ typedef enum {
     SCENE_3D      = 4,
     SCENE_GAME    = 5,
     SCENE_OCAK    = 6,
-    SCENE_COUNT   = 7
+    SCENE_KUYU    = 7,
+    SCENE_COUNT   = 8
 } DemoScene;
 
 typedef struct {
@@ -90,6 +92,7 @@ static BlendMode     g_blend_mode;
 static DemoScene     g_scene;
 static b32           g_use_jit;
 static b32           g_show_debug;
+static b32           g_pointer_locked;   /* JS fare kilidi durumu (engine_set_pointer_lock) */
 
 /* Canlı editör önizleme shader durumu */
 static ManagedShader    g_live_shader;
@@ -123,6 +126,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_3D:      return "5:3D";
     case SCENE_GAME:    return "6:Oyun";
     case SCENE_OCAK:    return "7:Ocak";
+    case SCENE_KUYU:    return "8:Kuyu";
     default:            return "?";
     }
 }
@@ -290,6 +294,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     scene3d_init(&g_perm_arena, &g_frame_arena, &g_fb);
     scene_plat_init(&g_perm_arena);
     scene_ocak_init(&g_perm_arena, &g_frame_arena);
+    scene_kuyu_init(&g_perm_arena, &g_frame_arena);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
     const char* default_ed_src =
@@ -633,6 +638,7 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     static DemoScene s_prev_scene = SCENE_SPRITES;
     if (s_prev_scene == SCENE_GAME && g_scene != SCENE_GAME) scene_plat_leave();
     if (s_prev_scene == SCENE_OCAK && g_scene != SCENE_OCAK) scene_ocak_leave();
+    if (s_prev_scene == SCENE_KUYU && g_scene != SCENE_KUYU) scene_kuyu_leave();
     s_prev_scene = g_scene;
 
     fb_clear(&g_fb, FB_RGBA(18, 20, 28, 255));
@@ -656,6 +662,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
         scene_ocak_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
                          g_input.mouse_y >= 20 && !g_show_debug);
         scene_ocak_draw_hud(&g_ui, &g_fb);
+        break;
+    case SCENE_KUYU:
+        scene_kuyu_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
+                         g_pointer_locked);
+        scene_kuyu_draw_hud(&g_ui, &g_fb);
         break;
     case SCENE_3D:
         scene3d_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, time_sec,
@@ -979,4 +990,21 @@ EXPORT(engine_fb_width) u32 engine_fb_width(void) {
 
 EXPORT(engine_fb_height) u32 engine_fb_height(void) {
     return g_fb.h;
+}
+
+/* Fare kilidi sözleşmesi (ARCHITECTURE §2): JS tıklamada bunu sorar, kilit değişince bildirir */
+EXPORT(engine_wants_pointer_lock) u32 engine_wants_pointer_lock(void) {
+    return (g_scene == SCENE_KUYU && !g_show_debug) ? 1u : 0u;
+}
+
+EXPORT(engine_set_pointer_lock) void engine_set_pointer_lock(u32 locked) {
+    g_pointer_locked = locked != 0u;
+}
+
+EXPORT(engine_kuyu_debug) const f32* engine_kuyu_debug(void) {
+    return scene_kuyu_debug();
+}
+
+EXPORT(engine_kuyu_cmd) void engine_kuyu_cmd(u32 cmd, f32 a, f32 b, f32 c) {
+    scene_kuyu_debug_cmd(cmd, a, b, c);
 }
