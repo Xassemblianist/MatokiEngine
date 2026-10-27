@@ -47,6 +47,7 @@ void ecs_world_init(EcsWorld* w, Arena* a, u32 max_entities) {
     w->ent_flags   = ARENA_PUSH_ARRAY(a, u8, max_entities);
     w->visit_state = ARENA_PUSH_ARRAY(a, u8, max_entities);
     w->free_list   = ARENA_PUSH_ARRAY(a, u32, max_entities);
+    w->walk_stack  = ARENA_PUSH_ARRAY(a, u32, max_entities);
 
     __builtin_memset(w->ent_handle, 0xFF, sizeof(EcsEntity) * (usize)max_entities);
 
@@ -116,6 +117,9 @@ EcsCompId ecs_register(EcsWorld* w, const char* name, u32 size, u32 align, const
         ASSERT(desc->field_count <= ECS_MAX_FIELDS);
         s->field_count = desc->field_count;
         for (u32 i = 0u; i < desc->field_count; i++) {
+            static const u32 k_field_size[] = { 4, 4, 4, 4, 12, 16, 16, 4, 4 };
+            ASSERT((u32)desc->fields[i].type < ARRAY_LEN(k_field_size));
+            ASSERT(desc->fields[i].offset + k_field_size[desc->fields[i].type] <= size);
             s->fields[i].name   = ecs_strdup(w->arena, desc->fields[i].name);
             s->fields[i].type   = desc->fields[i].type;
             s->fields[i].offset = desc->fields[i].offset;

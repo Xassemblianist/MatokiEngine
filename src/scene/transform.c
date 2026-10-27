@@ -152,38 +152,34 @@ b32 transform_set_parent(EcsWorld* w, EcsEntity child, EcsEntity parent) {
     return TRUE;
 }
 
+/* Özyinelemesiz: e'den köke doğru henüz hesaplanmamış Transform'lu ataları yığına toplar, sonra kökten
+ * aşağı doğru dünya matrislerini kurar. visit_state: 0 = bekliyor, 1 = yığında, 2 = hesaplandı.
+ * Döngü (yığındaki bir ataya geri dönüş) ebeveynsiz kabul edilir. Yalnız Transform'lu entity'ler işaretlenir. */
 static void transform_eval_entity(EcsWorld* w, EcsEntity e) {
-    u32 idx = ecs_entity_index(e);
-    if (w->visit_state[idx] == 2u) return;
-
-    Transform* t = (Transform*)ecs_get(w, e, w->transform_cid);
-    if (!t) {
-        w->visit_state[idx] = 2u;
-        return;
+    u32* stack = w->walk_stack;
+    u32 n = 0u;
+    EcsEntity cur = e;
+    while (cur != ECS_NULL) {
+        u32 idx = ecs_entity_index(cur);
+        if (w->visit_state[idx] != 0u) break;
+        if (!ecs_get(w, cur, w->transform_cid)) break;
+        w->visit_state[idx] = 1u;
+        stack[n++] = cur;
+        cur = transform_get_parent(w, cur);
     }
 
-    w->visit_state[idx] = 1u; /* ziyaret ediliyor (yığın üzerinde) */
-    Mat4 local = transform_local_mat4(t);
-
-    EcsEntity p_ent = transform_get_parent(w, e);
-    if (p_ent != ECS_NULL) {
-        u32 p_idx = ecs_entity_index(p_ent);
-        if (w->visit_state[p_idx] == 0u) {
-            transform_eval_entity(w, p_ent);
-        }
-        /* Döngü yoksa (durum == 2) ve ebeveynde Transform varsa dünya matrisini birleştir */
-        if (w->visit_state[p_idx] == 2u) {
-            const Transform* pt = (const Transform*)ecs_get_const(w, p_ent, w->transform_cid);
-            if (pt) {
-                t->world = mat4_mul(pt->world, local);
-                w->visit_state[idx] = 2u;
-                return;
-            }
-        }
+    const Transform* base = NULL;
+    if (cur != ECS_NULL && w->visit_state[ecs_entity_index(cur)] == 2u) {
+        base = (const Transform*)ecs_get_const(w, cur, w->transform_cid);
     }
-
-    t->world = local;
-    w->visit_state[idx] = 2u;
+    while (n > 0u) {
+        EcsEntity x = stack[--n];
+        Transform* t = (Transform*)ecs_get(w, x, w->transform_cid);
+        Mat4 local = transform_local_mat4(t);
+        t->world = base ? mat4_mul(base->world, local) : local;
+        w->visit_state[ecs_entity_index(x)] = 2u;
+        base = t;
+    }
 }
 
 void transform_update(EcsWorld* w) {

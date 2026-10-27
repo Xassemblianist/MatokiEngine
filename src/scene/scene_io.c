@@ -349,6 +349,15 @@ b32 scene_load(EcsWorld* w, const char* json, u32 len, Arena* scratch, SceneIoRe
         return FALSE;
     }
 
+    /* Dünyayı silmeden önce yapıyı doğrula: hata durumunda mevcut dünya bozulmaz */
+    for (u32 i = 0u; i < ent_count; i++) {
+        if (ents->as.items[i].type != JSON_OBJECT) {
+            sio_set_err(res, "entity ogesi nesne degil");
+            arena_pop_to(scratch, mark);
+            return FALSE;
+        }
+    }
+
     ecs_world_clear(w);
 
     i64*       saved_ids = ARENA_PUSH_ARRAY(scratch, i64, ent_count ? ent_count : 1u);
@@ -357,11 +366,6 @@ b32 scene_load(EcsWorld* w, const char* json, u32 len, Arena* scratch, SceneIoRe
     /* 1. Geçiş: Tüm entity'leri oluştur ve eski ID -> yeni EcsEntity eşlemesini kaydet */
     for (u32 i = 0u; i < ent_count; i++) {
         const JsonValue* eobj = &ents->as.items[i];
-        if (eobj->type != JSON_OBJECT) {
-            sio_set_err(res, "entity ogesi nesne degil");
-            arena_pop_to(scratch, mark);
-            return FALSE;
-        }
         saved_ids[i] = json_int(json_get(eobj, "id"), (i64)i);
         new_ents[i]  = ecs_spawn(w);
     }

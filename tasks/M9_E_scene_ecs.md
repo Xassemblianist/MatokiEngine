@@ -70,3 +70,11 @@ Senaryo: 100.000 entity, 3 bileşen (`CompPos` 12 B, `CompVel` 12 B, `CompStats`
 ### Ertelenenler / Öneriler
 - Arketip (archetype) veya grup (group) tabanlı çoklu bileşen hizalama: Çok bileşenli sorgularda tüm bileşenlerin yoğun dizilerini aynı sırada tutan "owning group" yapısı ileride >1M entity senaryolarında dolaylı `sparse` erişimini tamamen kaldırabilir.
 - İkili (binary) sahne serileştirme biçimi: Büyük sahnelerde JSON metnine ek olarak doğrudan bellek görüntüsü/ikili akış desteği eklenebilir.
+
+## İnceleme (Claude, 2026-10-27)
+- `transform_update` özyinelemeliydi → derin zincirde yığın taşması; açık yığınlı (`EcsWorld.walk_stack`) sürüme çevrildi.
+  Transform'suz ebeveynin `visit_state`'i kalıcı 2 kalıyordu (indeks yeniden kullanılınca yeni entity atlanabilirdi) → yalnız Transform'lu entity'ler işaretlenir.
+- `scene_load` dünyayı temizledikten sonra yapı hatasıyla dönebiliyordu → doğrulama temizlemeden önce.
+- `ecs_register` alan ofseti + boyut ≤ bileşen boyutu ASSERT'i.
+- Yeni test `ecs_review_deep_chain_and_load_safety`: 100k derinlikli zincir, Transform'suz ara ebeveyn, bozuk yüklemede dünya korunur.
+- Not: `transform_set_parent` döngü denetimi zincir derinliği kadar yürür (yukarıdan aşağı derin zincir kurmak O(n²)); şimdilik kabul.

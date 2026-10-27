@@ -103,6 +103,7 @@ typedef struct EcsWorld {
     u32*       ent_mask;      /* [ent_cap] bileşen bit maskesi */
     u8*        ent_flags;     /* [ent_cap] ertelenmiş silme vb. durum bayrakları */
     u8*        visit_state;   /* [ent_cap] hiyerarşi güncellemesi için geçici ziyaret durumu */
+    u32*       walk_stack;    /* [ent_cap] hiyerarşi güncellemesi için özyinelemesiz yürüme yığını */
 
     /* Serbest entity indeks yığını */
     u32*       free_list;     /* [ent_cap] */

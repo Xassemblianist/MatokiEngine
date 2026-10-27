@@ -726,3 +726,50 @@ TEST(ecs_benchmark_100k) {
 
     CHECK(ecs_alive_count(&w) == N);
 }
+
+/* İnceleme (Claude): derin zincir özyinelemesiz, Transform'suz ara ebeveyn, bozuk yükleme dünyayı korur */
+TEST(ecs_review_deep_chain_and_load_safety) {
+    Arena a;
+    arena_init(&a, g_ecs_mem, MB(60));
+    EcsWorld w;
+    const u32 n = 100000u;   /* eski özyinelemeli sürüm burada yığını taşırırdı (~100k çerçeve) */
+    ecs_world_init(&w, &a, n + 8u);
+    transform_register(&w);
+    EcsCompId c_tr = transform_comp_id(&w);
+
+    /* 100k derinlikli zincir: her düğüm +1 x ötelemesi → son düğüm x = n */
+    EcsEntity prev = ECS_NULL;
+    EcsEntity last = ECS_NULL;
+    for (u32 i = 0; i < n; i++) {
+        EcsEntity e = ecs_spawn(&w);
+        Transform t = transform_trs(vec3(1.0f, 0.0f, 0.0f), quat_identity(), vec3(1.0f, 1.0f, 1.0f));
+        ecs_set(&w, e, c_tr, &t);
+        if (prev != ECS_NULL) CHECK(transform_set_parent(&w, e, prev));
+        prev = last = e;
+    }
+    transform_update(&w);
+    const Transform* tl = (const Transform*)ecs_get(&w, last, c_tr);
+    CHECK_NEAR(tl->world.m[12], (f64)n, 1e-1);
+
+    /* Transform'suz ara ebeveyn: zincir orada kopar; sonra Transform eklenince hesaba girer */
+    ecs_world_clear(&w);
+    EcsEntity r = ecs_spawn(&w), mid = ecs_spawn(&w), c = ecs_spawn(&w);
+    Transform t2 = transform_trs(vec3(2.0f, 0.0f, 0.0f), quat_identity(), vec3(1.0f, 1.0f, 1.0f));
+    ecs_set(&w, r, c_tr, &t2);
+    ecs_set(&w, c, c_tr, &t2);
+    CHECK(transform_set_parent(&w, mid, r));
+    CHECK(transform_set_parent(&w, c, mid));
+    transform_update(&w);
+    CHECK_NEAR(((const Transform*)ecs_get(&w, c, c_tr))->world.m[12], 2.0, 1e-6);
+    ecs_set(&w, mid, c_tr, &t2);
+    transform_update(&w);
+    CHECK_NEAR(((const Transform*)ecs_get(&w, c, c_tr))->world.m[12], 6.0, 1e-6);
+
+    /* Bozuk yükleme: mevcut dünya değişmeden kalır */
+    u32 alive = ecs_alive_count(&w);
+    SceneIoResult res;
+    const char* bad = "{\"entities\":[{\"id\":0,\"components\":{}}, 5]}";
+    CHECK(!scene_load(&w, bad, (u32)strlen(bad), &a, &res));
+    CHECK(res.err[0] != 0);
+    CHECK(ecs_alive_count(&w) == alive && ecs_alive(&w, c));
+}
