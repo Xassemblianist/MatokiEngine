@@ -396,3 +396,45 @@ TEST(gfx3d_shadow_map) {
     zs = shadow_lookup(&sm, vec3(0.1f, 3.0f, 0.1f), &zr);
     CHECK(zr >= zs - 1e-4f);
 }
+
+/* Köşe yakalama (vertex snap): alt-piksel kaydırılmış üçgen, snap=1 ile tamsayı köşeli üçgenle aynı pikselleri boyar */
+static u32 render_tri_offset(Env* e, f32 off, u32 snap, u32* out) {
+    Mesh* m = mesh_alloc(&e->frame, 3, 3, FALSE);
+    static const f32 xs[3] = { 5.0f, 57.0f, 20.0f }, ys[3] = { 6.0f, 19.0f, 55.0f };
+    for (u32 i = 0; i < 3; i++) {
+        m->px[i] = xs[i] + off; m->py[i] = ys[i] + off; m->pz[i] = -1.0f;
+        m->nx[i] = 0.0f; m->ny[i] = 0.0f; m->nz[i] = 1.0f;
+        m->u[i] = 0.0f; m->v[i] = 0.0f;
+        m->indices[i] = i;
+    }
+    mesh_compute_bounds(m);
+    G3dContext c;
+    g3d_begin(&c, &e->r, &e->frame, mat4_identity(), mat4_ortho_rz(0.0f, 64.0f, 0.0f, 64.0f, 0.1f, 10.0f), vec3(0, 0, 0));
+    g3d_set_snap(&c, snap);
+    G3dMaterial mat = mat_basic(shade_count, BLEND_NONE, G3D_CULL_NONE, FALSE);
+    Mat4 id = mat4_identity();
+    g3d_draw(&c, m, &id, &mat);
+    raster_flush(&e->r);
+    u32 painted = 0;
+    for (u32 i = 0; i < 64u * 64u; i++) { out[i] = e->fb.px[i]; painted += e->fb.px[i] != 0u; }
+    return painted;
+}
+
+TEST(gfx3d_vertex_snap) {
+    Env e;
+    env_init(&e, 64, 64);
+    u32* a = ARENA_PUSH_ARRAY(&e.perm, u32, 64 * 64);
+    u32* b = ARENA_PUSH_ARRAY(&e.perm, u32, 64 * 64);
+    u32* c = ARENA_PUSH_ARRAY(&e.perm, u32, 64 * 64);
+    u32* d = ARENA_PUSH_ARRAY(&e.perm, u32, 64 * 64);
+    env_frame(&e); u32 pc = render_tri_offset(&e, 0.0f, 0u, c);
+    env_frame(&e); render_tri_offset(&e, 0.2f, 1u, a);
+    env_frame(&e); render_tri_offset(&e, 0.4f, 1u, b);
+    env_frame(&e); render_tri_offset(&e, 0.4f, 0u, d);
+    u32 dab = 0, dac = 0, dcd = 0;
+    for (u32 i = 0; i < 64u * 64u; i++) { dab += a[i] != b[i]; dac += a[i] != c[i]; dcd += c[i] != d[i]; }
+    CHECK(pc > 500);
+    CHECK(dab == 0);      /* aynı tamsayı ızgaraya yakalanır */
+    CHECK(dac == 0);      /* tamsayı köşeli üçgenle birebir */
+    CHECK(dcd > 0);       /* yakalamasız alt-piksel kayma kapsamayı değiştirir */
+}

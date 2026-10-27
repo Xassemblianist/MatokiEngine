@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "core/profiler.h"
 #include "gfx3d/vertex.h"
+#include "gfx3d/retro.h"
 
 u32 g3d_attr_components(G3dAttr a) {
     switch (a) {
@@ -39,6 +40,7 @@ void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj,
     c->vp_h      = r->fb->h;
     c->guard     = clip_guard_for_viewport(c->vp_w, c->vp_h);
     c->shadow_mat = mat4_identity();
+    c->snap      = 0;
     __builtin_memset(&c->stats, 0, sizeof(c->stats));
 
     /* Gribb–Hartmann: klip düzlemleri view_proj satırlarından (dünya uzayı) */
@@ -55,6 +57,10 @@ void g3d_set_shadow(G3dContext* c, Mat4 world_to_shadow) {
     c->shadow_mat = world_to_shadow;
 }
 
+void g3d_set_snap(G3dContext* c, u32 subpixel) {
+    c->snap = subpixel;
+}
+
 b32 g3d_sphere_visible(const G3dContext* c, Vec3 p, f32 radius) {
     for (u32 i = 0; i < 5; i++) {
         Vec4 pl = c->planes[i];
@@ -68,6 +74,7 @@ static inline RasterVert project(const G3dContext* c, const ClipVert* v, u32 nva
     f32 iw = 1.0f / v->w;
     o.x = (v->x * iw * 0.5f + 0.5f) * (f32)c->vp_w;
     o.y = (0.5f - v->y * iw * 0.5f) * (f32)c->vp_h;
+    if (c->snap) retro_snap_xy(&o.x, &o.y, c->snap);
     o.z = v->z * iw;
     o.inv_w = iw;
     for (u32 k = 0; k < nvar; k++) o.var[k] = v->var[k];
@@ -235,6 +242,7 @@ b32 g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial*
         f32 iw = 1.0f / w;
         o->x = (x * iw * 0.5f + 0.5f) * vpw;
         o->y = (0.5f - y * iw * 0.5f) * vph;
+        if (c->snap) retro_snap_xy(&o->x, &o->y, c->snap);
         o->z = z * iw;
         o->inv_w = iw;
         vertex_attrs(&vx, i, o->var);

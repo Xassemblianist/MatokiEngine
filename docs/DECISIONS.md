@@ -397,6 +397,13 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
 - Fare kilidi JS sözleşmesine isteğe bağlı iki export olarak eklendi (ARCHITECTURE §2); kilitliyken
   `mouse_dx/dy` ham `movementX/Y` taşır. Sahne değişince JS kilidi bırakır.
 
+### D-104 — Köşe yakalama boru hattında, düşman yol bulma akış alanıyla
+**KABUL** · M11_B
+- `G3dContext.snap` (> 0 ise ekran köşeleri 1/snap piksel ızgarasına `retro_snap_xy` ile yuvarlanır); `g3d_begin`
+  sıfırlar, `g3d_set_snap` açar. Hem kırpılmamış (SIMD) hem kırpılmış köşe yolunda uygulanır. Ölçülen maliyet gürültü içinde.
+- Kuyu düşmanları karo ızgarasında oyuncudan BFS akış alanı izler (yer + hava için iki alan); A* yerine akış alanı
+  çünkü tüm düşmanların hedefi aynı ve harita küçük (≤ 36×18).
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
