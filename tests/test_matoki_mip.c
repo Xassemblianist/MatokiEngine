@@ -9,6 +9,7 @@
 #include "core/rng.h"
 #include "matoki/matoki.h"
 #include "matoki/codegen.h"
+#include "masm/mdis.h"
 #include "raster/shade_abi.h"
 #include "raster/texture.h"
 #include "raster/ref_shaders.h"
@@ -161,3 +162,42 @@ TEST(mip_matoki_vs_ref_bit_exact) {
     /* Testin tüm seviyeleri gerçekten kullandığından emin ol (64x32 → 6 seviye) */
     for (u32 k = 0; k < tex.levels; k++) CHECK(level_hist[k] > 100);
 }
+
+/* P1: dFdx/dFdy ve mip seviyesi zincirinin quad-uniform skaler olarak üretildiğini doğrular */
+TEST(mip_quad_uniform_scalar_codegen) {
+    const char* src =
+        "uniform t: texture2d @mipmap @bilinear;\n"
+        "in uv: vec2;\n"
+        "fn frag() -> rgba { return sample(t, uv); }\n";
+
+    Arena a;
+    arena_init(&a, g_mem, MB(4));
+    u8 wasm_buf[16384];
+    MtkLayout layout;
+    MtkDiag diag;
+    u32 wasm_len = mtk_compile_wasm(src, (u32)strlen(src), "mip_qu.mtk", NULL, &a,
+                                    wasm_buf, sizeof(wasm_buf), &layout, &diag);
+    CHECK(wasm_len > 0);
+    CHECK(diag.count == 0);
+
+    MdisResult dr = mdis_disassemble(&a, wasm_buf, wasm_len);
+    CHECK(dr.ok);
+
+    /* 1. Türevler i8x16.shuffle yerine f32x4.extract_lane + f32.sub ile skaler hesaplanmalı */
+    CHECK(strstr(dr.wat, "i8x16.shuffle") == NULL);
+    CHECK(strstr(dr.wat, "f32x4.extract_lane") != NULL);
+
+    /* 2. Boyut/taban kaydırmaları 4-lane skalerleştirme yerine skaler i32.shr_s / i32.shr_u olmalı;
+     * i32x4.replace_lane yalnızca 4 bilinear texel gather için (4 * 3 = 12 kez) bulunmalı. */
+    CHECK(strstr(dr.wat, "i32.shr_s") != NULL);
+    CHECK(strstr(dr.wat, "i32.shr_u") != NULL);
+
+    u32 rep_cnt = 0;
+    const char* p = dr.wat;
+    while ((p = strstr(p, "i32x4.replace_lane")) != NULL) {
+        rep_cnt++;
+        p += 18;
+    }
+    CHECK(rep_cnt == 12);
+}
+

@@ -94,6 +94,7 @@ typedef struct {
     u32 single_user[CG_MAX_INSTS];
     u32 inst_region[CG_MAX_INSTS];
     b32 is_preheader[CG_MAX_INSTS];
+    b32 is_simd[CG_MAX_INSTS];
     b32 used_in_loop[CG_MAX_INSTS];
     b32 need_splat[CG_MAX_INSTS];
     b32 inlined[CG_MAX_INSTS];
@@ -129,8 +130,8 @@ static b32 cg_fail(char* err, u32 err_cap, const char* fmt, ...) {
     return FALSE;
 }
 
-static u8 ir_to_wasm_valtype(const IrInst* in) {
-    if (in->flags & IR_FLAG_VARYING) {
+static u8 ir_to_wasm_valtype(const IrInst* in, b32 is_simd) {
+    if (is_simd) {
         return MB_VAL_V128;
     }
     if (in->type == IR_T_F32) {
@@ -212,6 +213,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
         ctx->single_user[i]      = IR_NONE;
         ctx->inst_region[i]      = 0;
         ctx->is_preheader[i]     = FALSE;
+        ctx->is_simd[i]          = FALSE;
         ctx->used_in_loop[i]     = FALSE;
         ctx->need_splat[i]       = FALSE;
         ctx->inlined[i]          = FALSE;
@@ -238,6 +240,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             ctx->inst_region[i] = cur_reg;
             reg_stk[stk_d] = cur_reg;
             b32 is_v = (in->flags & IR_FLAG_VARYING) != 0;
+            ctx->is_simd[i] = is_v;
             var_if_stk[stk_d] = is_v;
             stk_d++;
             if (is_v) {
@@ -264,6 +267,25 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
 
         ctx->inst_region[i] = cur_reg;
 
+        /* Quad-uniform / SIMD sınıflandırması:
+         * VARYING ve FRAG_X/Y lane-başına farklıdır (SIMD = TRUE).
+         * DERIV_X ve DERIV_Y quad'ın 4 lane'inde de aynı skaler değeri üretir (SIMD = FALSE).
+         * Diğer değer komutları yalnızca en az bir operandı SIMD ise SIMD olur; böylece
+         * türevlerden türeyen tüm mip seviyesi, boyut kaydırma ve taban ofset zinciri
+         * döngü içinde skaler (i32/f32) olarak hesaplanır. */
+        if (op == IR_DISCARD || op == IR_OUTPUT ||
+            op == IR_VARYING || op == IR_FRAG_X || op == IR_FRAG_Y) {
+            ctx->is_simd[i] = TRUE;
+        } else if (op == IR_DERIV_X || op == IR_DERIV_Y) {
+            ctx->is_simd[i] = FALSE;
+        } else if (in->type != IR_T_VOID) {
+            b32 simd = FALSE;
+            if (in->a != IR_NONE && ctx->is_simd[in->a]) simd = TRUE;
+            if (in->b != IR_NONE && ctx->is_simd[in->b]) simd = TRUE;
+            if (in->c != IR_NONE && ctx->is_simd[in->c]) simd = TRUE;
+            ctx->is_simd[i] = simd;
+        }
+
         /* Özellik taraması */
         if (op == IR_VARYING && in->imm.u < SHADE_MAX_VARYINGS) {
             ctx->used_varying[in->imm.u] = TRUE;
@@ -275,8 +297,8 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             ctx->has_any_tex = TRUE;
         } else if (op == IR_TEXEL_LOAD) {
             if (in->imm.u < SHADE_MAX_TEXTURES) {
-                if (in->flags & IR_FLAG_VARYING) ctx->used_tex_load_v[in->imm.u] = TRUE;
-                else                             ctx->used_tex_load_u[in->imm.u] = TRUE;
+                if (ctx->is_simd[i]) ctx->used_tex_load_v[in->imm.u] = TRUE;
+                else                 ctx->used_tex_load_u[in->imm.u] = TRUE;
             }
             ctx->has_any_tex = TRUE;
         } else if (op == IR_FRAG_X) {
@@ -326,8 +348,9 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             continue;
         }
 
-        b32 consumer_is_var = (in->flags & IR_FLAG_VARYING) != 0;
-        if (op == IR_DISCARD || op == IR_OUTPUT) {
+        b32 consumer_is_var = ctx->is_simd[i];
+        if (op == IR_DISCARD || op == IR_OUTPUT ||
+            ((op == IR_DERIV_X || op == IR_DERIV_Y) && (in->flags & IR_FLAG_VARYING))) {
             consumer_is_var = TRUE;
         }
 
@@ -364,12 +387,12 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
 
             b32 want_var = consumer_is_var;
             if (k == 1 && consumer_is_var && (op == IR_ISHL || op == IR_ISHR_S || op == IR_ISHR_U)) {
-                if (!(f->insts[op_id].flags & IR_FLAG_VARYING)) {
+                if (!ctx->is_simd[op_id]) {
                     want_var = FALSE;
                 }
             }
 
-            if (want_var && !(f->insts[op_id].flags & IR_FLAG_VARYING)) {
+            if (want_var && !ctx->is_simd[op_id]) {
                 ctx->need_splat[op_id] = TRUE;
                 ctx->splat_use_count[op_id]++;
             } else {
@@ -386,14 +409,14 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
     for (u32 i = 0; i < n; i++) {
         const IrInst* in = &f->insts[i];
         if (ctx->use_count[i] == 0) continue;
-        if (in->op != IR_SELECT || !(in->flags & IR_FLAG_VARYING)) continue;
+        if (in->op != IR_SELECT || !ctx->is_simd[i]) continue;
         if (in->type != IR_T_F32) continue;
 
         u32 a = in->a;
         u32 b = in->b;
         u32 c = in->c;
         if (f->insts[b].op == IR_FNEG && f->insts[b].a == c &&
-            (f->insts[b].flags & IR_FLAG_VARYING) && (f->insts[c].flags & IR_FLAG_VARYING) &&
+            ctx->is_simd[b] && ctx->is_simd[c] &&
             ctx->use_count[b] == 1 && ctx->inst_region[b] == ctx->inst_region[i]) {
             ctx->select_fneg_mode[i] = 1;
             ctx->use_count[b]        = 0;
@@ -411,7 +434,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
                 const IrInst* and_in = &f->insts[and_id];
                 if (and_in->op == IR_IAND && ctx->use_count[and_id] == 1 &&
                     f->insts[and_in->b].op == IR_CONST_I32 && f->insts[and_in->b].imm.i == 2 &&
-                    (f->insts[and_in->a].flags & IR_FLAG_VARYING)) {
+                    ctx->is_simd[and_in->a]) {
                     ctx->select_fneg_mode[i] = 3;
                     ctx->use_count[a]        = 0;
                     ctx->use_count[and_id]   = 0;
@@ -435,7 +458,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
                 }
             }
         } else if (f->insts[c].op == IR_FNEG && f->insts[c].a == b &&
-                   (f->insts[c].flags & IR_FLAG_VARYING) && (f->insts[b].flags & IR_FLAG_VARYING) &&
+                   ctx->is_simd[c] && ctx->is_simd[b] &&
                    ctx->use_count[c] == 1 && ctx->inst_region[c] == ctx->inst_region[i]) {
             ctx->select_fneg_mode[i] = 2;
             ctx->use_count[c]        = 0;
@@ -473,17 +496,17 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
         /* Farklı IF/ELSE bölgeleri arasında inline yapma */
         if (ctx->inst_region[u] != ctx->inst_region[cons_idx]) continue;
 
-        /* Üretici uniform iken tüketici varying splat istiyorsa splat local'i kullan */
-        if (ctx->need_splat[u]) continue;
+        /* Üretici preheader'da iken tüketici varying splat istiyorsa preheader splat local'ini kullan */
+        if (ctx->need_splat[u] && ctx->is_preheader[u]) continue;
 
         /* Eğer u ile tüketicisi cons_idx arasında çok-kullanımlı başka döngü komutları
          * (kendi adımında local'e yazılacak ifadeler) varsa ve u'nun alt ağacı >= 2 farklı
          * döngü local'inin son kullanımıysa, u'yu cons_idx'e ertelemek o >= 2 yazmacı aradaki
          * ifadeler boyunca canlı tutar; u'yu kendi adımında tek yazmaca yazıp onları bırak. */
-        if (!ctx->is_preheader[u] && cons_idx > u + 1) {
+        if (!ctx->is_preheader[u] && ctx->is_simd[u] && cons_idx > u + 1) {
             u32 multi_between = 0;
             for (u32 k = u + 1; k < cons_idx; k++) {
-                if (!ctx->is_preheader[k] && ctx->use_count[k] > 1) {
+                if (!ctx->is_preheader[k] && ctx->is_simd[k] && ctx->use_count[k] > 1) {
                     multi_between++;
                 }
             }
@@ -612,7 +635,7 @@ static void allocate_locals(CgCtx* ctx) {
                 continue;
             }
 
-            u8 vt = ir_to_wasm_valtype(in);
+            u8 vt = ir_to_wasm_valtype(in, ctx->is_simd[i]);
             u32 cur_step = i;
             u32 last = ctx->last_use[i];
             if (last < i) last = i;
@@ -653,7 +676,7 @@ static void allocate_locals(CgCtx* ctx) {
             }
 
             if (!want_pre && inside_if[i]) {
-                if (ctx->scalar_use_count[i] > 0 || (in->flags & IR_FLAG_VARYING)) {
+                if (ctx->scalar_use_count[i] > 0 || ctx->is_simd[i]) {
                     u32 idx = pool.count++;
                     ASSERT(idx < CG_MAX_POOL);
                     pool.slot_idx[idx]   = 0;
@@ -670,7 +693,7 @@ static void allocate_locals(CgCtx* ctx) {
                     ctx->splat_loc[i]     = sidx;
                 }
             } else {
-                if (ctx->scalar_use_count[i] > 0 || (in->flags & IR_FLAG_VARYING)) {
+                if (ctx->scalar_use_count[i] > 0 || ctx->is_simd[i]) {
                     ctx->val_loc[i] = pool_acquire_slot(&pool, vt, cur_step, last);
                 }
                 if (ctx->need_splat[i]) {
@@ -822,12 +845,24 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx);
 static void emit_push_operand(CgCtx* ctx, u32 op_id, b32 want_varying) {
     if (ctx->inlined[op_id]) {
         emit_inst_expr(ctx, op_id);
+        if (want_varying && !ctx->is_simd[op_id]) {
+            const IrInst* def = &ctx->f->insts[op_id];
+            if (def->type == IR_T_F32) {
+                mb_f32x4_splat(ctx->mf);
+            } else if (def->type == IR_T_BOOL) {
+                mb_i32_const(ctx->mf, -1);
+                mb_i32_mul(ctx->mf);
+                mb_i32x4_splat(ctx->mf);
+            } else {
+                mb_i32x4_splat(ctx->mf);
+            }
+        }
         return;
     }
 
     const IrInst* def = &ctx->f->insts[op_id];
     IrOp dop = (IrOp)def->op;
-    b32 def_is_var = (def->flags & IR_FLAG_VARYING) != 0;
+    b32 def_is_var = ctx->is_simd[op_id];
 
     if (!want_varying && is_const_op(dop)) {
         if (dop == IR_CONST_F32)      mb_f32_const(ctx->mf, def->imm.f);
@@ -851,7 +886,7 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
     const IrFunc* f = ctx->f;
     const IrInst* in = &f->insts[idx];
     IrOp op = (IrOp)in->op;
-    b32 is_var = (in->flags & IR_FLAG_VARYING) != 0;
+    b32 is_var = ctx->is_simd[idx];
 
     switch (op) {
     case IR_CONST_F32:
@@ -977,7 +1012,7 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
     case IR_BAND:
     case IR_BOR:
         if (is_var && (op == IR_ISHL || op == IR_ISHR_S || op == IR_ISHR_U)) {
-            if (!(f->insts[in->b].flags & IR_FLAG_VARYING)) {
+            if (!ctx->is_simd[in->b]) {
                 emit_push_operand(ctx, in->a, TRUE);
                 emit_push_operand(ctx, in->b, FALSE);
                 if (op == IR_ISHL)        mb_i32x4_shl(mf);
@@ -1006,13 +1041,26 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
         }
 
         if (!is_var && (op == IR_IMIN_S || op == IR_IMAX_S)) {
-            emit_push_operand(ctx, in->a, FALSE);
-            emit_push_operand(ctx, in->b, FALSE);
-            mb_local_set(mf, ctx->loc_tmp_i32_b);
-            mb_local_tee(mf, ctx->loc_tmp_i32);
-            mb_local_get(mf, ctx->loc_tmp_i32_b);
-            mb_local_get(mf, ctx->loc_tmp_i32);
-            mb_local_get(mf, ctx->loc_tmp_i32_b);
+            if (!ctx->inlined[in->a] && !ctx->inlined[in->b]) {
+                emit_push_operand(ctx, in->a, FALSE);
+                emit_push_operand(ctx, in->b, FALSE);
+                emit_push_operand(ctx, in->a, FALSE);
+                emit_push_operand(ctx, in->b, FALSE);
+            } else if (!ctx->inlined[in->b]) {
+                emit_push_operand(ctx, in->a, FALSE);
+                mb_local_tee(mf, ctx->loc_tmp_i32);
+                emit_push_operand(ctx, in->b, FALSE);
+                mb_local_get(mf, ctx->loc_tmp_i32);
+                emit_push_operand(ctx, in->b, FALSE);
+            } else {
+                emit_push_operand(ctx, in->a, FALSE);
+                emit_push_operand(ctx, in->b, FALSE);
+                mb_local_set(mf, ctx->loc_tmp_i32_b);
+                mb_local_tee(mf, ctx->loc_tmp_i32);
+                mb_local_get(mf, ctx->loc_tmp_i32_b);
+                mb_local_get(mf, ctx->loc_tmp_i32);
+                mb_local_get(mf, ctx->loc_tmp_i32_b);
+            }
             if (op == IR_IMIN_S) mb_i32_lt_s(mf);
             else                 mb_i32_gt_s(mf);
             mb_select(mf);
@@ -1191,25 +1239,28 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
 
     case IR_DERIV_X:
     case IR_DERIV_Y: {
-        if (!is_var) {
+        if (!(in->flags & IR_FLAG_VARYING)) {
             mb_f32_const(mf, 0.0f);   /* uniform'un türevi (ir_eval ile aynı) */
             break;
         }
-        /* lane yayma: shuffle(v, v, [L L L L]) - shuffle(v, v, [0 0 0 0]) */
-        u8 src = (op == IR_DERIV_X) ? 1u : 2u;
-        u8 lanes_hi[16], lanes_lo[16];
-        for (u8 k = 0; k < 16; k++) {
-            lanes_hi[k] = (u8)(src * 4u + (k & 3u));
-            lanes_lo[k] = (u8)(k & 3u);
+        /* Quad içindeki 4 lane'de türev aynı skaler değerdir:
+         * dFdx(a) = extract_lane(a, 1) - extract_lane(a, 0)
+         * dFdy(a) = extract_lane(a, 2) - extract_lane(a, 0) */
+        u8 lane_hi = (op == IR_DERIV_X) ? 1u : 2u;
+        if (!ctx->inlined[in->a]) {
+            emit_push_operand(ctx, in->a, TRUE);
+            mb_f32x4_extract_lane(mf, lane_hi);
+            emit_push_operand(ctx, in->a, TRUE);
+            mb_f32x4_extract_lane(mf, 0);
+            mb_f32_sub(mf);
+        } else {
+            emit_push_operand(ctx, in->a, TRUE);
+            mb_local_tee(mf, ctx->loc_tmp_v0);
+            mb_f32x4_extract_lane(mf, lane_hi);
+            mb_local_get(mf, ctx->loc_tmp_v0);
+            mb_f32x4_extract_lane(mf, 0);
+            mb_f32_sub(mf);
         }
-        emit_push_operand(ctx, in->a, TRUE);
-        mb_local_tee(mf, ctx->loc_tmp_v0);
-        mb_local_get(mf, ctx->loc_tmp_v0);
-        mb_i8x16_shuffle(mf, lanes_hi);
-        mb_local_get(mf, ctx->loc_tmp_v0);
-        mb_local_get(mf, ctx->loc_tmp_v0);
-        mb_i8x16_shuffle(mf, lanes_lo);
-        mb_f32x4_sub(mf);
     } break;
 
     case IR_TEXEL_LOAD: {
@@ -1298,7 +1349,7 @@ static void emit_inst(CgCtx* ctx, u32 idx) {
     const IrFunc* f = ctx->f;
     const IrInst* in = &f->insts[idx];
     IrOp op = (IrOp)in->op;
-    b32 is_var = (in->flags & IR_FLAG_VARYING) != 0;
+    b32 is_var = ctx->is_simd[idx];
 
     if (op == IR_NOP) return;
     if (ctx->inlined[idx]) return;

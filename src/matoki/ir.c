@@ -392,8 +392,9 @@ static void ir_unpack_texel(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_
         wx = ir_op2(f, IR_IAND, tx, w_m1);
         wy = ir_op2(f, IR_IAND, ty, h_m1);
     }
-    u32 idx = ir_op2(f, IR_IADD, ir_op2(f, IR_IMUL, wy, w_i), wx);
-    if (base != IR_NONE) idx = ir_op2(f, IR_IADD, base, idx);
+    u32 row = ir_op2(f, IR_IMUL, wy, w_i);
+    if (base != IR_NONE) row = ir_op2(f, IR_IADD, base, row);
+    u32 idx = ir_op2(f, IR_IADD, row, wx);
     u32 px  = ir_texel_load(f, slot, idx);
 
     u32 r_i = ir_op2(f, IR_IAND, px, c255_i);
@@ -486,9 +487,9 @@ u32 ir_emit_mip_level(IrFunc* f, u32 slot, u32 u, u32 v) {
     u32 h_f  = ir_op1(f, IR_I2F, ir_tex_info(f, IR_TEX_H, slot));
     u32 dudx = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_X, u), w_f);
     u32 dvdx = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_X, v), h_f);
+    u32 px2  = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, dudx, dudx), ir_op2(f, IR_FMUL, dvdx, dvdx));
     u32 dudy = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_Y, u), w_f);
     u32 dvdy = ir_op2(f, IR_FMUL, ir_op1(f, IR_DERIV_Y, v), h_f);
-    u32 px2  = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, dudx, dudx), ir_op2(f, IR_FMUL, dvdx, dvdx));
     u32 py2  = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, dudy, dudy), ir_op2(f, IR_FMUL, dvdy, dvdy));
     u32 rho2 = ir_op2(f, IR_FMAX, px2, py2);
     u32 bits = ir_op1(f, IR_BITCAST_F2I, rho2);
