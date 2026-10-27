@@ -11,6 +11,7 @@
 #define TTF_MAX_COMPOSITE_DEPTH 16u
 #define TTF_MAX_GLYPH_POINTS    16384u
 #define TTF_MAX_GLYPH_CONTOURS  2048u
+#define TTF_MAX_GLYPH_NODES     1024u   /* bir glif açılırken ziyaret edilen toplam (bileşik dahil) glif sayısı */
 
 typedef struct {
     const u8* data;

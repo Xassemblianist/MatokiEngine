@@ -381,8 +381,12 @@ i16 ttf_kern_advance(const TtfFont* font, u16 left_glyph, u16 right_glyph) {
 }
 
 /* Basit veya bileşik bir glifin toplam kontur ve nokta sayısını sınır denetimli hesaplar */
-static b32 count_glyph_geom(const TtfFont* f, u16 gid, u32 depth, u32* io_contours, u32* io_points) {
+/* budget: toplam ziyaret edilen glif düğümü sınırı. Derinlik (16) × bileşen (256) sınırları tek başına yetmez:
+ * kendine başvuran çok bileşenli bir glif 256^16 çağrıya şişebilirdi (bozuk fontla kilitlenme). */
+static b32 count_glyph_geom(const TtfFont* f, u16 gid, u32 depth, u32* io_contours, u32* io_points, u32* budget) {
     if (depth > TTF_MAX_COMPOSITE_DEPTH) return FALSE;
+    if (*budget == 0u) return FALSE;
+    (*budget)--;
     u32 off0, off1;
     if (!glyph_loca_range(f, gid, &off0, &off1)) return FALSE;
     if (off0 == off1) return TRUE; /* boş glif */
@@ -455,7 +459,7 @@ static b32 count_glyph_geom(const TtfFont* f, u16 gid, u32 depth, u32* io_contou
         if (!check_range(glen, pos, arg_bytes + mat_bytes)) return FALSE;
         pos += arg_bytes + mat_bytes;
 
-        if (!count_glyph_geom(f, child_gid, depth + 1u, io_contours, io_points)) return FALSE;
+        if (!count_glyph_geom(f, child_gid, depth + 1u, io_contours, io_points, budget)) return FALSE;
 
         if (!(flags & COMP_MORE_COMPONENTS)) break;
     }
@@ -622,8 +626,8 @@ b32 ttf_load_glyph(const TtfFont* font, u16 glyph_index, Arena* arena, TtfGlyph*
     if (!glyph_loca_range(font, glyph_index, &off0, &off1)) return FALSE;
     if (off0 == off1) return TRUE; /* boş glif */
 
-    u32 total_c = 0u, total_p = 0u;
-    if (!count_glyph_geom(font, glyph_index, 0u, &total_c, &total_p)) return FALSE;
+    u32 total_c = 0u, total_p = 0u, budget = TTF_MAX_GLYPH_NODES;
+    if (!count_glyph_geom(font, glyph_index, 0u, &total_c, &total_p, &budget)) return FALSE;
     if (total_c == 0u || total_p == 0u) return TRUE;
 
     const u8* gdata = font->data + font->glyf_off + off0;

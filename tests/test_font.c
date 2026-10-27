@@ -484,3 +484,31 @@ TEST(font_ttf_fuzz_50k) {
     free(mut_buf);
     CHECK(parsed_ok > 0u);
 }
+
+/* İnceleme (Claude): kendine başvuran bileşik glif (6 → 6, 6) sınırlı işte reddedilir.
+ * Bütçe olmadan 2^17 çağrı yapardı; 256 bileşenli bir glifte 256^16 → kilitlenme. */
+TEST(ttf_review_self_referencing_composite) {
+    static u8 buf[4096];
+    u32 n = read_bin_file("tests/assets/test_font.ttf", buf, sizeof(buf));
+    CHECK(n > 0);
+    TtfFont font;
+    CHECK(ttf_parse(buf, n, &font));
+    u32 off = font.index_to_loc_format == 0
+        ? (u32)(((u32)buf[font.loca_off + 12] << 8) | buf[font.loca_off + 13]) * 2u
+        : ((u32)buf[font.loca_off + 24] << 24) | ((u32)buf[font.loca_off + 25] << 16) |
+          ((u32)buf[font.loca_off + 26] << 8) | buf[font.loca_off + 27];
+    u8* g = buf + font.glyf_off + off;
+    CHECK((i16)((g[0] << 8) | g[1]) < 0);    /* glif 6 bileşik */
+    /* İki bileşen: bayrak(2) gid(2) arg(4) + ölçek(2) ; bayrak gid arg(4) + xy ölçek(4) */
+    g[10 + 2] = 0; g[10 + 3] = 6;
+    g[10 + 10 + 2] = 0; g[10 + 10 + 3] = 6;
+    TtfFont f2;
+    CHECK(ttf_parse(buf, n, &f2));
+    static u8 mem[KB(256)];
+    Arena a;
+    arena_init(&a, mem, sizeof(mem));
+    TtfGlyph gl;
+    f64 t0 = plat_time_ms();
+    CHECK(!ttf_load_glyph(&f2, 6, &a, &gl));
+    CHECK(plat_time_ms() - t0 < 50.0);
+}

@@ -51,3 +51,9 @@ Tipler `core/types.h`, matematik `core/math.h`, bellek `core/arena.h` (malloc yo
 ### Ertelenenler ve Öneriler
 - **Ertelenenler**: OpenType `GPOS` tabanlı kerning, CFF (`OTTO`) üçüncü derece Bezier konturları, hinting bytecode yorumlayıcısı.
 - **Öneriler**: `FontAtlas` çıktısını `Texture` (`RGBA8` veya tek kanallı alfa shader varyantı) olarak `Batch2D` ve `src/ui/` ile bağlayarak ölçeklenebilir UI metin çizimi sağlamak.
+
+## İnceleme (Claude, 2026-10-27)
+- Bileşik glif açılımında derinlik (16) ve bileşen (256) sınırları tek başına yetmiyordu: kendine başvuran çok bileşenli
+  bir glif 256^16 çağrıya şişip motoru kilitleyebilirdi → glif başına toplam düğüm bütçesi `TTF_MAX_GLYPH_NODES` (1024).
+  Test: `ttf_review_self_referencing_composite` (6 → 6,6 glifi < 50 ms'de reddedilir).
+- Rasterleyici fark dizisi sınırları, atlas paketleme taşma denetimleri ve cmap/kern/loca sınır denetimleri incelendi: sorun yok.
