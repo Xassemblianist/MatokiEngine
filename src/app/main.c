@@ -934,6 +934,15 @@ EXPORT(engine_prof_report) void engine_prof_report(void) {
     prof_report();
 }
 
+/* Ölçüm: JIT/C-ref seçimi ve 3D sahne aydınlatma modu (konsoldan) */
+EXPORT(engine_set_jit) void engine_set_jit(b32 on) {
+    g_use_jit = on;
+}
+
+EXPORT(engine_s3d_bench) void engine_s3d_bench(b32 pbr, f32 tod) {
+    scene3d_bench_set(pbr, tod);
+}
+
 EXPORT(engine_last_frame_ms) f32 engine_last_frame_ms(void) {
     return g_cur_frame_ms;
 }

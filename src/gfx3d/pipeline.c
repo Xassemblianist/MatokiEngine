@@ -14,6 +14,7 @@ u32 g3d_attr_components(G3dAttr a) {
     case G3D_ATTR_VIEW_DEPTH: return 1;
     case G3D_ATTR_COLOR:      return 4;
     case G3D_ATTR_WORLD_POS:  return 3;
+    case G3D_ATTR_SHADOW_POS: return 3;
     }
     return 0;
 }
@@ -37,6 +38,7 @@ void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj,
     c->vp_w      = r->fb->w;
     c->vp_h      = r->fb->h;
     c->guard     = clip_guard_for_viewport(c->vp_w, c->vp_h);
+    c->shadow_mat = mat4_identity();
     __builtin_memset(&c->stats, 0, sizeof(c->stats));
 
     /* Gribb–Hartmann: klip düzlemleri view_proj satırlarından (dünya uzayı) */
@@ -47,6 +49,10 @@ void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj,
     c->planes[2] = plane_norm(vec4_add(r3, r1));   /* y >= -w */
     c->planes[3] = plane_norm(vec4_sub(r3, r1));   /* y <=  w */
     c->planes[4] = plane_norm(vec4_sub(r3, r2));   /* z <=  w (near) */
+}
+
+void g3d_set_shadow(G3dContext* c, Mat4 world_to_shadow) {
+    c->shadow_mat = world_to_shadow;
 }
 
 b32 g3d_sphere_visible(const G3dContext* c, Vec3 p, f32 radius) {
@@ -114,6 +120,7 @@ typedef struct {
     const G3dMaterial* mat;
     const Mat4*        model;
     const f32*         iv;      /* model^-1 (normal matrisi = iv^T) */
+    const f32*         sm;      /* shadow_mat * model (G3D_ATTR_SHADOW_POS) */
     const f32 *qx, *qy, *qz, *qw;
 } VertexCtx;
 
@@ -147,6 +154,13 @@ static inline void vertex_attrs(const VertexCtx* v, u32 i, f32* out) {
         case G3D_ATTR_WORLD_POS: {
             Vec4 w = mat4_mul_vec4(*v->model, vec4(m->px[i], m->py[i], m->pz[i], 1.0f));
             out[k++] = w.x; out[k++] = w.y; out[k++] = w.z;
+        } break;
+        case G3D_ATTR_SHADOW_POS: {
+            const f32* sm = v->sm;
+            f32 x = m->px[i], y = m->py[i], z = m->pz[i];
+            out[k++] = sm[0] * x + sm[4] * y + sm[8]  * z + sm[12];
+            out[k++] = sm[1] * x + sm[5] * y + sm[9]  * z + sm[13];
+            out[k++] = sm[2] * x + sm[6] * y + sm[10] * z + sm[14];
         } break;
         }
     }
@@ -186,7 +200,8 @@ b32 g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial*
     /* --- Vertex aşaması --- */
     Mat4 mvp = mat4_mul(c->view_proj, *model);
     Mat4 inv = mat4_inverse(*model);   /* normal matrisi = inv^T */
-    VertexCtx vx = { m, mat, model, inv.m, NULL, NULL, NULL, NULL };
+    Mat4 smodel = mat4_mul(c->shadow_mat, *model);
+    VertexCtx vx = { m, mat, model, inv.m, smodel.m, NULL, NULL, NULL, NULL };
     u32 vn = m->vertex_count;
     f32* qx = ARENA_PUSH_ARRAY(c->frame, f32, vn);
     f32* qy = ARENA_PUSH_ARRAY(c->frame, f32, vn);

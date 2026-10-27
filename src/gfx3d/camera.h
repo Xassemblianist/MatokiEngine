@@ -37,5 +37,7 @@ Mat4 camera_proj(const Camera* c, f32 aspect);
 /* Reverse-Z, sonsuz uzak düzlemli perspektif: z_clip = near, w_clip = -z_view.
  * Görünür bölge: 0 < z/w <= 1 (near'da 1). */
 Mat4 mat4_perspective_rz(f32 fov_y_rad, f32 aspect, f32 near_z);
+/* Ortografik, reverse-Z: görüş uzayında z = -n → 1, z = -f → 0, w = 1 (n, f görüş yönünde uzaklık) */
+Mat4 mat4_ortho_rz(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f);
 
 #endif

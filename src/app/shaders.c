@@ -157,6 +157,84 @@ void ref_shade_lit3d(ShadeBatch* batch) {
     }
 }
 
+/* pbr3d.mtk C referansı (shader ile aynı formüller). Uniform yerleşimi: sun_dir@0 sun_col@16 sky_col@32
+ * gnd_col@48 eye@64 base@80 mat@96 fog@112; dokular: 0 albedo, 1 gölge. Varying: uv nrm depth wpos spos. */
+static f32 pbr_sdepth(const f32 t[4]) {
+    return t[0] * 0.99609381f + t[1] * 0.0038910f + t[2] * 0.0000152f;
+}
+
+void ref_shade_pbr3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    const Texture* tex = &batch->textures[0];
+    const Texture* sht = &batch->textures[1];
+    const f32 k_pi = 3.14159265f;
+    i32 level = 0;
+    for (u32 i = 0; i < n; i++) {
+        if ((i & 3u) == 0u && (tex->flags & TEX_FLAG_MIPMAP)) {
+            level = ref_tex_mip_level(tex, &v[i], &v[n + i]);
+        }
+        f32 tc[4];
+        ref_sample_tex_level(tex, v[i], v[n + i], level, tc);
+        f32 alb[3], f0[3];
+        for (u32 k = 0; k < 3; k++) { tc[k] *= u[20 + k]; alb[k] = tc[k] * tc[k]; }
+        tc[3] *= u[23];
+        f32 metal = u[24], rough = m_max(u[25], 0.04f);
+
+        f32 nx = v[2u * n + i], ny = v[3u * n + i], nz = v[4u * n + i];
+        f32 il = 1.0f / m_sqrt(nx * nx + ny * ny + nz * nz);
+        nx *= il; ny *= il; nz *= il;
+        f32 vx = u[16] - v[6u * n + i], vy = u[17] - v[7u * n + i], vz = u[18] - v[8u * n + i];
+        il = 1.0f / m_sqrt(vx * vx + vy * vy + vz * vz);
+        vx *= il; vy *= il; vz *= il;
+        f32 hx = vx + u[0], hy = vy + u[1], hz = vz + u[2];
+        il = 1.0f / m_sqrt(hx * hx + hy * hy + hz * hz);
+        hx *= il; hy *= il; hz *= il;
+        f32 ndl = m_max(nx * u[0] + ny * u[1] + nz * u[2], 0.0f);
+        f32 ndv = m_max(nx * vx + ny * vy + nz * vz, 0.0001f);
+        f32 ndh = m_max(nx * hx + ny * hy + nz * hz, 0.0f);
+        f32 vdh = m_max(vx * hx + vy * hy + vz * hz, 0.0f);
+
+        f32 sz = u[27], dt = 1.0f / sz;
+        f32 stx = v[9u * n + i] * sz - 0.5f, sty = v[10u * n + i] * sz - 0.5f;
+        f32 flx = m_floor(stx), fly = m_floor(sty);
+        f32 frx = stx - flx, fry = sty - fly;
+        f32 p0x = (flx + 0.5f) * dt, p0y = (fly + 0.5f) * dt;
+        f32 z = v[11u * n + i] + u[26];
+        f32 t[4], s4[4];
+        for (u32 k = 0; k < 4; k++) {
+            ref_sample_tex_level(sht, p0x + (f32)(k & 1u) * dt, p0y + (f32)(k >> 1) * dt, 0, t);
+            s4[k] = (z >= pbr_sdepth(t)) ? 1.0f : 0.0f;
+        }
+        f32 a0 = s4[0] + (s4[1] - s4[0]) * frx, a1 = s4[2] + (s4[3] - s4[2]) * frx;
+        f32 sh = a0 + (a1 - a0) * fry;
+
+        f32 a = rough * rough, a2 = a * a;
+        f32 dd = ndh * ndh * (a2 - 1.0f) + 1.0f;
+        f32 dist = a2 / (k_pi * dd * dd);
+        f32 kk = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
+        f32 vis = 0.25f / ((ndl * (1.0f - kk) + kk) * (ndv * (1.0f - kk) + kk));
+        f32 x = 1.0f - vdh, x2 = x * x, fw = x2 * x2 * x;
+        f32 hemi_t = ny * 0.5f + 0.5f;
+        f32 fogf = m_clamp(v[5u * n + i] * u[31], 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f0[k] = 0.04f + (alb[k] - 0.04f) * metal;
+            f32 fres = f0[k] + (1.0f - f0[k]) * fw;
+            f32 kd = (1.0f - fres) * (1.0f - metal);
+            f32 direct = (kd * alb[k] * (1.0f / k_pi) + fres * (dist * vis)) * u[4 + k] * (ndl * sh);
+            f32 hemi = u[12 + k] + (u[8 + k] - u[12 + k]) * hemi_t;
+            f32 amb = hemi * (alb[k] * (1.0f - metal) + f0[k] * ((1.0f - rough) * 0.5f + 0.25f));
+            f32 c = direct + amb;
+            c = c + (u[28 + k] - c) * fogf;
+            f32 tm = (c * (c * 2.51f + 0.03f)) / (c * (c * 2.43f + 0.59f) + 0.14f);
+            o[k * n + i] = m_sqrt(m_clamp(tm, 0.0f, 1.0f));
+        }
+        o[3u * n + i] = tc[3];
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
     if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
@@ -164,6 +242,7 @@ static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "plasma.mtk"))  return ref_shade_plasma;
     if (str_eq_name(name, "branchy.mtk")) return ref_shade_branchy;
     if (str_eq_name(name, "lit3d.mtk"))   return ref_shade_lit3d;
+    if (str_eq_name(name, "pbr3d.mtk"))   return ref_shade_pbr3d;
     return REF_SHADE_SOLID_FN;
 }
 

@@ -14,6 +14,7 @@
 #include "gfx3d/clip.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
+#include "gfx3d/shadow.h"
 #include "gfx3d/vertex.h"
 
 static u8 g_mem[MB(48)];
@@ -351,4 +352,47 @@ TEST(gfx3d_transform_positions_exact) {
         bad += (q.x != ox[i]) + (q.y != oy[i]) + (q.z != oz[i]) + (q.w != ow[i]);
     }
     CHECK(bad == 0);
+}
+
+/* Gölge haritası: güneş neredeyse tepede, (0,2,0)'da 2 birimlik küp. Küpün altındaki zemin noktası
+ * gölgede, uzaktaki nokta aydınlık; kodlama gidiş-dönüşü 24 bit hassasiyetinde. */
+static f32 shadow_lookup(const ShadowMap* s, Vec3 p, f32* recv_z) {
+    Vec4 t = mat4_mul_vec4(s->world_to_tex, vec4(p.x, p.y, p.z, 1.0f));
+    *recv_z = t.z;
+    i32 x = (i32)(t.x * (f32)s->size), y = (i32)(t.y * (f32)s->size);
+    if (x < 0 || y < 0 || x >= (i32)s->size || y >= (i32)s->size) return 0.0f;
+    return shadow_decode_texel(s->tex.px[(u32)y * s->size + (u32)x]);
+}
+
+TEST(gfx3d_shadow_map) {
+    Env e;
+    env_init(&e, 64, 64);
+    for (u32 i = 0; i <= 1000; i++) {
+        f32 d = (f32)i / 1000.0f;
+        CHECK_NEAR(shadow_decode_texel(shadow_encode_depth(d)), d, 2.0 / 16777215.0);
+    }
+    ShadowMap sm;
+    shadow_init(&sm, &e.perm, 256);
+    Mesh* cube = mesh_cube(&e.perm, 1.0f);
+    Vec3 sun = vec3_norm(vec3(0.2f, 1.0f, 0.1f));
+    shadow_fit(&sm, sun, vec3(0.0f, 0.0f, 0.0f), 10.0f, 10.0f);
+    arena_reset(&e.frame);
+    G3dContext ctx;
+    shadow_begin(&sm, &ctx, &e.r, &e.frame);
+    G3dMaterial m = shadow_caster_material();
+    Mat4 model = mat4_translate(vec3(0.0f, 2.0f, 0.0f));
+    CHECK(g3d_draw(&ctx, cube, &model, &m));
+    shadow_end(&sm, &e.r);
+    CHECK(ctx.stats.tris_out > 0);
+
+    f32 zr, zs;
+    /* Küpün tam altı: kayıtlı derinlik (küpün ışığa uzak alt yüzü, ön yüzler ayıklandığı için) alıcıdan büyük */
+    zs = shadow_lookup(&sm, vec3(0.0f, 0.0f, 0.0f), &zr);
+    CHECK(zs > zr + 0.01f);
+    /* Uzak nokta: hiçbir şey yok → 0, alıcı aydınlık */
+    zs = shadow_lookup(&sm, vec3(7.0f, 0.0f, 7.0f), &zr);
+    CHECK(zs == 0.0f && zr > 0.0f);
+    /* Küpün üst yüzü gölgede değil: kendi derinliği kayıtlıdan büyük/eşit (sapmasız da) */
+    zs = shadow_lookup(&sm, vec3(0.1f, 3.0f, 0.1f), &zr);
+    CHECK(zr >= zs - 1e-4f);
 }

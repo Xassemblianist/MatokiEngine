@@ -52,5 +52,6 @@ b32                  shaders_compile_one(ManagedShader* out, const char* name,
 void ref_shade_plasma(ShadeBatch* batch);
 void ref_shade_branchy(ShadeBatch* batch);
 void ref_shade_lit3d(ShadeBatch* batch);
+void ref_shade_pbr3d(ShadeBatch* batch);
 
 #endif
