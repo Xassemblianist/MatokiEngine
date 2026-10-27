@@ -113,12 +113,12 @@ static Ocak g_o;
 
 /* ---------- Ses ---------- */
 
-static const SynthSfx k_sfx_jump    = { WAVE_SQUARE, 300.0f, 600.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.22f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_pick    = { WAVE_TRIANGLE, 880.0f, 1760.0f, 0.0f, 0.001f, 0.05f, 0.5f, 0.05f, 0.15f, 0.30f, 7.0f, 0.2f };
-static const SynthSfx k_sfx_deposit = { WAVE_SQUARE, 392.0f, 784.0f, 0.5f, 0.005f, 0.15f, 0.6f, 0.2f, 0.35f, 0.30f, 5.0f, 0.25f };
-static const SynthSfx k_sfx_fire    = { WAVE_NOISE, 900.0f, 150.0f, 0.0f, 0.01f, 0.4f, 0.3f, 0.2f, 0.6f, 0.35f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_out     = { WAVE_SAW, 330.0f, 82.0f, 0.0f, 0.001f, 0.2f, 0.4f, 0.1f, 0.3f, 0.30f, 6.0f, 0.5f };
-static const SynthSfx k_sfx_win     = { WAVE_SQUARE, 523.0f, 1047.0f, 0.5f, 0.01f, 0.3f, 0.7f, 0.6f, 0.6f, 0.30f, 5.0f, 0.3f };
+static const SynthSfx k_sfx_jump    = { WAVE_SQUARE, 300.0f, 600.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.22f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_pick    = { WAVE_TRIANGLE, 880.0f, 1760.0f, 0.0f, 0.001f, 0.05f, 0.5f, 0.05f, 0.15f, 0.30f, 7.0f, 0.2f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_deposit = { WAVE_SQUARE, 392.0f, 784.0f, 0.5f, 0.005f, 0.15f, 0.6f, 0.2f, 0.35f, 0.30f, 5.0f, 0.25f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_fire    = { WAVE_NOISE, 900.0f, 150.0f, 0.0f, 0.01f, 0.4f, 0.3f, 0.2f, 0.6f, 0.35f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_out     = { WAVE_SAW, 330.0f, 82.0f, 0.0f, 0.001f, 0.2f, 0.4f, 0.1f, 0.3f, 0.30f, 6.0f, 0.5f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_win     = { WAVE_SQUARE, 523.0f, 1047.0f, 0.5f, 0.01f, 0.3f, 0.7f, 0.6f, 0.6f, 0.30f, 5.0f, 0.3f , 0.0f, 0.0f, 0.0f};
 
 static void sfx(const SynthSfx* s) { synth_play(audio_synth(), s); }
 
@@ -127,9 +127,9 @@ static void start_music(void) {
     Synth* s = audio_synth();
     synth_song_stop(s);
     s->song.track_count = 0;
-    SynthSfx lead = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.06f, 0.20f, 0.6f, 0.25f, 0.45f, 0.13f, 4.5f, 0.18f };
-    SynthSfx arp  = { WAVE_SQUARE, 0.0f, 0.0f, 0.18f, 0.004f, 0.10f, 0.25f, 0.02f, 0.18f, 0.045f, 0.0f, 0.0f };
-    SynthSfx bass = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.02f, 0.30f, 0.8f, 0.6f, 0.30f, 0.22f, 0.0f, 0.0f };
+    SynthSfx lead = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.06f, 0.20f, 0.6f, 0.25f, 0.45f, 0.13f, 4.5f, 0.18f , 0.0f, 0.0f, 0.0f};
+    SynthSfx arp  = { WAVE_SQUARE, 0.0f, 0.0f, 0.18f, 0.004f, 0.10f, 0.25f, 0.02f, 0.18f, 0.045f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+    SynthSfx bass = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.02f, 0.30f, 0.8f, 0.6f, 0.30f, 0.22f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
     synth_song_add_track(s,
         "E5 - - - - - D5 - C5 - - - A4 - - - "
         "C5 - - - - - D5 - E5 - - - - - - - "
