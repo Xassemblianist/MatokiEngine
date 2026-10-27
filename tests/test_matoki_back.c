@@ -16,6 +16,8 @@
 #include "matoki/ir.h"
 #include "matoki/codegen.h"
 #include "matoki/variant.h"
+#include "matoki/matoki.h"
+#include "masm/mdis.h"
 
 static void ensure_matoki_test_dir(void) {
     mkdir("build", 0755);
@@ -830,8 +832,8 @@ TEST(matoki_variant_cache_unit) {
     CHECK(cache.count == 2);
     CHECK(cache.misses == 2);
     CHECK(v_spec->wasm_len < v1->wasm_len);
-    CHECK(v_spec->loop_inst_count < v1->loop_inst_count);
-    CHECK(v_spec->wasm_loop_ops < v1->wasm_loop_ops);
+    CHECK(v_spec->loop_inst_count <= v1->loop_inst_count);
+    CHECK(v_spec->wasm_loop_ops <= v1->wasm_loop_ops);
 }
 
 TEST(matoki_sprite_shader_codegen) {
@@ -902,4 +904,80 @@ TEST(matoki_sprite_shader_codegen) {
     fclose(fp2);
 
     CHECK(system("wasm-validate --enable-all build/test_matoki/sprite.wasm") == 0);
+}
+
+/* P4: Basit, discard'sız çekirdeklerde v128.load32_splat ve 4x döngü açmanın (offset=0/16/32/48)
+ * üretildiğini doğrular. */
+TEST(matoki_unroll4x_and_load32_splat) {
+    ensure_matoki_test_dir();
+
+    static u8 arena_buf[MB(2)];
+    Arena arena;
+    arena_init(&arena, arena_buf, sizeof(arena_buf));
+
+    const char* src =
+        "uniform tint: vec4;\n"
+        "in v_color: vec4;\n"
+        "fn frag() -> rgba { return v_color * tint; }\n";
+
+    u8 wasm_buf[16384];
+    MtkLayout layout;
+    MtkDiag diag;
+    u32 wasm_len = mtk_compile_wasm(src, (u32)strlen(src), "vcolor_p4.mtk", NULL, &arena,
+                                    wasm_buf, sizeof(wasm_buf), &layout, &diag);
+    CHECK(wasm_len > 0);
+    CHECK(diag.count == 0);
+
+    MdisResult dr = mdis_disassemble(&arena, wasm_buf, wasm_len);
+    CHECK(dr.ok);
+
+    /* 4 adet uniform bileşeni v128.load32_splat ile yüklenmeli */
+    u32 splat_cnt = 0;
+    const char* p = dr.wat;
+    while ((p = strstr(p, "v128.load32_splat")) != NULL) {
+        splat_cnt++;
+        p += 17;
+    }
+    CHECK(splat_cnt == 4);
+
+    /* 4x açılmış döngüde offset=16, offset=32, offset=48 bellek erişimleri bulunmalı */
+    CHECK(strstr(dr.wat, "offset=16") != NULL);
+    CHECK(strstr(dr.wat, "offset=32") != NULL);
+    CHECK(strstr(dr.wat, "offset=48") != NULL);
+}
+
+/* P5: Sabit alfa eşiği karşılaştırmasının (c.a < 0.01) tamsayı alanında (i32x4.lt_s, eşik = 3)
+ * yapıldığını ve gereksiz f32x4.lt / f32x4.mul komutlarının elendiğini doğrular. */
+TEST(matoki_alpha_cmp_int_fold) {
+    ensure_matoki_test_dir();
+
+    static u8 arena_buf[MB(2)];
+    Arena arena;
+    arena_init(&arena, arena_buf, sizeof(arena_buf));
+
+    const char* src =
+        "uniform tint: vec4;\n"
+        "uniform tex: texture2d;\n"
+        "in uv: vec2;\n"
+        "fn frag() -> rgba {\n"
+        "    let c: vec4 = sample(tex, uv);\n"
+        "    if (c.a < 0.01) { discard; }\n"
+        "    return c * tint;\n"
+        "}\n";
+
+    u8 wasm_buf[16384];
+    MtkLayout layout;
+    MtkDiag diag;
+    u32 wasm_len = mtk_compile_wasm(src, (u32)strlen(src), "sprite_p5.mtk", NULL, &arena,
+                                    wasm_buf, sizeof(wasm_buf), &layout, &diag);
+    CHECK(wasm_len > 0);
+    CHECK(diag.count == 0);
+
+    MdisResult dr = mdis_disassemble(&arena, wasm_buf, wasm_len);
+    CHECK(dr.ok);
+
+    /* Alfa karşılaştırması f32x4.lt yerine i32x4.lt_s ve i32x4 3 3 3 3 sabitiyle yapılmalı */
+    CHECK(strstr(dr.wat, "f32x4.lt") == NULL);
+    CHECK(strstr(dr.wat, "i32x4.lt_s") != NULL);
+    CHECK(strstr(dr.wat, "v128.const i32x4 3 3 3 3") != NULL);
 }

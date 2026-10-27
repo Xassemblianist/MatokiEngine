@@ -1053,6 +1053,77 @@ void ir_opt_licm(IrFunc* f) {
     ir_compact(f);
 }
 
+/* Çok terimli toplam/birleştirme zincirlerinde (ör. v1 + v2 + v3 + v4), her iki varying
+ * operandının da tek/son kullanıcısı olan ikili işlemleri, her iki operand da hazır olur olmaz
+ * (max(a, b) + 1 konumuna) erkene çeker. Böylece bağımsız terimler aynı anda canlı tutulmak
+ * yerine tek bir akümülatörde toplanır ve XMM yazmaç basıncı düşer. */
+static void ir_opt_schedule_accum(IrFunc* f) {
+    ASSERT(f != NULL);
+    if (f->count > OPT_MAX_INSTS) return;
+
+    u32 use_cnt[OPT_MAX_INSTS];
+    for (u32 i = 0; i < f->count; i++) use_cnt[i] = 0;
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        if (in->op == IR_NOP) continue;
+        if (in->a != IR_NONE) use_cnt[in->a]++;
+        if (in->b != IR_NONE) use_cnt[in->b]++;
+        if (in->c != IR_NONE) use_cnt[in->c]++;
+    }
+
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (!is_pure_value_op(op)) continue;
+        if (!(in->flags & IR_FLAG_VARYING) || (in->flags & IR_FLAG_HOISTED)) continue;
+        if (in->a == IR_NONE || in->b == IR_NONE || in->c != IR_NONE) continue;
+
+        u32 a = in->a;
+        u32 b = in->b;
+        if (a == b) continue;
+        if (!(f->insts[a].flags & IR_FLAG_VARYING) || (f->insts[a].flags & IR_FLAG_HOISTED)) continue;
+        if (!(f->insts[b].flags & IR_FLAG_VARYING) || (f->insts[b].flags & IR_FLAG_HOISTED)) continue;
+        if (use_cnt[a] != 1 || use_cnt[b] != 1) continue;
+
+        u32 max_op = (a > b) ? a : b;
+        u32 target = max_op + 1;
+        if (target >= i) continue;
+
+        /* max_op ile i arasında kontrol akışı veya yan etkili komut olmamalı */
+        b32 safe = TRUE;
+        for (u32 k = max_op; k <= i; k++) {
+            IrOp kop = (IrOp)f->insts[k].op;
+            if (kop == IR_IF_BEGIN || kop == IR_ELSE || kop == IR_IF_END ||
+                kop == IR_DISCARD  || kop == IR_OUTPUT) {
+                safe = FALSE;
+                break;
+            }
+        }
+        if (!safe) continue;
+
+        IrInst moved = f->insts[i];
+        u32 moved_cnt = use_cnt[i];
+        for (u32 k = i; k > target; k--) {
+            f->insts[k] = f->insts[k - 1];
+            use_cnt[k]  = use_cnt[k - 1];
+        }
+        f->insts[target] = moved;
+        use_cnt[target]  = moved_cnt;
+
+        for (u32 k = 0; k < f->count; k++) {
+            IrInst* ik = &f->insts[k];
+            if (ik->op == IR_NOP) continue;
+            u32* ops[3] = { &ik->a, &ik->b, &ik->c };
+            for (u32 m = 0; m < 3; m++) {
+                u32 v = *ops[m];
+                if (v == IR_NONE) continue;
+                if (v == i) *ops[m] = target;
+                else if (v >= target && v < i) *ops[m] = v + 1;
+            }
+        }
+    }
+}
+
 u32 ir_count_loop_insts(const IrFunc* f) {
     ASSERT(f != NULL);
     u32 loop_count = 0;
@@ -1066,15 +1137,122 @@ u32 ir_count_loop_insts(const IrFunc* f) {
     return loop_count;
 }
 
+/* Bir i32 değerinin [0..255] bayt aralığında garanti olup olmadığını denetler
+ * (ör. texel kanalı açmada x & 255 veya px >>> 24). */
+static b32 is_u8_channel_inst(const IrFunc* f, u32 idx) {
+    if (idx >= f->count) return FALSE;
+    const IrInst* in = &f->insts[idx];
+    if (in->op == IR_IAND) {
+        if (in->b != IR_NONE && f->insts[in->b].op == IR_CONST_I32 &&
+            f->insts[in->b].imm.i >= 0 && f->insts[in->b].imm.i <= 255) {
+            return TRUE;
+        }
+        if (in->a != IR_NONE && f->insts[in->a].op == IR_CONST_I32 &&
+            f->insts[in->a].imm.i >= 0 && f->insts[in->a].imm.i <= 255) {
+            return TRUE;
+        }
+    } else if (in->op == IR_ISHR_U) {
+        if (in->b != IR_NONE && f->insts[in->b].op == IR_CONST_I32 &&
+            f->insts[in->b].imm.i >= 24 && f->insts[in->b].imm.i <= 31) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* P5: Sabit alfa/kanal eşiği karşılaştırmalarını (ör. c.a < 0.01) tamsayı alanına katlar:
+ * (i2f(ch) * (1/255.0)) < K  -->  ch < thresh  (ch in [0..255] için bit-bit eşdeğer). */
+static void ir_opt_alpha_cmp(IrFunc* f) {
+    ASSERT(f != NULL);
+    if (f->count > OPT_MAX_INSTS) return;
+
+    u32 use_cnt[OPT_MAX_INSTS];
+    for (u32 i = 0; i < f->count; i++) use_cnt[i] = 0;
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        if (in->op == IR_NOP) continue;
+        if (in->a != IR_NONE) use_cnt[in->a]++;
+        if (in->b != IR_NONE) use_cnt[in->b]++;
+        if (in->c != IR_NONE) use_cnt[in->c]++;
+    }
+
+    const f32 inv255 = 1.0f / 255.0f;
+    const u32 inv255_bits = f32_bits(inv255);
+
+    for (u32 i = 0; i < f->count; i++) {
+        IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (op != IR_FLT && op != IR_FLE && op != IR_FGT && op != IR_FGE) continue;
+
+        u32 mul_id   = in->a;
+        u32 const_id = in->b;
+        /* Sabit solda ise karşılaştırma yönünü çevirerek sağa al */
+        if (f->insts[mul_id].op == IR_CONST_F32 && f->insts[const_id].op == IR_FMUL) {
+            u32 tmp = mul_id; mul_id = const_id; const_id = tmp;
+            if (op == IR_FLT)      op = IR_FGT;
+            else if (op == IR_FLE) op = IR_FGE;
+            else if (op == IR_FGT) op = IR_FLT;
+            else                   op = IR_FLE;
+        }
+        if (f->insts[const_id].op != IR_CONST_F32 || f->insts[mul_id].op != IR_FMUL) continue;
+        if (use_cnt[const_id] != 1 && use_cnt[mul_id] != 1) continue;
+
+        f32 k_val = f->insts[const_id].imm.f;
+        if (is_nan_f32(k_val)) continue;
+
+        const IrInst* mul_in = &f->insts[mul_id];
+        u32 i2f_id   = mul_in->a;
+        u32 scale_id = mul_in->b;
+        if (f->insts[i2f_id].op == IR_CONST_F32) {
+            u32 tmp = i2f_id; i2f_id = scale_id; scale_id = tmp;
+        }
+        if (f->insts[scale_id].op != IR_CONST_F32 ||
+            f32_bits(f->insts[scale_id].imm.f) != inv255_bits) {
+            continue;
+        }
+        if (f->insts[i2f_id].op != IR_I2F) continue;
+
+        u32 ch_id = f->insts[i2f_id].a;
+        if (!is_u8_channel_inst(f, ch_id)) continue;
+
+        /* u in [0..255] için ((f32)u * (1/255)) < K veya <= K sınırını tam olarak bul */
+        b32 use_le = (op == IR_FLE || op == IR_FGT);
+        i32 thresh = 0;
+        while (thresh < 256) {
+            f32 scaled = (f32)thresh * inv255;
+            b32 cond = use_le ? (scaled <= k_val) : (scaled < k_val);
+            if (!cond) break;
+            thresh++;
+        }
+
+        u32 c_slot = (use_cnt[const_id] == 1) ? const_id : mul_id;
+        make_const_i32(&f->insts[c_slot], thresh);
+
+        in->op    = (u8)((op == IR_FLT || op == IR_FLE) ? IR_ILT_S : IR_IGE_S);
+        in->a     = ch_id;
+        in->b     = c_slot;
+        in->flags = (in->flags & ~IR_FLAG_VARYING) | (f->insts[ch_id].flags & IR_FLAG_VARYING);
+
+        use_cnt[ch_id]++;
+        if (c_slot == const_id && use_cnt[mul_id] > 0) {
+            use_cnt[mul_id]--;
+        } else if (c_slot == mul_id && use_cnt[const_id] > 0) {
+            use_cnt[const_id]--;
+        }
+    }
+}
+
 void ir_optimize(IrFunc* f) {
     ASSERT(f != NULL);
     for (u32 pass = 0; pass < 4; pass++) {
         u32 prev_count = f->count;
         ir_opt_constfold(f);
+        ir_opt_alpha_cmp(f);
         ir_opt_cse(f);
         ir_opt_dce(f);
         ir_compact(f);
         ir_opt_licm(f);
+        ir_opt_schedule_accum(f);
         if (f->count == prev_count && pass > 0) {
             break;
         }

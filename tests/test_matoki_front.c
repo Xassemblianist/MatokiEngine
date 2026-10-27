@@ -596,10 +596,16 @@ TEST(matoki_eval_plasma_matches_c_math) {
         f32 ref_g = m_cos(w * pi + 1.0f) * 0.5f + 0.5f;
         f32 ref_b = m_sin(w * pi + 2.0f) * 0.5f + 0.5f;
 
-        CHECK_NEAR(out_rgba[0 * 4 + lane], ref_r, 1e-5);
-        CHECK_NEAR(out_rgba[1 * 4 + lane], ref_g, 1e-5);
-        CHECK_NEAR(out_rgba[2 * 4 + lane], ref_b, 1e-5);
+        /* 7. derece tek-polinom minimax sin/cos yaklaşımı için beklenen hata sınırı <= 2e-4 */
+        CHECK_NEAR(out_rgba[0 * 4 + lane], ref_r, 2e-4);
+        CHECK_NEAR(out_rgba[1 * 4 + lane], ref_g, 2e-4);
+        CHECK_NEAR(out_rgba[2 * 4 + lane], ref_b, 2e-4);
         CHECK_NEAR(out_rgba[3 * 4 + lane], 1.0f,  1e-5);
+    }
+
+    /* Tek-polinom sin/cos açılımında kadran seçimi için IR_SELECT kullanılmamalı */
+    for (u32 i = 0; i < ir.count; i++) {
+        CHECK(ir.insts[i].op != IR_SELECT);
     }
 }
 
@@ -624,4 +630,71 @@ TEST(matoki_compile_wasm_all_shaders) {
     CHECK(wasm_buf[0] == 0x00 && wasm_buf[1] == 0x61 &&
           wasm_buf[2] == 0x73 && wasm_buf[3] == 0x6D);
 }
+
+TEST(matoki_trig_single_poly_accuracy) {
+    const char* src =
+        "uniform phase: f32;\n"
+        "in x: f32;\n"
+        "fn frag() -> rgba {\n"
+        "    return vec4(sin(x), cos(x), cos(x - phase), sin(x + phase));\n"
+        "}\n";
+
+    Arena arena;
+    arena_init(&arena, g_test_arena_buf, sizeof(g_test_arena_buf));
+    IrFunc ir;
+    MtkLayout layout;
+    MtkDiag diag;
+
+    CHECK(mtk_compile_ir(src, c_strlen(src), "trig.mtk", &arena, &ir, &layout, &diag));
+    ir_optimize(&ir);
+
+    char err[256];
+    CHECK(ir_verify(&ir, err, sizeof(err)));
+    for (u32 i = 0; i < ir.count; i++) {
+        CHECK(ir.insts[i].op != IR_SELECT);
+    }
+
+    enum { NQ = 64 };
+    QuadHeader quads[NQ];
+    f32 varyings[NQ * 4];
+    f32 out_rgba[4 * NQ * 4];
+    for (u32 q = 0; q < NQ; q++) {
+        quads[q].mask = 0xFu;
+        quads[q].x    = (u16)(q * 2);
+        quads[q].y    = 0;
+        for (u32 l = 0; l < 4; l++) {
+            u32 idx = q * 4 + l;
+            f32 t = (f32)idx / (f32)(NQ * 4 - 1);
+            varyings[idx] = (t * 2.0f - 1.0f) * 31.4159265f; /* [-10*pi, 10*pi] */
+        }
+    }
+
+    _Alignas(16) u8 uniforms[16];
+    __builtin_memset(uniforms, 0, sizeof(uniforms));
+    f32 phase = 0.78539816f;
+    __builtin_memcpy(uniforms, &phase, sizeof(f32));
+
+    ShadeBatch batch;
+    __builtin_memset(&batch, 0, sizeof(batch));
+    batch.count         = NQ;
+    batch.varying_count = 1;
+    batch.quads         = quads;
+    batch.varyings      = varyings;
+    batch.uniforms      = uniforms;
+    batch.out_rgba      = out_rgba;
+
+    ir_eval(&ir, &batch);
+
+    for (u32 q = 0; q < NQ; q++) {
+        for (u32 l = 0; l < 4; l++) {
+            u32 idx = q * 4 + l;
+            f32 x = varyings[idx];
+            CHECK_NEAR(out_rgba[(0 * NQ + q) * 4 + l], m_sin(x),         2e-4);
+            CHECK_NEAR(out_rgba[(1 * NQ + q) * 4 + l], m_cos(x),         2e-4);
+            CHECK_NEAR(out_rgba[(2 * NQ + q) * 4 + l], m_cos(x - phase), 2e-4);
+            CHECK_NEAR(out_rgba[(3 * NQ + q) * 4 + l], m_sin(x + phase), 2e-4);
+        }
+    }
+}
+
 

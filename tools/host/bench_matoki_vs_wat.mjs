@@ -620,12 +620,15 @@ console.log(`|---|---:|---:|---:|---:|---:|---:|---:|`);
 for (const r of results) {
     const mtkLoop = r.info.mtkDisInfo.mainLoopOps;
     const watLoop = r.info.watDisInfo.mainLoopOps;
+    const mtkLoopNote = r.info.mtkDisInfo.loopCount > 1
+        ? `${mtkLoop} (4x=${Math.round(mtkLoop / 4)}/q)`
+        : `${mtkLoop}`;
     const watLoopNote = r.info.watDisInfo.loopCount > 1
         ? `${watLoop} (4x=${Math.round(watLoop / 4)}/q)`
         : `${watLoop}`;
     console.log(
         `| \`${r.sh.name}\` | ${r.info.irRawCount} → ${r.info.irOptCount} | ` +
-        `${mtkLoop} → ${watLoopNote} | ${r.info.mtkBytes.length} B → ${r.info.watBytes.length} B | ` +
+        `${mtkLoopNote} → ${watLoopNote} | ${r.info.mtkBytes.length} B → ${r.info.watBytes.length} B | ` +
         `**${r.mtkBench.median.toFixed(1)}** | **${r.watBench.median.toFixed(1)}** | ` +
         `**${r.speedup.toFixed(2)}×** | **%${r.effPct.toFixed(1)}** |`
     );
