@@ -402,10 +402,15 @@ static void ir_unpack_texel(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_
     u32 b_i = ir_op2(f, IR_IAND, ir_op2(f, IR_ISHR_U, px, s16_i), c255_i);
     u32 a_i = ir_op2(f, IR_ISHR_U, px, s24_i);
 
-    out_rgba[0] = ir_op2(f, IR_FMUL, ir_op1(f, IR_I2F, r_i), inv255_f);
-    out_rgba[1] = ir_op2(f, IR_FMUL, ir_op1(f, IR_I2F, g_i), inv255_f);
-    out_rgba[2] = ir_op2(f, IR_FMUL, ir_op1(f, IR_I2F, b_i), inv255_f);
-    out_rgba[3] = ir_op2(f, IR_FMUL, ir_op1(f, IR_I2F, a_i), inv255_f);
+    out_rgba[0] = ir_op1(f, IR_I2F, r_i);
+    out_rgba[1] = ir_op1(f, IR_I2F, g_i);
+    out_rgba[2] = ir_op1(f, IR_I2F, b_i);
+    out_rgba[3] = ir_op1(f, IR_I2F, a_i);
+    if (inv255_f != IR_NONE) {
+        for (u32 c = 0; c < 4; c++) {
+            out_rgba[c] = ir_op2(f, IR_FMUL, out_rgba[c], inv255_f);
+        }
+    }
 }
 
 /* Ortak örnekleme gövdesi. level == IR_NONE: seviye 0 (eski yol, komut dizisi değişmedi).
@@ -458,18 +463,19 @@ static void ir_emit_sample_impl(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u3
 
         u32 t00[4], t10[4], t01[4], t11[4];
         ir_unpack_texel(f, slot, x0, y0, w_i, w_m1, h_m1, base,
-                        zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t00);
+                        zero_i, c255_i, s8_i, s16_i, s24_i, IR_NONE, flags, t00);
         ir_unpack_texel(f, slot, x1, y0, w_i, w_m1, h_m1, base,
-                        zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t10);
+                        zero_i, c255_i, s8_i, s16_i, s24_i, IR_NONE, flags, t10);
         ir_unpack_texel(f, slot, x0, y1, w_i, w_m1, h_m1, base,
-                        zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t01);
+                        zero_i, c255_i, s8_i, s16_i, s24_i, IR_NONE, flags, t01);
         ir_unpack_texel(f, slot, x1, y1, w_i, w_m1, h_m1, base,
-                        zero_i, c255_i, s8_i, s16_i, s24_i, inv255_f, flags, t11);
+                        zero_i, c255_i, s8_i, s16_i, s24_i, IR_NONE, flags, t11);
 
         for (u32 c = 0; c < 4; c++) {
             u32 top = ir_op2(f, IR_FADD, t00[c], ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, t10[c], t00[c]), ax));
             u32 bot = ir_op2(f, IR_FADD, t01[c], ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, t11[c], t01[c]), ax));
-            out_rgba[c] = ir_op2(f, IR_FADD, top, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, bot, top), ay));
+            u32 lrp = ir_op2(f, IR_FADD, top, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, bot, top), ay));
+            out_rgba[c] = ir_op2(f, IR_FMUL, lrp, inv255_f);
         }
     }
 }

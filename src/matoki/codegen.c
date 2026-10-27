@@ -1587,7 +1587,7 @@ static void emit_fused_blend_epilogue(CgCtx* ctx) {
             }
             mb_local_get(mf, ctx->loc_v_ff);
             mb_v128_and(mf);
-            mb_f32x4_convert_i32x4_u(mf);
+            mb_f32x4_convert_i32x4_s(mf);
             mb_local_get(mf, ctx->loc_v_inv255);
             mb_f32x4_mul(mf);
             mb_local_get(mf, ctx->loc_tmp_v1);
@@ -1605,7 +1605,7 @@ static void emit_fused_blend_epilogue(CgCtx* ctx) {
         mb_local_get(mf, ctx->loc_fb_dst);
         mb_i32_const(mf, 24);
         mb_i32x4_shr_u(mf);
-        mb_f32x4_convert_i32x4_u(mf);
+        mb_f32x4_convert_i32x4_s(mf);
         mb_local_get(mf, ctx->loc_v_inv255);
         mb_f32x4_mul(mf);
         mb_local_get(mf, ctx->loc_tmp_v1);
@@ -1629,7 +1629,7 @@ static void emit_fused_blend_epilogue(CgCtx* ctx) {
                 mb_local_get(mf, ctx->loc_v_ff);
                 mb_v128_and(mf);
             }
-            mb_f32x4_convert_i32x4_u(mf);
+            mb_f32x4_convert_i32x4_s(mf);
             mb_local_get(mf, ctx->loc_v_inv255);
             mb_f32x4_mul(mf);
 

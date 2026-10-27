@@ -194,7 +194,26 @@ static u32 emit_scalar_binop(IrFunc* f, TokenKind op, MtkType base_type, u32 a, 
     case TOK_MINUS:
     case TOK_MINUS_ASSIGN: return ir_op2(f, is_flt ? IR_FSUB : IR_ISUB, a, b);
     case TOK_STAR:
-    case TOK_STAR_ASSIGN:  return ir_op2(f, is_flt ? IR_FMUL : IR_IMUL, a, b);
+    case TOK_STAR_ASSIGN: {
+        /* (varying * uniform1) * uniform2 -> varying * (uniform1 * uniform2):
+         * özellikle sample() çıktısındaki (1/255.0) çarpanını sonraki base/tint uniform
+         * çarpanıyla birleştirerek LICM ile döngü önüne taşır. */
+        if (is_flt) {
+            const IrInst* ia = &f->insts[a];
+            const IrInst* ib = &f->insts[b];
+            if (ia->op == IR_FMUL && (f->insts[ia->a].flags & IR_FLAG_VARYING) &&
+                !(f->insts[ia->b].flags & IR_FLAG_VARYING) && !(ib->flags & IR_FLAG_VARYING)) {
+                u32 va = ia->a, u1 = ia->b;
+                return ir_op2(f, IR_FMUL, va, ir_op2(f, IR_FMUL, u1, b));
+            }
+            if (ib->op == IR_FMUL && (f->insts[ib->a].flags & IR_FLAG_VARYING) &&
+                !(f->insts[ib->b].flags & IR_FLAG_VARYING) && !(ia->flags & IR_FLAG_VARYING)) {
+                u32 vb = ib->a, u1 = ib->b;
+                return ir_op2(f, IR_FMUL, vb, ir_op2(f, IR_FMUL, a, u1));
+            }
+        }
+        return ir_op2(f, is_flt ? IR_FMUL : IR_IMUL, a, b);
+    }
     case TOK_SLASH:
     case TOK_SLASH_ASSIGN: return ir_op2(f, IR_FDIV, a, b);
 
