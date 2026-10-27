@@ -172,6 +172,34 @@ static b32 can_inline_inst(const IrFunc* f, u32 idx) {
     return TRUE;
 }
 
+/* Bir ifade ağacının (root) altında son kullanımı <= root olan farklı döngü-içi
+ * local'lerin (inlined olmayan) sayısını hesaplar. */
+static u32 count_dying_loop_locals(const CgCtx* ctx, u32 node, u32 root,
+                                   u32* seen, u32* seen_cnt) {
+    const IrInst* in = &ctx->f->insts[node];
+    u32 ops[3] = { in->a, in->b, in->c };
+    if (in->op == IR_SELECT && ctx->select_fneg_mode[node] == 3) {
+        ops[0] = ctx->f->insts[ctx->f->insts[in->a].a].a;
+        ops[1] = IR_NONE;
+    }
+    for (u32 k = 0; k < 3; k++) {
+        u32 op_id = ops[k];
+        if (op_id == IR_NONE) continue;
+        if (ctx->inlined[op_id]) {
+            count_dying_loop_locals(ctx, op_id, root, seen, seen_cnt);
+        } else if (!ctx->is_preheader[op_id] && ctx->last_use[op_id] <= root) {
+            b32 dup = FALSE;
+            for (u32 s = 0; s < *seen_cnt; s++) {
+                if (seen[s] == op_id) { dup = TRUE; break; }
+            }
+            if (!dup && *seen_cnt < 16) {
+                seen[(*seen_cnt)++] = op_id;
+            }
+        }
+    }
+    return *seen_cnt;
+}
+
 static void analyze_liveness_and_trees(CgCtx* ctx) {
     const IrFunc* f = ctx->f;
     u32 n = f->count;
@@ -447,6 +475,26 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
 
         /* Üretici uniform iken tüketici varying splat istiyorsa splat local'i kullan */
         if (ctx->need_splat[u]) continue;
+
+        /* Eğer u ile tüketicisi cons_idx arasında çok-kullanımlı başka döngü komutları
+         * (kendi adımında local'e yazılacak ifadeler) varsa ve u'nun alt ağacı >= 2 farklı
+         * döngü local'inin son kullanımıysa, u'yu cons_idx'e ertelemek o >= 2 yazmacı aradaki
+         * ifadeler boyunca canlı tutar; u'yu kendi adımında tek yazmaca yazıp onları bırak. */
+        if (!ctx->is_preheader[u] && cons_idx > u + 1) {
+            u32 multi_between = 0;
+            for (u32 k = u + 1; k < cons_idx; k++) {
+                if (!ctx->is_preheader[k] && ctx->use_count[k] > 1) {
+                    multi_between++;
+                }
+            }
+            if (multi_between >= 2) {
+                u32 seen[16];
+                u32 seen_cnt = 0;
+                if (count_dying_loop_locals(ctx, u, u, seen, &seen_cnt) >= 2) {
+                    continue;
+                }
+            }
+        }
 
         ctx->inlined[u] = TRUE;
         ctx->stat_inlined_ops++;

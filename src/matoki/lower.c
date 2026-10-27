@@ -71,44 +71,44 @@ static i32 find_var(const LowerCtx* ctx, const char* name) {
 /* ---------- Polinom açılımları (core/math.c ile birebir aynı katsayılar) ---------- */
 
 static u32 emit_trig_scalar(IrFunc* f, u32 x, b32 is_cos) {
-    u32 inv_pio2 = ir_const_f32(f, 0.63661977236758134308f);
-    u32 half     = ir_const_f32(f, 0.5f);
-    u32 kf       = ir_op1(f, IR_FFLOOR, ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, x, inv_pio2), half));
-    u32 k        = ir_op1(f, IR_F2I, kf);
+    if (is_cos) {
+        u32 pio2 = ir_const_f32(f, 1.57079633f);
+        const IrInst* ix = &f->insts[x];
+        if (ix->op == IR_FADD && !(f->insts[ix->b].flags & IR_FLAG_VARYING)) {
+            u32 lhs = ix->a, rhs = ix->b;
+            x = ir_op2(f, IR_FADD, lhs, ir_op2(f, IR_FADD, rhs, pio2));
+        } else if (ix->op == IR_FADD && !(f->insts[ix->a].flags & IR_FLAG_VARYING)) {
+            u32 lhs = ix->a, rhs = ix->b;
+            x = ir_op2(f, IR_FADD, ir_op2(f, IR_FADD, lhs, pio2), rhs);
+        } else if (ix->op == IR_FSUB && !(f->insts[ix->b].flags & IR_FLAG_VARYING)) {
+            u32 lhs = ix->a, rhs = ix->b;
+            x = ir_op2(f, IR_FADD, lhs, ir_op2(f, IR_FSUB, pio2, rhs));
+        } else {
+            x = ir_op2(f, IR_FADD, x, pio2);
+        }
+    }
 
-    u32 pio2_1   = ir_const_f32(f, 1.5703125f);
-    u32 pio2_2   = ir_const_f32(f, 4.837512969970703125e-04f);
-    u32 pio2_3   = ir_const_f32(f, 7.549789954891882163e-08f);
+    u32 inv_pi = ir_const_f32(f, 0.31830987f);
+    u32 half   = ir_const_f32(f, 0.5f);
+    u32 kf     = ir_op1(f, IR_FFLOOR, ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, x, inv_pi), half));
 
-    u32 r        = ir_op2(f, IR_FSUB, x, ir_op2(f, IR_FMUL, kf, pio2_1));
-    r            = ir_op2(f, IR_FSUB, r, ir_op2(f, IR_FMUL, kf, pio2_2));
-    r            = ir_op2(f, IR_FSUB, r, ir_op2(f, IR_FMUL, kf, pio2_3));
+    u32 pi1    = ir_const_f32(f, 3.140625f);
+    u32 pi2    = ir_const_f32(f, 9.6765359e-04f);
 
-    u32 r2       = ir_op2(f, IR_FMUL, r, r);
+    u32 r      = ir_op2(f, IR_FSUB, x, ir_op2(f, IR_FMUL, kf, pi1));
+    r          = ir_op2(f, IR_FSUB, r, ir_op2(f, IR_FMUL, kf, pi2));
+    u32 ri     = ir_op1(f, IR_BITCAST_F2I, r);
+    u32 k      = ir_op1(f, IR_F2I, kf);
+    u32 sign   = ir_op2(f, IR_ISHL, k, ir_const_i32(f, 31));
+    r          = ir_op1(f, IR_BITCAST_I2F, ir_op2(f, IR_IXOR, ri, sign));
 
-    /* sin_poly(r) */
-    u32 ps = ir_const_f32(f, 2.7557314297e-06f);
-    ps = ir_op2(f, IR_FSUB, ir_op2(f, IR_FMUL, ps, r2), ir_const_f32(f, 1.9841270114e-04f));
-    ps = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, ps, r2), ir_const_f32(f, 8.3333337680e-03f));
-    ps = ir_op2(f, IR_FSUB, ir_op2(f, IR_FMUL, ps, r2), ir_const_f32(f, 1.6666667163e-01f));
-    u32 sp = ir_op2(f, IR_FADD, r, ir_op2(f, IR_FMUL, r, ir_op2(f, IR_FMUL, r2, ps)));
+    u32 r2     = ir_op2(f, IR_FMUL, r, r);
 
-    /* cos_poly(r) */
-    u32 pc = ir_const_f32(f, -2.7557314297e-07f);
-    pc = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, pc, r2), ir_const_f32(f, 2.4801587642e-05f));
-    pc = ir_op2(f, IR_FSUB, ir_op2(f, IR_FMUL, pc, r2), ir_const_f32(f, 1.3888889225e-03f));
-    pc = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, pc, r2), ir_const_f32(f, 4.1666667908e-02f));
-    u32 one = ir_const_f32(f, 1.0f);
-    u32 cp  = ir_op2(f, IR_FADD,
-                     ir_op2(f, IR_FSUB, one, ir_op2(f, IR_FMUL, half, r2)),
-                     ir_op2(f, IR_FMUL, r2, ir_op2(f, IR_FMUL, r2, pc)));
-
-    u32 q     = is_cos ? ir_op2(f, IR_IADD, k, ir_const_i32(f, 1)) : k;
-    u32 zero  = ir_const_i32(f, 0);
-    u32 c_odd = ir_op2(f, IR_INE, ir_op2(f, IR_IAND, q, ir_const_i32(f, 1)), zero);
-    u32 mag   = ir_select(f, c_odd, cp, sp);
-    u32 c_neg = ir_op2(f, IR_INE, ir_op2(f, IR_IAND, q, ir_const_i32(f, 2)), zero);
-    return ir_select(f, c_neg, ir_op1(f, IR_FNEG, mag), mag);
+    /* Tek 7. derece minimax sin(r) polinomu, r in [-pi/2, pi/2] */
+    u32 p      = ir_const_f32(f, -1.95152959e-04f);
+    p          = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, p, r2), ir_const_f32(f, 8.33216076e-03f));
+    p          = ir_op2(f, IR_FADD, ir_op2(f, IR_FMUL, p, r2), ir_const_f32(f, -1.66666546e-01f));
+    return ir_op2(f, IR_FADD, r, ir_op2(f, IR_FMUL, r, ir_op2(f, IR_FMUL, r2, p)));
 }
 
 static u32 emit_exp2_scalar(IrFunc* f, u32 x) {

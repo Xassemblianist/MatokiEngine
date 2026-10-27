@@ -1053,6 +1053,77 @@ void ir_opt_licm(IrFunc* f) {
     ir_compact(f);
 }
 
+/* Çok terimli toplam/birleştirme zincirlerinde (ör. v1 + v2 + v3 + v4), her iki varying
+ * operandının da tek/son kullanıcısı olan ikili işlemleri, her iki operand da hazır olur olmaz
+ * (max(a, b) + 1 konumuna) erkene çeker. Böylece bağımsız terimler aynı anda canlı tutulmak
+ * yerine tek bir akümülatörde toplanır ve XMM yazmaç basıncı düşer. */
+static void ir_opt_schedule_accum(IrFunc* f) {
+    ASSERT(f != NULL);
+    if (f->count > OPT_MAX_INSTS) return;
+
+    u32 use_cnt[OPT_MAX_INSTS];
+    for (u32 i = 0; i < f->count; i++) use_cnt[i] = 0;
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        if (in->op == IR_NOP) continue;
+        if (in->a != IR_NONE) use_cnt[in->a]++;
+        if (in->b != IR_NONE) use_cnt[in->b]++;
+        if (in->c != IR_NONE) use_cnt[in->c]++;
+    }
+
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (!is_pure_value_op(op)) continue;
+        if (!(in->flags & IR_FLAG_VARYING) || (in->flags & IR_FLAG_HOISTED)) continue;
+        if (in->a == IR_NONE || in->b == IR_NONE || in->c != IR_NONE) continue;
+
+        u32 a = in->a;
+        u32 b = in->b;
+        if (a == b) continue;
+        if (!(f->insts[a].flags & IR_FLAG_VARYING) || (f->insts[a].flags & IR_FLAG_HOISTED)) continue;
+        if (!(f->insts[b].flags & IR_FLAG_VARYING) || (f->insts[b].flags & IR_FLAG_HOISTED)) continue;
+        if (use_cnt[a] != 1 || use_cnt[b] != 1) continue;
+
+        u32 max_op = (a > b) ? a : b;
+        u32 target = max_op + 1;
+        if (target >= i) continue;
+
+        /* max_op ile i arasında kontrol akışı veya yan etkili komut olmamalı */
+        b32 safe = TRUE;
+        for (u32 k = max_op; k <= i; k++) {
+            IrOp kop = (IrOp)f->insts[k].op;
+            if (kop == IR_IF_BEGIN || kop == IR_ELSE || kop == IR_IF_END ||
+                kop == IR_DISCARD  || kop == IR_OUTPUT) {
+                safe = FALSE;
+                break;
+            }
+        }
+        if (!safe) continue;
+
+        IrInst moved = f->insts[i];
+        u32 moved_cnt = use_cnt[i];
+        for (u32 k = i; k > target; k--) {
+            f->insts[k] = f->insts[k - 1];
+            use_cnt[k]  = use_cnt[k - 1];
+        }
+        f->insts[target] = moved;
+        use_cnt[target]  = moved_cnt;
+
+        for (u32 k = 0; k < f->count; k++) {
+            IrInst* ik = &f->insts[k];
+            if (ik->op == IR_NOP) continue;
+            u32* ops[3] = { &ik->a, &ik->b, &ik->c };
+            for (u32 m = 0; m < 3; m++) {
+                u32 v = *ops[m];
+                if (v == IR_NONE) continue;
+                if (v == i) *ops[m] = target;
+                else if (v >= target && v < i) *ops[m] = v + 1;
+            }
+        }
+    }
+}
+
 u32 ir_count_loop_insts(const IrFunc* f) {
     ASSERT(f != NULL);
     u32 loop_count = 0;
@@ -1075,6 +1146,7 @@ void ir_optimize(IrFunc* f) {
         ir_opt_dce(f);
         ir_compact(f);
         ir_opt_licm(f);
+        ir_opt_schedule_accum(f);
         if (f->count == prev_count && pass > 0) {
             break;
         }
