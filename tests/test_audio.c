@@ -254,11 +254,11 @@ TEST(synth_filter_resonance_stability_10s) {
     CHECK(energy > 100.0f);
 }
 
-/* mix=0 ve cutoff=0 iken eski çıktıyla bit-bit aynı; 12 alanlı konumsal başlatıcı uyumu */
+/* mix=0 ve cutoff=0 iken eski çıktıyla bit-bit aynı */
 TEST(synth_bit_exact_when_fx_off) {
-    /* Mevcut sahne kodlarındaki gibi 12 alanlı konumsal başlatıcı */
+    /* Sahne kodlarındaki gibi konumsal başlatıcı, filtre alanları 0 (kapalı) */
     static const SynthSfx k_legacy_pos = {
-        WAVE_SQUARE, 300.0f, 600.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.30f, 6.0f, 0.4f
+        WAVE_SQUARE, 300.0f, 600.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.30f, 6.0f, 0.4f, 0.0f, 0.0f, 0.0f
     };
     CHECK(k_legacy_pos.cutoff_hz == 0.0f);
     CHECK(k_legacy_pos.cutoff_end_hz == 0.0f);
@@ -277,10 +277,10 @@ TEST(synth_bit_exact_when_fx_off) {
     explicit_zero.resonance     = 0.0f;
 
     SynthSfx noise_ev = {
-        WAVE_NOISE, 1200.0f, 200.0f, 0.0f, 0.001f, 0.08f, 0.3f, 0.05f, 0.1f, 0.4f, 0.0f, 0.0f
+        WAVE_NOISE, 1200.0f, 200.0f, 0.0f, 0.001f, 0.08f, 0.3f, 0.05f, 0.1f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
     };
     SynthSfx saw_ev = {
-        WAVE_SAW, 220.0f, 110.0f, 0.0f, 0.005f, 0.1f, 0.5f, 0.1f, 0.15f, 0.35f, 5.0f, 0.3f
+        WAVE_SAW, 220.0f, 110.0f, 0.0f, 0.005f, 0.1f, 0.5f, 0.1f, 0.15f, 0.35f, 5.0f, 0.3f, 0.0f, 0.0f, 0.0f
     };
 
     synth_play(&s1, &k_legacy_pos);

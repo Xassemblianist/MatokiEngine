@@ -253,27 +253,27 @@ static Kuyu g_k;
 
 /* ---------- Ses ---------- */
 
-static const SynthSfx k_sfx_cakmak  = { WAVE_SQUARE, 520.0f, 140.0f, 0.3f, 0.001f, 0.06f, 0.2f, 0.01f, 0.08f, 0.26f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_sacma   = { WAVE_NOISE, 1400.0f, 120.0f, 0.0f, 0.001f, 0.16f, 0.3f, 0.04f, 0.22f, 0.42f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_kor     = { WAVE_SAW, 220.0f, 70.0f, 0.0f, 0.002f, 0.18f, 0.4f, 0.05f, 0.2f, 0.30f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_boom    = { WAVE_NOISE, 600.0f, 40.0f, 0.0f, 0.002f, 0.45f, 0.3f, 0.1f, 0.5f, 0.48f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_hit     = { WAVE_SQUARE, 180.0f, 90.0f, 0.4f, 0.001f, 0.05f, 0.2f, 0.01f, 0.05f, 0.18f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_g_die   = { WAVE_SAW, 300.0f, 40.0f, 0.0f, 0.005f, 0.5f, 0.3f, 0.1f, 0.4f, 0.32f, 9.0f, 1.0f };
-static const SynthSfx k_sfx_t_die   = { WAVE_TRIANGLE, 160.0f, 30.0f, 0.0f, 0.005f, 0.6f, 0.3f, 0.1f, 0.5f, 0.36f, 14.0f, 2.0f };
-static const SynthSfx k_sfx_g_alert = { WAVE_SAW, 90.0f, 160.0f, 0.0f, 0.05f, 0.3f, 0.5f, 0.1f, 0.3f, 0.22f, 6.0f, 0.8f };
-static const SynthSfx k_sfx_spit    = { WAVE_NOISE, 300.0f, 900.0f, 0.0f, 0.01f, 0.15f, 0.3f, 0.02f, 0.12f, 0.24f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_e_die   = { WAVE_SQUARE, 900.0f, 120.0f, 0.2f, 0.002f, 0.35f, 0.3f, 0.05f, 0.3f, 0.28f, 18.0f, 1.5f };
-static const SynthSfx k_sfx_bolt    = { WAVE_SQUARE, 1300.0f, 700.0f, 0.15f, 0.001f, 0.05f, 0.2f, 0.01f, 0.05f, 0.14f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_claw    = { WAVE_NOISE, 2400.0f, 800.0f, 0.0f, 0.001f, 0.08f, 0.2f, 0.01f, 0.06f, 0.22f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_hurt    = { WAVE_SQUARE, 140.0f, 70.0f, 0.5f, 0.001f, 0.12f, 0.3f, 0.02f, 0.1f, 0.30f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_pick    = { WAVE_TRIANGLE, 660.0f, 1320.0f, 0.0f, 0.001f, 0.05f, 0.5f, 0.04f, 0.12f, 0.26f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_key     = { WAVE_SQUARE, 440.0f, 880.0f, 0.5f, 0.005f, 0.2f, 0.6f, 0.3f, 0.4f, 0.26f, 6.0f, 0.3f };
-static const SynthSfx k_sfx_door    = { WAVE_SAW, 70.0f, 55.0f, 0.0f, 0.05f, 0.4f, 0.6f, 0.4f, 0.3f, 0.22f, 3.0f, 0.2f };
-static const SynthSfx k_sfx_locked  = { WAVE_SQUARE, 110.0f, 100.0f, 0.5f, 0.002f, 0.1f, 0.4f, 0.05f, 0.1f, 0.22f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_step    = { WAVE_NOISE, 300.0f, 120.0f, 0.0f, 0.001f, 0.03f, 0.1f, 0.0f, 0.03f, 0.06f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_jump    = { WAVE_NOISE, 500.0f, 250.0f, 0.0f, 0.001f, 0.04f, 0.1f, 0.0f, 0.04f, 0.08f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_win     = { WAVE_TRIANGLE, 330.0f, 990.0f, 0.0f, 0.05f, 0.6f, 0.7f, 0.8f, 0.8f, 0.30f, 5.0f, 0.3f };
-static const SynthSfx k_sfx_death   = { WAVE_SAW, 220.0f, 30.0f, 0.0f, 0.01f, 1.0f, 0.3f, 0.2f, 0.8f, 0.34f, 4.0f, 0.6f };
+static const SynthSfx k_sfx_cakmak  = { WAVE_SQUARE, 520.0f, 140.0f, 0.3f, 0.001f, 0.06f, 0.2f, 0.01f, 0.08f, 0.26f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_sacma   = { WAVE_NOISE, 1400.0f, 120.0f, 0.0f, 0.001f, 0.16f, 0.3f, 0.04f, 0.22f, 0.42f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_kor     = { WAVE_SAW, 220.0f, 70.0f, 0.0f, 0.002f, 0.18f, 0.4f, 0.05f, 0.2f, 0.30f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_boom    = { WAVE_NOISE, 600.0f, 40.0f, 0.0f, 0.002f, 0.45f, 0.3f, 0.1f, 0.5f, 0.48f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_hit     = { WAVE_SQUARE, 180.0f, 90.0f, 0.4f, 0.001f, 0.05f, 0.2f, 0.01f, 0.05f, 0.18f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_g_die   = { WAVE_SAW, 300.0f, 40.0f, 0.0f, 0.005f, 0.5f, 0.3f, 0.1f, 0.4f, 0.32f, 9.0f, 1.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_t_die   = { WAVE_TRIANGLE, 160.0f, 30.0f, 0.0f, 0.005f, 0.6f, 0.3f, 0.1f, 0.5f, 0.36f, 14.0f, 2.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_g_alert = { WAVE_SAW, 90.0f, 160.0f, 0.0f, 0.05f, 0.3f, 0.5f, 0.1f, 0.3f, 0.22f, 6.0f, 0.8f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_spit    = { WAVE_NOISE, 300.0f, 900.0f, 0.0f, 0.01f, 0.15f, 0.3f, 0.02f, 0.12f, 0.24f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_e_die   = { WAVE_SQUARE, 900.0f, 120.0f, 0.2f, 0.002f, 0.35f, 0.3f, 0.05f, 0.3f, 0.28f, 18.0f, 1.5f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_bolt    = { WAVE_SQUARE, 1300.0f, 700.0f, 0.15f, 0.001f, 0.05f, 0.2f, 0.01f, 0.05f, 0.14f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_claw    = { WAVE_NOISE, 2400.0f, 800.0f, 0.0f, 0.001f, 0.08f, 0.2f, 0.01f, 0.06f, 0.22f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_hurt    = { WAVE_SQUARE, 140.0f, 70.0f, 0.5f, 0.001f, 0.12f, 0.3f, 0.02f, 0.1f, 0.30f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_pick    = { WAVE_TRIANGLE, 660.0f, 1320.0f, 0.0f, 0.001f, 0.05f, 0.5f, 0.04f, 0.12f, 0.26f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_key     = { WAVE_SQUARE, 440.0f, 880.0f, 0.5f, 0.005f, 0.2f, 0.6f, 0.3f, 0.4f, 0.26f, 6.0f, 0.3f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_door    = { WAVE_SAW, 70.0f, 55.0f, 0.0f, 0.05f, 0.4f, 0.6f, 0.4f, 0.3f, 0.22f, 3.0f, 0.2f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_locked  = { WAVE_SQUARE, 110.0f, 100.0f, 0.5f, 0.002f, 0.1f, 0.4f, 0.05f, 0.1f, 0.22f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_step    = { WAVE_NOISE, 300.0f, 120.0f, 0.0f, 0.001f, 0.03f, 0.1f, 0.0f, 0.03f, 0.06f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_jump    = { WAVE_NOISE, 500.0f, 250.0f, 0.0f, 0.001f, 0.04f, 0.1f, 0.0f, 0.04f, 0.08f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_win     = { WAVE_TRIANGLE, 330.0f, 990.0f, 0.0f, 0.05f, 0.6f, 0.7f, 0.8f, 0.8f, 0.30f, 5.0f, 0.3f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_death   = { WAVE_SAW, 220.0f, 30.0f, 0.0f, 0.01f, 1.0f, 0.3f, 0.2f, 0.8f, 0.34f, 4.0f, 0.6f , 0.0f, 0.0f, 0.0f};
 
 static void sfx(const SynthSfx* s) { synth_play(audio_synth(), s); }
 
@@ -292,9 +292,9 @@ static void start_music(void) {
     Synth* s = audio_synth();
     synth_song_stop(s);
     s->song.track_count = 0;
-    SynthSfx bass  = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.10f, 0.50f, 0.8f, 1.2f, 0.60f, 0.26f, 0.0f, 0.0f };
-    SynthSfx lead  = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.12f, 0.40f, 0.5f, 0.40f, 0.70f, 0.10f, 5.0f, 0.25f };
-    SynthSfx pulse = { WAVE_SQUARE, 0.0f, 0.0f, 0.12f, 0.004f, 0.08f, 0.15f, 0.01f, 0.10f, 0.035f, 0.0f, 0.0f };
+    SynthSfx bass  = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.10f, 0.50f, 0.8f, 1.2f, 0.60f, 0.26f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+    SynthSfx lead  = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.12f, 0.40f, 0.5f, 0.40f, 0.70f, 0.10f, 5.0f, 0.25f , 0.0f, 0.0f, 0.0f};
+    SynthSfx pulse = { WAVE_SQUARE, 0.0f, 0.0f, 0.12f, 0.004f, 0.08f, 0.15f, 0.01f, 0.10f, 0.035f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
     synth_song_add_track(s,
         "E2 - - - - - - - - - - - - - - - F2 - - - - - - - E2 - - - - - - - "
         "E2 - - - - - - - - - - - - - - - D2 - - - - - - - C2 - - - B1 - - - ", &bass);

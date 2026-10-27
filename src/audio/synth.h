@@ -8,9 +8,6 @@
 
 #include "core/types.h"
 
-#if defined(__clang__)
-#pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#endif
 
 #define SYNTH_MAX_VOICES   24
 #define SYNTH_MAX_TRACKS   4

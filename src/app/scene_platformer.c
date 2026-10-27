@@ -104,14 +104,14 @@ static const AnimClip k_hurt  = { k_hurt_frames, 1, 1.0f, FALSE };
 static const AnimClip k_slime = { k_slime_frames, 2, 4.0f, TRUE };
 
 /* Ses efektleri */
-static const SynthSfx k_sfx_jump  = { WAVE_SQUARE, 330.0f, 720.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.30f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_coin1 = { WAVE_SQUARE, 988.0f, 0.0f, 0.5f, 0.001f, 0.02f, 0.6f, 0.04f, 0.05f, 0.25f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_coin2 = { WAVE_SQUARE, 1319.0f, 0.0f, 0.5f, 0.001f, 0.03f, 0.6f, 0.08f, 0.12f, 0.25f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_stomp = { WAVE_NOISE, 1800.0f, 300.0f, 0.0f, 0.001f, 0.08f, 0.2f, 0.0f, 0.08f, 0.45f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_boing = { WAVE_TRIANGLE, 180.0f, 420.0f, 0.0f, 0.001f, 0.06f, 0.5f, 0.02f, 0.08f, 0.45f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_hurt  = { WAVE_SAW, 440.0f, 110.0f, 0.0f, 0.001f, 0.10f, 0.5f, 0.10f, 0.15f, 0.35f, 8.0f, 0.6f };
-static const SynthSfx k_sfx_land  = { WAVE_NOISE, 500.0f, 200.0f, 0.0f, 0.001f, 0.04f, 0.0f, 0.0f, 0.01f, 0.15f, 0.0f, 0.0f };
-static const SynthSfx k_sfx_win   = { WAVE_SQUARE, 523.0f, 1047.0f, 0.5f, 0.01f, 0.2f, 0.7f, 0.5f, 0.4f, 0.35f, 6.0f, 0.3f };
+static const SynthSfx k_sfx_jump  = { WAVE_SQUARE, 330.0f, 720.0f, 0.25f, 0.002f, 0.05f, 0.4f, 0.03f, 0.06f, 0.30f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_coin1 = { WAVE_SQUARE, 988.0f, 0.0f, 0.5f, 0.001f, 0.02f, 0.6f, 0.04f, 0.05f, 0.25f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_coin2 = { WAVE_SQUARE, 1319.0f, 0.0f, 0.5f, 0.001f, 0.03f, 0.6f, 0.08f, 0.12f, 0.25f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_stomp = { WAVE_NOISE, 1800.0f, 300.0f, 0.0f, 0.001f, 0.08f, 0.2f, 0.0f, 0.08f, 0.45f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_boing = { WAVE_TRIANGLE, 180.0f, 420.0f, 0.0f, 0.001f, 0.06f, 0.5f, 0.02f, 0.08f, 0.45f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_hurt  = { WAVE_SAW, 440.0f, 110.0f, 0.0f, 0.001f, 0.10f, 0.5f, 0.10f, 0.15f, 0.35f, 8.0f, 0.6f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_land  = { WAVE_NOISE, 500.0f, 200.0f, 0.0f, 0.001f, 0.04f, 0.0f, 0.0f, 0.01f, 0.15f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+static const SynthSfx k_sfx_win   = { WAVE_SQUARE, 523.0f, 1047.0f, 0.5f, 0.01f, 0.2f, 0.7f, 0.5f, 0.4f, 0.35f, 6.0f, 0.3f , 0.0f, 0.0f, 0.0f};
 
 typedef struct { Vec2 pos, vel; f32 dir; b32 alive; f32 flat_t; AnimPlayer anim; } Slime;
 typedef struct { Vec2 pos; b32 taken; } Coin;
@@ -173,9 +173,9 @@ static void start_music(void) {
     Synth* s = audio_synth();
     synth_song_stop(s);
     s->song.track_count = 0;
-    SynthSfx lead = { WAVE_SQUARE, 0.0f, 0.0f, 0.25f, 0.005f, 0.06f, 0.5f, 0.05f, 0.06f, 0.10f, 5.0f, 0.12f };
-    SynthSfx bass = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.005f, 0.05f, 0.8f, 0.18f, 0.05f, 0.22f, 0.0f, 0.0f };
-    SynthSfx hat  = { WAVE_NOISE, 0.0f, 0.0f, 0.0f, 0.001f, 0.02f, 0.0f, 0.0f, 0.01f, 0.05f, 0.0f, 0.0f };
+    SynthSfx lead = { WAVE_SQUARE, 0.0f, 0.0f, 0.25f, 0.005f, 0.06f, 0.5f, 0.05f, 0.06f, 0.10f, 5.0f, 0.12f , 0.0f, 0.0f, 0.0f};
+    SynthSfx bass = { WAVE_TRIANGLE, 0.0f, 0.0f, 0.0f, 0.005f, 0.05f, 0.8f, 0.18f, 0.05f, 0.22f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
+    SynthSfx hat  = { WAVE_NOISE, 0.0f, 0.0f, 0.0f, 0.001f, 0.02f, 0.0f, 0.0f, 0.01f, 0.05f, 0.0f, 0.0f , 0.0f, 0.0f, 0.0f};
     synth_song_add_track(s,
         "E5 - G5 - C6 - G5 - E5 - D5 - C5 - - - A4 - C5 - E5 - D5 - C5 - A4 - G4 - - - "
         "E5 - G5 - C6 - D6 - E6 - D6 - C6 - - - A5 - G5 - E5 - D5 - E5 - D5 - C5 - - -", &lead);

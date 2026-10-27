@@ -71,3 +71,9 @@ ve sonsuz döngüyü** baştan düşün; arena taşması `PANIC`tir, ayırmadan 
 - `src/audio/audio.c` içindeki `engine_audio_init(sample_rate)` örnekleme hızı değiştiğinde `synth_init` çağırırken `rev_mix / rev_room / rev_damp` ayarlarını da koruyacak şekilde `synth_set_reverb` değerlerini yedekleyebilir.
 - `scene_kuyu.c` başlangıcında `synth_set_reverb(audio_synth(), 0.28f, 0.82f, 0.35f)` ile zindan yankısı açılabilir; pompalı/patlama/kapı seslerine `cutoff_hz = 1800.0f, cutoff_end_hz = 220.0f, resonance = 0.35f` eklenerek boğuk zindan karakteri güçlendirilebilir.
 - `scene_ocak.c` içinde rüzgâr/ateş ve bas izlerinde `cutoff_hz = 900.0f` ve hafif yankı (`mix = 0.15f, room = 0.55f, damp = 0.5f`) kullanılabilir.
+
+### İnceleme (Claude)
+- `synth.h`'deki `#pragma clang diagnostic ignored "-Wmissing-field-initializers"` kaldırıldı: başlığı içeren her
+  dosyada uyarıyı susturuyordu. Yerine sahnelerdeki (kuyu/ocak/platformer) ve testteki konumsal `SynthSfx`
+  başlatıcılarına `0.0f, 0.0f, 0.0f` (filtre kapalı) eklendi; ses çıktısı değişmedi (bit-exact testi geçiyor).
+- `make check` 155/155. Filtre bastırma ve yankı sönümü testlerde eşikle doğrulanıyor; sahne entegrasyonu ayrı iş.
