@@ -1122,6 +1122,20 @@ u32* jpeg_decode_ex(const u8* data, usize len, u32* out_w, u32* out_h, Arena* ar
             st->mcu_cols = (w + st->mcu_w - 1u) / st->mcu_w;
             st->mcu_rows = (h + st->mcu_h - 1u) / st->mcu_h;
 
+            /* Gereken toplam belleği önceden hesapla: başlıktaki boyut güvenilmez, arena taşması PANIC olurdu.
+             * Çıktı + durum + bileşen başına (katsayı i16 + düzlem u8) + 3 satır tamponu + hizalama payı. */
+            {
+                u64 need = (u64)w * (u64)h * 4u + sizeof(JpegState) + 3u * ((u64)w + 16u) + 256u;
+                for (u32 i = 0; i < nf; i++) {
+                    const JpegComp* c = &st->comps[i];
+                    u64 nb = (u64)st->mcu_cols * c->h_samp * (u64)st->mcu_rows * c->v_samp;
+                    need += nb * 64u * 3u + 32u;
+                }
+                if (need > (u64)(arena->cap - mark)) {
+                    return (u32*)jpeg_fail(arena, mark, "goruntu icin bellek yetersiz");
+                }
+            }
+
             /* Çıktı tamponunu en başta ayır, geçici tamponları scratch_mark sonrasına koy */
             JpegState saved_st = *st;
             arena_pop_to(arena, mark);

@@ -521,3 +521,29 @@ TEST(jpeg_bench_1024_420) {
     LOG("jpeg 1024x1024 4:2:0 bench (ASan/O1): baseline %.2f ms (%.1f MP/s), progressive %.2f ms (%.1f MP/s)",
         med_base, mps_base, med_prog, mps_prog);
 }
+
+/* İnceleme (Claude): başlıkta dev boyut yazan küçük bir JPEG arena'yı taşırıp PANIC yerine NULL + hata döndürmeli */
+TEST(jpeg_review_huge_header_small_arena) {
+    static u8 file[4096];
+    FILE* f = fopen("tests/assets/odd_33x17.jpg", "rb");
+    CHECK(f != NULL);
+    if (!f) return;
+    u32 n = (u32)fread(file, 1, sizeof(file), f);
+    fclose(f);
+    /* SOF0 (FFC0) bul: FF C0 Lh Ll P Hh Hl Wh Wl */
+    u32 sof = 0;
+    for (u32 i = 2; i + 9 < n; i++) {
+        if (file[i] == 0xFF && (file[i + 1] == 0xC0 || file[i + 1] == 0xC1 || file[i + 1] == 0xC2)) { sof = i; break; }
+    }
+    CHECK(sof != 0);
+    file[sof + 5] = 0x1F; file[sof + 6] = 0x40;   /* yükseklik 8000 */
+    file[sof + 7] = 0x1F; file[sof + 8] = 0x40;   /* genişlik 8000 → 256 MB çıktı */
+    static u8 mem[MB(8)];
+    Arena a;
+    arena_init(&a, mem, sizeof(mem));
+    u32 w = 0, h = 0;
+    u32* px = jpeg_decode(file, n, &w, &h, &a);
+    CHECK(px == NULL);
+    CHECK(jpeg_last_error()[0] != 0);
+    CHECK(a.used == 0);
+}

@@ -79,3 +79,10 @@ HAT: Argon ajanı (paralel, kendi worktree'si)
 | **Wasm32 Skaler (`-O2`, `jpeg.c`)** | **18.21 ms (57.6 MP/s)** | **21.37 ms (49.1 MP/s)** | Node V8 üzerinde skaler wasm32 |
 | **Wasm32 SIMD (`-O2 -msimd128`, `jpeg_wasm.c`)** | **12.17 ms (86.2 MP/s)** | **15.89 ms (66.0 MP/s)** | Skaler wasm32'ye göre **1.50×** (baseline) / **1.35×** (progressive) hızlı, **bit-aynı** |
 
+
+## İnceleme (Claude, 2026-10-27)
+- Başlıkta dev boyut yazan küçük bir JPEG (ör. 8000×8000 → 256 MB çıktı) arena'yı taşırıp `PANIC` ile motoru
+  öldürüyordu. Ayırmadan önce toplam ihtiyaç (çıktı + durum + bileşen katsayı/düzlem + satır tamponları) hesaplanır,
+  yetmezse NULL + "goruntu icin bellek yetersiz". Test: `jpeg_review_huge_header_small_arena`.
+- Huffman (Kraft denetimi), bit okuyucu, RST işleme, Ss/Se/Ah/Al doğrulaması ve katsayı indeks sınırları incelendi: sorun yok.
+- Not (kabul): `jpeg_last_error` / `jpeg_orientation` global durum — aynı anda birden fazla iş parçacığında çözme güvenli değil.
