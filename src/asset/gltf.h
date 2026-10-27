@@ -1,8 +1,8 @@
 /* asset/gltf.h — glTF 2.0 (.gltf JSON) ve GLB (ikili) yükleyici, sıfırdan (asset/json + base64 + img/png).
  * Desteklenen: buffers (gömülü base64 / GLB BIN), bufferViews (byteStride), accessors (tüm componentType'lar,
- * normalized), mesh primitive'leri (TRIANGLES; POSITION/NORMAL/TEXCOORD_0/indices), node hiyerarşisi
- * (matrix veya TRS) → dünya matrisleri, pbrMetallicRoughness baseColor (faktör + PNG doku), sampler wrap.
- * Desteklenmeyenler (skin, morph, animasyon, sparse, JPEG, KHR uzantıları) çökmeden uyarı olarak sayılır.
+ * normalized), mesh primitive'leri (TRIANGLES; POSITION/NORMAL/TEXCOORD_0/JOINTS_0/WEIGHTS_0/indices),
+ * node hiyerarşisi (matrix veya TRS) → dünya matrisleri, skins (joints, inverseBindMatrices, skeleton),
+ * animations (translation/rotation/scale; LINEAR, STEP, CUBICSPLINE) ve pbrMetallicRoughness materyalleri.
  */
 #ifndef ASSET_GLTF_H
 #define ASSET_GLTF_H
@@ -12,15 +12,20 @@
 #include "core/math.h"
 #include "raster/shade_abi.h"
 #include "gfx3d/mesh.h"
+#include "anim/skeleton.h"
+#include "anim/clip.h"
+#include "anim/skin.h"
 
 #define GLTF_ALPHA_OPAQUE 0u
 #define GLTF_ALPHA_MASK   1u
 #define GLTF_ALPHA_BLEND  2u
 
 typedef struct {
-    Mesh* mesh;
-    Mat4  world;
-    i32   material;       /* -1: varsayılan */
+    Mesh*        mesh;
+    Mat4         world;
+    i32          material;       /* -1: varsayılan */
+    i32          skin;           /* GltfModel.skins indeksi, -1: skin yok */
+    SkinnedMesh* skinned;        /* skin/JOINTS_0/WEIGHTS_0 varsa != NULL */
 } GltfDraw;
 
 typedef struct {
@@ -41,6 +46,10 @@ typedef struct {
     u32           material_count;
     Texture*      textures;      /* glTF "textures" dizisiyle aynı indeksler; çözülemeyen = px NULL */
     u32           texture_count;
+    Skeleton*     skins;
+    u32           skin_count;
+    AnimClip*     animations;
+    u32           anim_count;
     Vec3          bounds_min, bounds_max;   /* tüm çizimlerin dünya uzayı AABB'si */
     u32           triangles;
     u32           warnings;
@@ -50,7 +59,8 @@ typedef struct {
 } GltfModel;
 
 /* data: .gltf metni veya .glb baytları (başlıktan otomatik ayırt edilir).
- * out: kalıcı sonuçlar (mesh'ler, dokular), scratch: geçici (JSON DOM, çözülmüş tamponlar). */
+ * out: kalıcı sonuçlar (mesh'ler, dokular, iskeletler, animasyonlar),
+ * scratch: geçici (JSON DOM, çözülmüş tamponlar). */
 b32 gltf_load(const u8* data, u32 len, Arena* out, Arena* scratch,
               GltfResolveFn resolve, void* user, GltfModel* model);
 
