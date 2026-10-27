@@ -235,6 +235,25 @@ void ref_shade_pbr3d(ShadeBatch* batch) {
     }
 }
 
+/* unlit3d.mtk C referansı. Uniform: color@0, fog@16. Varying: nrm(3) depth(1). */
+void ref_shade_unlit3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    for (u32 i = 0; i < n; i++) {
+        f32 nx = v[i], ny = v[n + i], nz = v[2u * n + i];
+        f32 ny_n = ny / m_sqrt(nx * nx + ny * ny + nz * nz);
+        f32 rim = 1.0f - m_abs(ny_n) * 0.35f;
+        f32 f = m_clamp(v[3u * n + i] * u[7] * 0.6f, 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f32 c = m_min(u[k] * rim, 1.0f);
+            o[k * n + i] = c + (u[4 + k] - c) * f;
+        }
+        o[3u * n + i] = u[3];
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
     if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
@@ -243,6 +262,7 @@ static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "branchy.mtk")) return ref_shade_branchy;
     if (str_eq_name(name, "lit3d.mtk"))   return ref_shade_lit3d;
     if (str_eq_name(name, "pbr3d.mtk"))   return ref_shade_pbr3d;
+    if (str_eq_name(name, "unlit3d.mtk")) return ref_shade_unlit3d;
     return REF_SHADE_SOLID_FN;
 }
 

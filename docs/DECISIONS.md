@@ -374,6 +374,19 @@ yarım küre ortam ışığı + metaller için kaba yansıma payı; doğrusal uz
 sRGB yerine gama 2 (giriş c², çıkış √c — pow yok). Gece-gündüz: güneş yörüngesi, ufukta turuncu ışık,
 gece ay (soluk mavi, güneşin karşısı). C referansı `ref_shade_pbr3d` aynı formüller.
 
+## M. Oyun katmanı (M10_A)
+
+### D-101 — app/r3d: sahneden bağımsız 3D kare çizimi
+**KABUL** · 2026-10-27 · M10_A
+Sahne bir `R3dSceneFn` verir; `r3d_render` onu iki kez çağırır (gölge geçişi, ana geçiş). Nesneler üç türdür:
+`r3d_draw` (gölge düşürür + ışık alır), `r3d_draw_receiver` (yalnız ışık/gölge alır, ör. zemin),
+`r3d_draw_emissive` (unlit3d.mtk; gölge düşürmez, ışıktan etkilenmez). Gün ışığı modeli `r3d_daylight(tod)`.
+
+### D-102 — Üçüncü şahıs kamera çarpışması
+**KABUL** · M10_A
+Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, engel kalkınca üstel yumuşatmayla
+(≈6/s) geri açılır. Ölçüt: başlangıç sahnesinde kameranın 6 m'lik sütunun 0.4 m dışında kalıp ekranı kaplaması.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
