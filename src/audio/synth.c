@@ -1,15 +1,60 @@
-/* audio/synth.c — Osilatörler, zarf, ses tahsisi, karıştırma ve müzik sıralayıcısı.
+/* audio/synth.c — Osilatörler, zarf, ses tahsisi, ses başına TPT SVF alçak geçiren filtre,
+ * Schroeder/Freeverb yankı (reverb), karıştırma ve müzik sıralayıcısı.
  * Kare/testere dalgalarındaki süreksizlikler polyBLEP ile yumuşatılır (aliasing azalır).
  * Karışım master ile ölçeklenip rasyonel tanh yaklaşımıyla yumuşak kırpılır.
  */
 #include "audio/synth.h"
 #include "core/math.h"
 
+/* 44.1 kHz için aralarında asal-yakın Freeverb/Schroeder gecikme uzunlukları (örnek) */
+static const u32 k_comb_base[SYNTH_COMB_COUNT] = { 1116u, 1188u, 1277u, 1356u };
+static const u32 k_ap_base[SYNTH_AP_COUNT]     = { 556u, 441u };
+
+/* NaN / ±Inf güvenli aralık kıstırma ve sonluluk kontrolü */
+static inline b32 is_finite_f32(f32 x) {
+    return (x - x) == 0.0f;
+}
+
+static inline f32 clamp_safe(f32 x, f32 lo, f32 hi) {
+    if (!is_finite_f32(x) || !(x >= lo)) return lo;
+    if (!(x <= hi)) return hi;
+    return x;
+}
+
+static void reverb_init_lengths(Synth* s) {
+    u32 sr = s->sample_rate ? s->sample_rate : 44100u;
+    for (u32 c = 0; c < SYNTH_COMB_COUNT; c++) {
+        u64 scaled = ((u64)k_comb_base[c] * (u64)sr + 22050u) / 44100u;
+        if (scaled < 1u) scaled = 1u;
+        if (scaled > (u64)SYNTH_COMB_CAP) scaled = (u64)SYNTH_COMB_CAP;
+        s->rev_comb_len[c] = (u32)scaled;
+        if (s->rev_comb_pos[c] >= s->rev_comb_len[c]) s->rev_comb_pos[c] = 0u;
+    }
+    for (u32 a = 0; a < SYNTH_AP_COUNT; a++) {
+        u64 scaled = ((u64)k_ap_base[a] * (u64)sr + 22050u) / 44100u;
+        if (scaled < 1u) scaled = 1u;
+        if (scaled > (u64)SYNTH_AP_CAP) scaled = (u64)SYNTH_AP_CAP;
+        s->rev_ap_len[a] = (u32)scaled;
+        if (s->rev_ap_pos[a] >= s->rev_ap_len[a]) s->rev_ap_pos[a] = 0u;
+    }
+}
+
 void synth_init(Synth* s, u32 sample_rate) {
+    if (!s) return;
     __builtin_memset(s, 0, sizeof(*s));
     s->sample_rate = sample_rate ? sample_rate : 44100u;
     s->master      = 0.6f;
     s->song.volume = 1.0f;
+    reverb_init_lengths(s);
+}
+
+void synth_set_reverb(Synth* s, f32 mix, f32 room, f32 damp) {
+    if (!s) return;
+    reverb_init_lengths(s);
+    s->rev_mix      = clamp_safe(mix, 0.0f, 1.0f);
+    s->rev_room     = clamp_safe(room, 0.0f, 1.0f);
+    s->rev_damp     = clamp_safe(damp, 0.0f, 1.0f) * 0.4f;
+    s->rev_feedback = 0.60f + 0.28f * s->rev_room;
 }
 
 f32 synth_midi_to_hz(i32 midi) {
@@ -17,6 +62,7 @@ f32 synth_midi_to_hz(i32 midi) {
 }
 
 i32 synth_play(Synth* s, const SynthSfx* x) {
+    if (!s || !x) return -1;
     i32 slot = -1;
     u32 oldest = 0xFFFFFFFFu;
     for (u32 i = 0; i < SYNTH_MAX_VOICES; i++) {
@@ -24,39 +70,72 @@ i32 synth_play(Synth* s, const SynthSfx* x) {
         if (s->voices[i].id < oldest) { oldest = s->voices[i].id; slot = (i32)i; }
     }
     SynthVoice* v = &s->voices[slot];
-    f32 sr = (f32)s->sample_rate;
+    f32 sr = (f32)(s->sample_rate ? s->sample_rate : 44100u);
+    f32 freq     = is_finite_f32(x->freq)     ? m_max(x->freq, 0.0f)     : 0.0f;
+    f32 freq_end = is_finite_f32(x->freq_end) ? m_max(x->freq_end, 0.0f) : 0.0f;
     v->active    = TRUE;
     v->wave      = x->wave;
     v->phase     = 0.0f;
-    v->inc       = x->freq / sr;
+    v->inc       = freq / sr;
     v->duty      = (x->duty > 0.0f && x->duty < 1.0f) ? x->duty : 0.5f;
-    v->attack    = m_max(x->attack, 0.0f);
-    v->decay     = m_max(x->decay, 0.0f);
-    v->sustain   = m_clamp(x->sustain, 0.0f, 1.0f);
-    v->hold      = m_max(x->hold, 0.0f);
-    v->release   = m_max(x->release, 0.001f);
+    v->attack    = is_finite_f32(x->attack)  ? m_max(x->attack, 0.0f)  : 0.0f;
+    v->decay     = is_finite_f32(x->decay)   ? m_max(x->decay, 0.0f)   : 0.0f;
+    v->sustain   = clamp_safe(x->sustain, 0.0f, 1.0f);
+    v->hold      = is_finite_f32(x->hold)    ? m_max(x->hold, 0.0f)    : 0.0f;
+    v->release   = is_finite_f32(x->release) ? m_max(x->release, 0.001f) : 0.001f;
     v->t         = 0.0f;
     v->dt        = 1.0f / sr;
-    v->volume    = m_clamp(x->volume, 0.0f, 1.0f);
+    v->volume    = clamp_safe(x->volume, 0.0f, 1.0f);
     v->vib_phase = 0.0f;
-    v->vib_inc   = x->vibrato_hz / sr;
-    v->vib_depth = x->vibrato_depth;
+    v->vib_inc   = (is_finite_f32(x->vibrato_hz) ? m_max(x->vibrato_hz, 0.0f) : 0.0f) / sr;
+    v->vib_depth = clamp_safe(x->vibrato_depth, -48.0f, 48.0f);
     v->lfsr      = 0x7FFFu;
     v->noise_out = 1.0f;
     v->id        = s->next_id++;
     f32 dur = v->attack + v->decay + v->hold + v->release;
     v->inc_mul = 1.0f;
-    if (x->freq_end > 0.0f && x->freq > 0.0f && dur > 0.0f) {
-        v->inc_mul = m_exp2(m_log2(x->freq_end / x->freq) / (dur * sr));
+    if (freq_end > 0.0f && freq > 0.0f && dur > 0.0f) {
+        v->inc_mul = m_exp2(m_log2(freq_end / freq) / (dur * sr));
+    }
+    /* Ses başına TPT SVF alçak geçiren filtre (Zavalishin / Cytomic) */
+    v->flt_g     = 0.0f;
+    v->flt_g_mul = 1.0f;
+    v->flt_k     = 0.0f;
+    v->flt_a1    = 0.0f;
+    v->flt_a2    = 0.0f;
+    v->flt_a3    = 0.0f;
+    v->flt_s1    = 0.0f;
+    v->flt_s2    = 0.0f;
+    if (x->cutoff_hz > 0.0f) {
+        f32 max_fc = 0.49f * sr;
+        f32 min_fc = m_min(5.0f, max_fc);
+        f32 c0     = clamp_safe(x->cutoff_hz, min_fc, max_fc);
+        f32 res    = clamp_safe(x->resonance, 0.0f, 0.99f);
+        f32 g0     = m_tan(M_PI * c0 / sr);
+        f32 k      = 1.41421356f * (1.0f - res);
+        v->flt_g   = g0;
+        v->flt_k   = k;
+        v->flt_a1  = 1.0f / (1.0f + g0 * (g0 + k));
+        v->flt_a2  = g0 * v->flt_a1;
+        v->flt_a3  = g0 * v->flt_a2;
+        if (x->cutoff_end_hz > 0.0f && dur > 0.0f) {
+            f32 c1 = clamp_safe(x->cutoff_end_hz, min_fc, max_fc);
+            f32 g1 = m_tan(M_PI * c1 / sr);
+            if (g1 > 0.0f && g0 > 0.0f) {
+                v->flt_g_mul = m_exp2(m_log2(g1 / g0) / (dur * sr));
+            }
+        }
     }
     return slot;
 }
 
 void synth_stop_all(Synth* s) {
+    if (!s) return;
     for (u32 i = 0; i < SYNTH_MAX_VOICES; i++) s->voices[i].active = FALSE;
 }
 
 u32 synth_active_voices(const Synth* s) {
+    if (!s) return 0;
     u32 n = 0;
     for (u32 i = 0; i < SYNTH_MAX_VOICES; i++) n += s->voices[i].active ? 1u : 0u;
     return n;
@@ -129,7 +208,52 @@ static inline f32 voice_sample(SynthVoice* v) {
     }
     v->phase = p;
     v->inc *= v->inc_mul;
+    if (v->flt_g > 0.0f) {
+        f32 v3 = o - v->flt_s2;
+        f32 v1 = v->flt_a1 * v->flt_s1 + v->flt_a2 * v3;
+        f32 v2 = v->flt_s2 + v->flt_a2 * v->flt_s1 + v->flt_a3 * v3;
+        v->flt_s1 = 2.0f * v1 - v->flt_s1;
+        v->flt_s2 = 2.0f * v2 - v->flt_s2;
+        if (v->flt_g_mul != 1.0f) {
+            f32 g = v->flt_g * v->flt_g_mul;
+            v->flt_g  = g;
+            v->flt_a1 = 1.0f / (1.0f + g * (g + v->flt_k));
+            v->flt_a2 = g * v->flt_a1;
+            v->flt_a3 = g * v->flt_a2;
+        }
+        o = v2;
+    }
     return o;
+}
+
+static inline f32 reverb_sample(Synth* s, f32 x) {
+    f32 xin = x * 0.25f + 1e-20f;   /* denormal (alt-normal) çökmesini dallanmasız önler */
+    f32 acc = 0.0f;
+    f32 fb  = s->rev_feedback;
+    f32 d2  = s->rev_damp;
+    f32 d1  = 1.0f - d2;
+    for (u32 c = 0; c < SYNTH_COMB_COUNT; c++) {
+        u32 pos = s->rev_comb_pos[c];
+        u32 len = s->rev_comb_len[c];
+        f32 y   = s->rev_comb_buf[c][pos];
+        f32 st  = y * d1 + s->rev_comb_store[c] * d2;
+        s->rev_comb_store[c]    = st;
+        s->rev_comb_buf[c][pos] = xin + st * fb;
+        if (++pos >= len) pos = 0u;
+        s->rev_comb_pos[c] = pos;
+        acc += y;
+    }
+    for (u32 a = 0; a < SYNTH_AP_COUNT; a++) {
+        u32 pos = s->rev_ap_pos[a];
+        u32 len = s->rev_ap_len[a];
+        f32 bo  = s->rev_ap_buf[a][pos];
+        f32 v   = acc + 0.5f * bo;
+        s->rev_ap_buf[a][pos] = v;
+        acc = bo - 0.5f * v;
+        if (++pos >= len) pos = 0u;
+        s->rev_ap_pos[a] = pos;
+    }
+    return acc;
 }
 
 static void song_step(Synth* s) {
@@ -156,7 +280,9 @@ static inline f32 soft_clip(f32 x) {
 }
 
 void synth_render(Synth* s, f32* out, u32 frames) {
-    f32 dt = 1.0f / (f32)s->sample_rate;
+    if (!s || !out) return;
+    if (s->rev_mix > 0.0f && s->rev_comb_len[0] == 0u) reverb_init_lengths(s);
+    f32 dt = 1.0f / (f32)(s->sample_rate ? s->sample_rate : 44100u);
     for (u32 i = 0; i < frames; i++) {
         if (s->song.playing) {
             s->song.acc -= dt;
@@ -175,6 +301,10 @@ void synth_render(Synth* s, f32* out, u32 frames) {
             mix += voice_sample(v) * e * v->volume;
             v->t += v->dt;
         }
+        if (s->rev_mix > 0.0f) {
+            f32 wet = reverb_sample(s, mix);
+            mix = mix * (1.0f - s->rev_mix) + wet * s->rev_mix;
+        }
         out[i] = soft_clip(mix * s->master);
     }
     s->frames_rendered += frames;
@@ -189,6 +319,7 @@ static i32 note_base(char c) {
 }
 
 u32 synth_parse_pattern(const char* text, i8* out, u32 cap) {
+    if (!text || !out || cap == 0u) return 0u;
     u32 n = 0;
     const char* p = text;
     while (*p && n < cap) {
@@ -210,17 +341,21 @@ u32 synth_parse_pattern(const char* text, i8* out, u32 cap) {
 }
 
 void synth_song_start(Synth* s, f32 bpm, u32 steps_per_beat) {
-    s->song.step_seconds = 60.0f / (bpm * (f32)(steps_per_beat ? steps_per_beat : 1u));
+    if (!s) return;
+    f32 safe_bpm = clamp_safe(bpm, 1.0f, 1000.0f);
+    s->song.step_seconds = 60.0f / (safe_bpm * (f32)(steps_per_beat ? steps_per_beat : 1u));
     s->song.acc          = 0.0f;
     s->song.step         = 0;
     s->song.playing      = TRUE;
 }
 
 void synth_song_stop(Synth* s) {
+    if (!s) return;
     s->song.playing = FALSE;
 }
 
 b32 synth_song_add_track(Synth* s, const char* pattern, const SynthSfx* instrument) {
+    if (!s || !pattern || !instrument) return FALSE;
     SynthSong* g = &s->song;
     if (g->track_count >= SYNTH_MAX_TRACKS) return FALSE;
     SynthTrack* tr = &g->tracks[g->track_count++];
