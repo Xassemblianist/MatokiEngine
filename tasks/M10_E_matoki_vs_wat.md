@@ -107,3 +107,7 @@ Betik sırasıyla:
 | **P4** | **Basit (dokusuz / düşük komut sayılı) shader'larda `4x` döngü açma (loop unrolling) ve `v128.load32_splat`**: Döngü içi komut sayısı `< 64` olan ve `discard`/kontrol akışı içermeyen shader'larda ana döngü `4x` (`step = 64` bayt, sabit `offset=0/16/32/48`) açılarak kalan `count & 3` quad kuyruk döngüsüyle işlenmeli; döngü önündeki uniform yüklemelerinde `f32.load + f32x4.splat` yerine tek komutluk `v128.load32_splat` kullanılmalı. | `src/matoki/codegen.c` | `vcolor` (ve tüm basit/düz renk shader'ları) | `vcolor`'da quad başına komut `47 → 34`'e düşer; **+%25 – %30** hızlanma |
 | **P5** | **Tam sayı alfa eşiği (`discard`) sabit katlama**: `sample()` çıktısının bir kanalı sabit bir eşikle karşılaştırıldığında (`c.a < K`), eşik döngü öncesinde `[0..255]` tam sayı aralığına (`ceil(K * 255)`) çevrilerek `f32` dönüşümü ve `1/255` çarpması yapılmadan doğrudan `i32x4.lt_s` ile sınanmalı. | `src/matoki/opt.c` | `sprite` (alfa testi kullanan shader'lar) | `sprite`'ta quad başına **4-5 SIMD komutu** elenir; **+%3 – %4** hızlanma |
 
+
+### İnceleme (Claude)
+- `run_matoki_vs_wat.sh` ayrı koşumda yeniden üretildi: verim %84.2 / %90.6 / %75.6 / %84.7 (Argon ölçümüyle ±%5 içinde).
+- P1–P5 önerileri Matoki derleyici iyileştirme görevine (M11 sonrası) aday; en büyük kazanç P2 (tek polinomlu sin/cos) ve P1 (quad-tekdüze mip).
