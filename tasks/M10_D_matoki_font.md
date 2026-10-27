@@ -66,3 +66,8 @@ Font dosyası `shaders/` gibi `tools/embed.py` ile gömülebilir hale getirilmez
 
 ### Mevcut `src/font/atlas.c` Hakkında Gözlem (Yasaklar gereği dokunulmadı)
 - `src/font/atlas.c` içindeki `collect_codepoints` yalnızca `.notdef`, ASCII (`32..126`), Latin-1 (`160..255`) ve 6 ek Türkçe harfi (`Ğ ğ İ ı Ş ş`) atlasa paketlemektedir; bu nedenle `U+015F` üstündeki genel Unicode sembolleri (`₺` `U+20BA`, `—` `U+2014`, `…` `U+2026`) `TtfFont` (`ttf_glyph_index`) içinde tanımlı olsa da `FontAtlas` paketleme listesine girmez. İleride `collect_codepoints` dizisine sık kullanılan genel noktalama/para birimi kod noktalarının eklenmesi önerilir.
+
+### İnceleme (Claude)
+- `make check` 135/135, ASan/UBSan temiz. `text.c`: kaydırma her adımda en az 1 kod noktası ilerliyor, koordinatlar i64 ile kırpılıyor; sorun bulunmadı.
+- Görsel örnek incelendi: 48/24/16 px'de Türkçe karakterler, delikler, hizalama ve gölge/kontur doğru.
+- Atlas'a `₺ — …` vb. eklenmesi önerisi ileri iş olarak kabul edildi (atlas.c ayrı görev).
