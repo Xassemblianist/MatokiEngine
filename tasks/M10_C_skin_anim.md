@@ -67,3 +67,8 @@ eklem hiyerarşisinden dünya matrisleri, köşe başına 4 eklem/ağırlık ile
 ### Öneriler / Ertelenenler
 - **Sahne / Uygulama Entegrasyonu**: `src/app/scene3d.c` yasaklı dosyalar arasında olduğundan sürükle-bırak 3D sahne görüntüleyicisinde otomatik klip oynatma döngüsü bağlanmadı; `scene3d.c` içinde `gm.skins` ve `gm.animations` varsa her karede `clip_sample` + `skeleton_compute_matrices` + `skin_mesh` çağrılarak hareketli glTF modeller doğrudan oynatılabilir.
 - **Paralel Test Notu**: `tests/test_jpeg.c` sabit `/tmp/matoki_jpeg_bench` dizinini kullandığından birden fazla worktree aynı anda `make check` çalıştırdığında geçici dosyalar çakışabiliyor; o testte PID veya worktree-içi `build/` dizini kullanılması önerilir.
+
+### İnceleme (Claude)
+- gltf.c: node ebeveyn tablosunda döngü atası denetimi doğru (atanmadan önce kontrol), ziyaret bayrağı + GLTF_MAX_VISITS elmas DAG patlamasını kesiyor, accessor/arena sınır denetimleri yerinde.
+- Sınırlama (kabul): animasyon kanalı hedef düğümü bulunduğu ilk iskelete bağlanır; çok iskeletli modellerde klip hangi skin'e ait bilgisi tutulmuyor.
+- `node_parent`/`node_to_joint` ayırmaları arena_has_space denetimsiz ama nc ≤ 4096 ile sınırlı (≤16 KB).
