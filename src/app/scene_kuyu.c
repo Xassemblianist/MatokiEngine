@@ -34,6 +34,7 @@
 #define KEY_A     65
 #define KEY_D     68
 #define KEY_F     70
+#define KEY_G     71
 #define KEY_N     78
 #define KEY_R     82
 #define KEY_S     83
@@ -69,12 +70,13 @@
 #define MAX_DOORS     8u
 #define MAX_PROJ      48u
 #define MAX_PARTICLES 192u
-#define MAX_LIGHTS    48u
-#define MAX_STATIC_LIGHTS 32u
+#define MAX_LIGHTS    96u
+#define MAX_STATIC_LIGHTS 64u
 
 /* Harita: # duvar, . zemin, ~ lav, 1-4 yükseltilmiş zemin (0.5 m adım), d kapı, D mühürlü kapı,
- * P başlangıç, g Gölge, s Tükürgen, h can, a saçma, c kor, w saçmalı, f kor atar, k mühür, X çıkış, i mangal */
-static const char* const k_map[] = {
+ * P başlangıç, g Gölge, s Tükürgen, e Gözcü (uçan), h can, a saçma, c kor, w saçmalı, f kor atar, k mühür,
+ * X çıkış, i mangal */
+static const char* const k_map1[] = {
     "################################",
     "#i...h#i.......i#i....~~~~~~~~i#",
     "#.....#.........#.....~~~~~~~~~#",
@@ -89,13 +91,51 @@ static const char* const k_map[] = {
     "#i..s..c..i#i..f...i#i..h#....i#",
     "################################",
 };
-#define MAP_H ((i32)(sizeof(k_map) / sizeof(k_map[0])))
-#define MAP_W 32
-#define CHUNKS_X ((MAP_W + CHUNK - 1) / CHUNK)
-#define CHUNKS_Z ((MAP_H + CHUNK - 1) / CHUNK)
+
+/* 2. bölüm "Derin Kuyu": lav köprülü mağara, uçan Gözcüler, yükseltilmiş yürüme yolu ile çevrili çıkış kulübesi */
+static const char* const k_map2[] = {
+    "####################################",
+    "#i....#i...........#i......e......i#",
+    "#..P..#..g.........d...............#",
+    "#.....d.....####...#...~~~~.~~~~...#",
+    "#i...h#..g..#a.#...#...~~~~.~~~~...#",
+    "###.###.....#..#.s.#.e.~~~~.~~~~.e.#",
+    "#.....#.....##d#...#...~~~~.~~~~...#",
+    "#.c...#............#i..~~~~.~~~~..i#",
+    "#.....##########d###########d#######",
+    "#i.......g.....#.....#i...........i#",
+    "#.11122........#..k..d.....s....e..#",
+    "#.11122....s...#.....#.............#",
+    "#.......####...##d####.12222222....#",
+    "#i...a..#..#.......f#...2#####2..h.#",
+    "######d##..#.........d..2#.X.#2....#",
+    "#..........#....g...#...2#...D2....#",
+    "#i....s....#i......i#i..2#####2..i.#",
+    "####################################",
+};
+
+typedef struct {
+    const char* const* rows;
+    i32         w, h;
+    const char* title;
+    const char* intro;
+} LevelDef;
+
+static const LevelDef k_levels[] = {
+    { k_map1, 32, (i32)(sizeof(k_map1) / sizeof(k_map1[0])), "1. Bolum: Kuyunun Dibi", "Kuyunun dibindesin. Isik bacasini bul." },
+    { k_map2, 36, (i32)(sizeof(k_map2) / sizeof(k_map2[0])), "2. Bolum: Derin Kuyu", "Daha derindesin. Gozculere dikkat: ucarlar." },
+};
+#define LEVEL_COUNT ((u32)(sizeof(k_levels) / sizeof(k_levels[0])))
+#define LEVEL_ARENA MB(8)
+
+#define MAP_W    (g_k.map_w)
+#define MAP_H    (g_k.map_h)
+#define CHUNKS_X (g_k.chunks_x)
+#define CHUNKS_Z (g_k.chunks_z)
+#define FLOW_INF 0xFFFFu
 
 typedef enum { KS_PLAY = 0, KS_WIN = 1, KS_DEAD = 2 } KuyuState;
-typedef enum { EN_GOLGE = 0, EN_TUKURGEN = 1 } EnemyKind;
+typedef enum { EN_GOLGE = 0, EN_TUKURGEN = 1, EN_GOZCU = 2 } EnemyKind;
 typedef enum { PK_HEALTH = 0, PK_SHELLS, PK_KOR, PK_W_SACMALI, PK_W_KOR, PK_KEY } PickupKind;
 typedef enum { W_CAKMAK = 0, W_SACMALI = 1, W_KOR = 2, W_COUNT = 3 } Weapon;
 
@@ -109,6 +149,8 @@ typedef struct {
     f32  cooldown, pain, dead_t, anim, yaw;
     f32  steer_t, steer_sign;
     Vec3 last_seen;
+    u32  burst;             /* Gözcü: kalan ok */
+    f32  burst_t;
 } Enemy;
 
 typedef struct { PickupKind kind; Vec3 pos; b32 taken; } Pickup;
@@ -125,6 +167,7 @@ typedef struct {
     Vec3 pos, vel;
     f32  life, dmg, splash;
     b32  from_player, active;
+    u32  kind;              /* 0 kor (oyuncu), 1 tükürük, 2 Gözcü oku */
 } Proj;
 
 typedef struct { Vec3 pos, vel; f32 life, max_life, size; Vec4 col; b32 grav; } Particle;
@@ -140,7 +183,18 @@ typedef struct {
     Texture     tex_wall, tex_floor, tex_ceil, tex_door, tex_lava, tex_white, tex_skin;
     Mesh*       cube;
     Mesh*       sphere;
-    Chunk       chunks[CHUNKS_Z][CHUNKS_X];
+    Arena       lv_arena;       /* seviye ağları, fizik, akış alanları: her bölüm yüklenişinde sıfırlanır */
+    u32         level;
+    const char* const* map_rows;
+    i32         map_w, map_h, chunks_x, chunks_z;
+    Chunk*      chunks;
+    u16*        flow_ground;    /* oyuncu karosuna yürüyerek adım sayısı (FLOW_INF ulaşılamaz) */
+    u16*        flow_air;       /* uçanlar için (lav ve yükseklik engel değil) */
+    i32         flow_tx, flow_tz;
+    f32         flow_timer;
+    b32         snap_on;
+    u32         pending_level;  /* debug: bir sonraki karede yüklenecek bölüm + 1 (0 yok) */
+    u8          prev_g;
     PhysWorld   world;
     TtfFont     font;
     FontAtlas   font_small, font_big;
@@ -177,7 +231,8 @@ typedef struct {
     f32   fire_cd, recoil, flash_t, bob_phase, step_snd;
     f32   hurt_flash, shake, pickup_flash;
     b32   has_key;
-    u32   kills;
+    u32   kills;          /* bu bölümde */
+    u32   total_kills, total_enemies;
     KuyuState state;
     f32   play_time, msg_time, lock_msg_cd;
     char  msg[96];
@@ -207,6 +262,8 @@ static const SynthSfx k_sfx_g_die   = { WAVE_SAW, 300.0f, 40.0f, 0.0f, 0.005f, 0
 static const SynthSfx k_sfx_t_die   = { WAVE_TRIANGLE, 160.0f, 30.0f, 0.0f, 0.005f, 0.6f, 0.3f, 0.1f, 0.5f, 0.36f, 14.0f, 2.0f };
 static const SynthSfx k_sfx_g_alert = { WAVE_SAW, 90.0f, 160.0f, 0.0f, 0.05f, 0.3f, 0.5f, 0.1f, 0.3f, 0.22f, 6.0f, 0.8f };
 static const SynthSfx k_sfx_spit    = { WAVE_NOISE, 300.0f, 900.0f, 0.0f, 0.01f, 0.15f, 0.3f, 0.02f, 0.12f, 0.24f, 0.0f, 0.0f };
+static const SynthSfx k_sfx_e_die   = { WAVE_SQUARE, 900.0f, 120.0f, 0.2f, 0.002f, 0.35f, 0.3f, 0.05f, 0.3f, 0.28f, 18.0f, 1.5f };
+static const SynthSfx k_sfx_bolt    = { WAVE_SQUARE, 1300.0f, 700.0f, 0.15f, 0.001f, 0.05f, 0.2f, 0.01f, 0.05f, 0.14f, 0.0f, 0.0f };
 static const SynthSfx k_sfx_claw    = { WAVE_NOISE, 2400.0f, 800.0f, 0.0f, 0.001f, 0.08f, 0.2f, 0.01f, 0.06f, 0.22f, 0.0f, 0.0f };
 static const SynthSfx k_sfx_hurt    = { WAVE_SQUARE, 140.0f, 70.0f, 0.5f, 0.001f, 0.12f, 0.3f, 0.02f, 0.1f, 0.30f, 0.0f, 0.0f };
 static const SynthSfx k_sfx_pick    = { WAVE_TRIANGLE, 660.0f, 1320.0f, 0.0f, 0.001f, 0.05f, 0.5f, 0.04f, 0.12f, 0.26f, 0.0f, 0.0f };
@@ -359,7 +416,7 @@ static void make_tex(Texture* t, Arena* perm, u32 size, void (*gen)(Texture*, Rn
 
 static char tile_at(i32 x, i32 z) {
     if (x < 0 || z < 0 || x >= MAP_W || z >= MAP_H) return '#';
-    return k_map[z][x];
+    return g_k.map_rows[z][x];
 }
 
 static f32 tile_floor(char c) {
@@ -529,6 +586,12 @@ static void add_static_light(Vec3 p, Vec3 col, f32 radius) {
 
 static void build_level(Arena* perm, Arena* scratch) {
     usize mark = arena_mark(scratch);
+    g_k.chunks_x = (MAP_W + CHUNK - 1) / CHUNK;
+    g_k.chunks_z = (MAP_H + CHUNK - 1) / CHUNK;
+    g_k.chunks = ARENA_PUSH_ARRAY(perm, Chunk, (usize)(CHUNKS_X * CHUNKS_Z));
+    g_k.flow_ground = ARENA_PUSH_ARRAY(perm, u16, (usize)(MAP_W * MAP_H));
+    g_k.flow_air    = ARENA_PUSH_ARRAY(perm, u16, (usize)(MAP_W * MAP_H));
+    g_k.flow_tx = g_k.flow_tz = -1;
     for (i32 cz = 0; cz < CHUNKS_Z; cz++) {
         for (i32 cx = 0; cx < CHUNKS_X; cx++) {
             QuadList qw, qf, qc, ql;
@@ -539,7 +602,7 @@ static void build_level(Arena* perm, Arena* scratch) {
             for (i32 z = cz * CHUNK; z < (cz + 1) * CHUNK && z < MAP_H; z++)
                 for (i32 x = cx * CHUNK; x < (cx + 1) * CHUNK && x < MAP_W; x++)
                     build_tile(x, z, &qw, &qf, &qc, &ql);
-            Chunk* ch = &g_k.chunks[cz][cx];
+            Chunk* ch = &g_k.chunks[cz * CHUNKS_X + cx];
             ch->wall  = ql_to_mesh(&qw, perm);
             ch->floor = ql_to_mesh(&qf, perm);
             ch->ceil  = ql_to_mesh(&qc, perm);
@@ -550,7 +613,7 @@ static void build_level(Arena* perm, Arena* scratch) {
     }
     arena_pop_to(scratch, mark);
 
-    phys_world_init(&g_k.world, perm, 4, 160, 1);
+    phys_world_init(&g_k.world, perm, 4, 256, 1);
     g_k.world.gravity = vec3(0.0f, GRAVITY, 0.0f);
     phys_world_add_static(&g_k.world, shape_from_plane(plane_make(vec3(0.0f, 1.0f, 0.0f), LAVA_Y)), 0.0f, 0.0f);
     add_merged_statics(scratch, cls_wall, wall_lo, wall_hi);
@@ -581,10 +644,14 @@ static void build_level(Arena* perm, Arena* scratch) {
             }
         }
     }
-    /* Lav gölünün kızıllığı */
-    add_static_light(tile_center(23, 2, 0.8f), vec3(3.6f, 1.2f, 0.3f), 10.0f);
-    add_static_light(tile_center(26, 4, 0.8f), vec3(3.6f, 1.2f, 0.3f), 10.0f);
-    add_static_light(tile_center(29, 2, 0.8f), vec3(3.6f, 1.2f, 0.3f), 10.0f);
+    /* Lav kızıllığı: seyrek ızgarada lav karolarının üstüne ışık */
+    for (i32 z = 0; z < MAP_H; z++) {
+        for (i32 x = 0; x < MAP_W; x++) {
+            if (tile_at(x, z) == '~' && (x % 3) == 1 && (z % 2) == 0) {
+                add_static_light(tile_center(x, z, 0.8f), vec3(3.6f, 1.2f, 0.3f), 10.0f);
+            }
+        }
+    }
 }
 
 /* ---------- Oyun kurulumu ---------- */
@@ -596,7 +663,7 @@ static void say(const char* text, f32 seconds) {
     g_k.msg_time = seconds;
 }
 
-static void reset_game(void) {
+static void spawn_level(b32 keep_inventory) {
     g_k.enemy_count = 0;
     g_k.pickup_count = 0;
     for (i32 z = 0; z < MAP_H; z++) {
@@ -605,12 +672,12 @@ static void reset_game(void) {
             Vec3 p = tile_center(x, z, tile_floor(c));
             if (c == 'P') {
                 g_k.start_feet = p;
-            } else if ((c == 'g' || c == 's') && g_k.enemy_count < MAX_ENEMIES) {
+            } else if ((c == 'g' || c == 's' || c == 'e') && g_k.enemy_count < MAX_ENEMIES) {
                 Enemy* e = &g_k.enemies[g_k.enemy_count++];
                 __builtin_memset(e, 0, sizeof(*e));
-                e->kind = (c == 'g') ? EN_GOLGE : EN_TUKURGEN;
-                e->feet = p;
-                e->hp = (c == 'g') ? 50.0f : 75.0f;
+                e->kind = (c == 'g') ? EN_GOLGE : (c == 's') ? EN_TUKURGEN : EN_GOZCU;
+                e->feet = (c == 'e') ? vec3(p.x, p.y + 2.4f, p.z) : p;
+                e->hp = (c == 'g') ? 50.0f : (c == 's') ? 75.0f : 40.0f;
                 e->alive = TRUE;
                 e->anim = (f32)(x * 7 + z * 3) * 0.37f;
                 e->steer_sign = ((x + z) & 1) ? 1.0f : -1.0f;
@@ -644,19 +711,41 @@ static void reset_game(void) {
     g_k.pitch = 0.0f;
     g_k.grounded = FALSE;
     g_k.coyote = g_k.jump_buf = g_k.step_acc = 0.0f;
-    g_k.hp = MAX_HP;
-    g_k.has_weapon[W_CAKMAK] = TRUE;
-    g_k.has_weapon[W_SACMALI] = FALSE;
-    g_k.has_weapon[W_KOR] = FALSE;
-    g_k.shells = 0; g_k.kor = 0;
-    g_k.weapon = W_CAKMAK;
+    if (!keep_inventory) {
+        g_k.hp = MAX_HP;
+        g_k.has_weapon[W_CAKMAK] = TRUE;
+        g_k.has_weapon[W_SACMALI] = FALSE;
+        g_k.has_weapon[W_KOR] = FALSE;
+        g_k.shells = 0; g_k.kor = 0;
+        g_k.weapon = W_CAKMAK;
+        g_k.total_kills = 0;
+        g_k.total_enemies = 0;
+        g_k.play_time = 0.0f;
+    }
+    g_k.kills = 0;
     g_k.fire_cd = g_k.recoil = g_k.flash_t = 0.0f;
     g_k.hurt_flash = g_k.shake = g_k.pickup_flash = 0.0f;
     g_k.has_key = FALSE;
-    g_k.kills = 0;
     g_k.state = KS_PLAY;
-    g_k.play_time = 0.0f;
-    say("Kuyunun dibindesin. Isik bacasini bul.", 4.0f);
+    g_k.flow_tx = g_k.flow_tz = -1;
+    say(k_levels[g_k.level].intro, 4.0f);
+}
+
+/* Bölümü (yeniden) kurar: seviye arenası sıfırlanır, ağlar/fizik/akış alanı yeniden üretilir */
+static void load_level(u32 idx, b32 keep_inventory, Arena* scratch) {
+    if (idx >= LEVEL_COUNT) idx = 0;
+    const LevelDef* L = &k_levels[idx];
+    g_k.level = idx;
+    g_k.map_rows = L->rows;
+    g_k.map_w = L->w;
+    g_k.map_h = L->h;
+    arena_reset(&g_k.lv_arena);
+    build_level(&g_k.lv_arena, scratch);
+    spawn_level(keep_inventory);
+}
+
+static void reset_game(Arena* scratch) {
+    load_level(0, FALSE, scratch);
 }
 
 void scene_kuyu_init(Arena* perm, Arena* scratch) {
@@ -665,6 +754,7 @@ void scene_kuyu_init(Arena* perm, Arena* scratch) {
     fb_init(&g_k.low, perm, INNER_W, INNER_H);
     fb_init_depth(&g_k.low, perm);
 
+    arena_init(&g_k.lv_arena, ARENA_PUSH_ARRAY(perm, u8, LEVEL_ARENA), LEVEL_ARENA);
     make_tex(&g_k.tex_wall, perm, 64, gen_bricks);
     make_tex(&g_k.tex_floor, perm, 64, gen_flags);
     make_tex(&g_k.tex_ceil, perm, 32, gen_planks);
@@ -676,7 +766,6 @@ void scene_kuyu_init(Arena* perm, Arena* scratch) {
 
     g_k.cube   = mesh_cube(perm, 0.5f);
     g_k.sphere = mesh_sphere(perm, 1.0f, 12, 8);
-    build_level(perm, scratch);
 
     usize mark = arena_mark(scratch);
     g_k.font_ok = ttf_parse(g_matoki_sans_ttf, g_matoki_sans_ttf_len, &g_k.font) &&
@@ -687,7 +776,8 @@ void scene_kuyu_init(Arena* perm, Arena* scratch) {
 
     g_k.music_on = TRUE;
     g_k.retro_on = TRUE;
-    reset_game();
+    g_k.snap_on = TRUE;
+    reset_game(scratch);
 }
 
 void scene_kuyu_leave(void) {
@@ -734,10 +824,14 @@ static f32 world_ray(Vec3 o, Vec3 d, f32 tmax, Vec3* out_n) {
     return tmax;
 }
 
+/* Gözcü için feet = küre merkezi (uçar) */
 static Vec3 enemy_center(const Enemy* e) {
+    if (e->kind == EN_GOZCU) return e->feet;
     return vec3(e->feet.x, e->feet.y + (e->kind == EN_GOLGE ? 1.0f : 0.75f), e->feet.z);
 }
-static f32 enemy_radius(const Enemy* e) { return e->kind == EN_GOLGE ? 0.62f : 0.72f; }
+static f32 enemy_radius(const Enemy* e) {
+    return e->kind == EN_GOLGE ? 0.62f : e->kind == EN_TUKURGEN ? 0.72f : 0.55f;
+}
 
 static b32 line_of_sight(Vec3 a, Vec3 b) {
     Vec3 d = vec3_sub(b, a);
@@ -785,14 +879,16 @@ static void hurt_enemy(Enemy* e, f32 dmg, Vec3 dir) {
     e->alert = TRUE;
     e->last_seen = g_k.feet;
     e->vel = vec3_add(e->vel, vec3_scale(vec3(dir.x, 0.0f, dir.z), dmg * 0.06f));
-    Vec4 blood = (e->kind == EN_GOLGE) ? vec4(0.35f, 0.1f, 0.5f, 1.0f) : vec4(0.4f, 0.75f, 0.15f, 1.0f);
+    Vec4 blood = (e->kind == EN_GOLGE) ? vec4(0.35f, 0.1f, 0.5f, 1.0f)
+               : (e->kind == EN_TUKURGEN) ? vec4(0.4f, 0.75f, 0.15f, 1.0f) : vec4(0.85f, 0.1f, 0.08f, 1.0f);
     spawn_particles(enemy_center(e), vec3_scale(dir, 2.0f), 5, blood, 3.0f, 0.5f, 0.07f, TRUE);
     if (e->hp <= 0.0f) {
         e->alive = FALSE;
         e->dead_t = 0.0f;
         g_k.kills++;
+        g_k.total_kills++;
         spawn_particles(enemy_center(e), vec3(0, 2.0f, 0), 18, blood, 4.0f, 0.8f, 0.1f, TRUE);
-        sfx_at(e->kind == EN_GOLGE ? &k_sfx_g_die : &k_sfx_t_die, e->feet);
+        sfx_at(e->kind == EN_GOLGE ? &k_sfx_g_die : e->kind == EN_TUKURGEN ? &k_sfx_t_die : &k_sfx_e_die, e->feet);
     } else {
         sfx_at(&k_sfx_hit, e->feet);
     }
@@ -860,6 +956,7 @@ static void fire_weapon(void) {
         p->life = 4.0f;
         p->dmg = 55.0f;
         p->splash = 3.2f;
+        p->kind = 0u;
         g_k.fire_cd = 0.9f; g_k.recoil = 0.9f;
         sfx(&k_sfx_kor);
         break;
@@ -934,15 +1031,171 @@ static void update_projectiles(f32 dt) {
     }
 }
 
+/* ---------- Hareket (oyuncu + yürüyen düşmanlar) ---------- */
+
+/* Kapsül kaydırma + basamak çıkma: yerdeyken duvara takılırsa STEP_H yukarıdan tekrar dener,
+ * yatayda daha çok ilerlerse kabul eder. feet/vel güncellenir. */
+static SlideResult move_body(Vec3* feet, Vec3* vel, f32 r, f32 h, b32 was_grounded, f32 dt) {
+    Vec3 start = *feet;
+    Vec3 v = *vel;
+    Capsule cap = body_capsule(*feet, r, h);
+    SlideResult res = phys_move_and_slide(&g_k.world, &cap, &v, dt, PHYS_DEFAULT_SLOPE_COS);
+    if (was_grounded && res.hit_wall) {
+        Capsule c2 = body_capsule(*feet, r, h);
+        Vec3 up = vec3(0.0f, STEP_H / dt, 0.0f);
+        phys_move_and_slide(&g_k.world, &c2, &up, dt, PHYS_DEFAULT_SLOPE_COS);
+        /* Yatay deneme en az yarıçap kadar ilerler: yoksa alt yarım küre basamak kenarına oturur ve
+         * kenar normali (y < cos 45°) zemin sayılmaz */
+        Vec3 hv = vec3(vel->x, 0.0f, vel->z);
+        f32 hl = m_sqrt(hv.x * hv.x + hv.z * hv.z) * dt;
+        Vec3 probe = (hl > 1e-5f && hl < r + 0.02f) ? vec3_scale(hv, (r + 0.02f) / hl) : hv;
+        phys_move_and_slide(&g_k.world, &c2, &probe, dt, PHYS_DEFAULT_SLOPE_COS);
+        Vec3 dn = vec3(0.0f, -(STEP_H + 0.05f) / dt, 0.0f);
+        SlideResult r3 = phys_move_and_slide(&g_k.world, &c2, &dn, dt, PHYS_DEFAULT_SLOPE_COS);
+        f32 d1x = cap.a.x - start.x, d1z = cap.a.z - start.z;
+        f32 d2x = c2.a.x - start.x, d2z = c2.a.z - start.z;
+        if (r3.on_ground && d2x * d2x + d2z * d2z > d1x * d1x + d1z * d1z + 1e-6f) {
+            cap = c2;
+            v = vec3(hv.x, 0.0f, hv.z);
+            res = r3;
+        }
+    }
+    *vel = v;
+    *feet = vec3(cap.a.x, cap.a.y - r, cap.a.z);
+    if (res.on_ground && vel->y < 0.0f) vel->y = 0.0f;
+    if (res.hit_ceiling && vel->y > 0.0f) vel->y = 0.0f;
+    return res;
+}
+
+/* ---------- Yol bulma: oyuncu karosundan BFS akış alanı ---------- */
+
+static b32 tile_walkable(char c) { return c != '#' && c != '~' && c != 'D'; }
+static b32 tile_flyable(char c)  { return c != '#' && c != 'D'; }
+
+/* f[karo] = oyuncuya adım sayısı. Kenar komşudan (nb) mevcut karoya yürünebilir olmalı:
+ * yerde yükselme STEP_H'yi aşamaz (inmek serbest), havada yalnız duvar/mühürlü kapı engel. */
+static void flow_build(u16* f, b32 air, i32 tx, i32 tz, Arena* scratch) {
+    i32 w = MAP_W, h = MAP_H;
+    for (i32 i = 0; i < w * h; i++) f[i] = FLOW_INF;
+    if (tx < 0 || tz < 0 || tx >= w || tz >= h) return;
+    usize mark = arena_mark(scratch);
+    i32* q = ARENA_PUSH_ARRAY(scratch, i32, (usize)(w * h));
+    i32 head = 0, tail = 0;
+    f[tz * w + tx] = 0;
+    q[tail++] = tz * w + tx;
+    static const i32 dx[4] = { 1, -1, 0, 0 }, dz[4] = { 0, 0, 1, -1 };
+    while (head < tail) {
+        i32 cur = q[head++];
+        i32 cx = cur % w, cz = cur / w;
+        f32 hc = tile_floor(tile_at(cx, cz));
+        for (u32 k = 0; k < 4; k++) {
+            i32 nx = cx + dx[k], nz = cz + dz[k];
+            if (nx < 0 || nz < 0 || nx >= w || nz >= h) continue;
+            i32 ni = nz * w + nx;
+            if (f[ni] != FLOW_INF) continue;
+            char c = tile_at(nx, nz);
+            if (air ? !tile_flyable(c) : !tile_walkable(c)) continue;
+            if (!air && hc - tile_floor(c) > STEP_H + 0.01f) continue;
+            f[ni] = (u16)(f[cur] + 1u);
+            q[tail++] = ni;
+        }
+    }
+    arena_pop_to(scratch, mark);
+}
+
+static void flow_update(f32 dt, Arena* scratch) {
+    i32 tx = (i32)m_floor(g_k.feet.x / TILE), tz = (i32)m_floor(g_k.feet.z / TILE);
+    g_k.flow_timer -= dt;
+    /* Oyuncu lavda / havadaysa son geçerli alan korunur */
+    if (!tile_walkable(tile_at(tx, tz))) return;
+    if (tx == g_k.flow_tx && tz == g_k.flow_tz && g_k.flow_timer > 0.0f) return;
+    flow_build(g_k.flow_ground, FALSE, tx, tz, scratch);
+    flow_build(g_k.flow_air, TRUE, tx, tz, scratch);
+    g_k.flow_tx = tx;
+    g_k.flow_tz = tz;
+    g_k.flow_timer = 0.5f;
+}
+
+static u16 flow_at(const u16* f, i32 x, i32 z) {
+    if (x < 0 || z < 0 || x >= MAP_W || z >= MAP_H) return FLOW_INF;
+    return f[z * MAP_W + x];
+}
+
+/* Akış alanında bulunduğu karodan daha yakın komşu karonun merkezine yön (xz).
+ * Çapraz yalnız iki dik komşu da geçilebilirse (köşe kesme yok). FALSE: aynı karo veya ulaşılamaz. */
+static b32 flow_dir(const u16* f, Vec3 pos, Vec3* out, u16* out_steps) {
+    i32 tx = (i32)m_floor(pos.x / TILE), tz = (i32)m_floor(pos.z / TILE);
+    u16 cur = flow_at(f, tx, tz);
+    if (out_steps) *out_steps = cur;
+    if (cur == FLOW_INF || cur == 0) return FALSE;
+    i32 bx = tx, bz = tz;
+    u16 best = cur;
+    for (i32 dz = -1; dz <= 1; dz++) {
+        for (i32 dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dz == 0) continue;
+            u16 v = flow_at(f, tx + dx, tz + dz);
+            if (dx != 0 && dz != 0) {
+                if (flow_at(f, tx + dx, tz) == FLOW_INF || flow_at(f, tx, tz + dz) == FLOW_INF) continue;
+                if (v != FLOW_INF && v + 1u > best) continue;   /* çapraz yalnız gerçekten kısaltıyorsa */
+            }
+            if (v < best) { best = v; bx = tx + dx; bz = tz + dz; }
+        }
+    }
+    if (bx == tx && bz == tz) return FALSE;
+    Vec3 c = tile_center(bx, bz, 0.0f);
+    Vec3 d = vec3(c.x - pos.x, 0.0f, c.z - pos.z);
+    f32 l = vec3_len(d);
+    if (l < 1e-4f) return FALSE;
+    *out = vec3_scale(d, 1.0f / l);
+    return TRUE;
+}
+
+/* Yerdeki düşman için: yönün 0.8 m önü lav veya uçurumsa (STEP_H'den fazla iniş değil, lav) yönü iptal et */
+static Vec3 avoid_hazard(Vec3 feet, Vec3 wish) {
+    if (vec3_len(wish) < 1e-3f) return wish;
+    Vec3 p = vec3_add(feet, vec3_scale(vec3_norm(wish), 0.8f));
+    char c = tile_at((i32)m_floor(p.x / TILE), (i32)m_floor(p.z / TILE));
+    if (c == '~') return vec3(0.0f, 0.0f, 0.0f);
+    return wish;
+}
+
 /* ---------- Düşmanlar ---------- */
+
+static void enemy_fire(Enemy* e, Vec3 from, Vec3 target, f32 speed, f32 dmg, u32 kind, f32 spread) {
+    Proj* p = proj_alloc();
+    if (!p) return;
+    Vec3 ad = vec3_norm(vec3_sub(target, from));
+    if (spread > 0.0f) {
+        ad = vec3_norm(vec3_add(ad, vec3((rng_f32(&g_k.rng) - 0.5f) * spread, (rng_f32(&g_k.rng) - 0.5f) * spread,
+                                         (rng_f32(&g_k.rng) - 0.5f) * spread)));
+    }
+    p->active = TRUE;
+    p->from_player = FALSE;
+    p->kind = kind;
+    p->pos = vec3_add(from, vec3_scale(ad, 0.7f));
+    p->vel = vec3_scale(ad, speed);
+    p->life = 5.0f;
+    p->dmg = dmg;
+    p->splash = 0.0f;
+    (void)e;
+}
 
 static void enemy_think(Enemy* e, u32 idx, f32 dt) {
     e->anim += dt;
     if (e->pain > 0.0f) e->pain -= dt;
-    if (!e->alive) { e->dead_t += dt; return; }
+    if (!e->alive) {
+        e->dead_t += dt;
+        if (e->kind == EN_GOZCU) {   /* düşen Gözcü yere iner */
+            f32 fl = tile_floor(tile_at((i32)m_floor(e->feet.x / TILE), (i32)m_floor(e->feet.z / TILE))) + 0.3f;
+            if (fl < LAVA_Y) fl = LAVA_Y + 0.3f;
+            e->feet.y = m_max(e->feet.y - 7.0f * dt, fl);
+        }
+        return;
+    }
     e->cooldown = m_max(e->cooldown - dt, 0.0f);
+    b32 fly = e->kind == EN_GOZCU;
 
-    Vec3 eye = vec3(e->feet.x, e->feet.y + (e->kind == EN_GOLGE ? 1.5f : 1.0f), e->feet.z);
+    Vec3 eye = fly ? e->feet : vec3(e->feet.x, e->feet.y + (e->kind == EN_GOLGE ? 1.5f : 1.0f), e->feet.z);
     Vec3 pe = eye_pos();
     Vec3 to = vec3_sub(pe, eye);
     f32 dist = vec3_len(to);
@@ -954,45 +1207,61 @@ static void enemy_think(Enemy* e, u32 idx, f32 dt) {
     }
 
     Vec3 wish = vec3(0.0f, 0.0f, 0.0f);
-    f32 speed = e->kind == EN_GOLGE ? 5.2f : 2.6f;
+    f32 speed = e->kind == EN_GOLGE ? 5.2f : e->kind == EN_TUKURGEN ? 2.6f : 4.6f;
     if (e->alert && g_k.state == KS_PLAY) {
-        Vec3 tgt = vec3_sub(e->last_seen, e->feet);
+        Vec3 tgt = vec3_sub(g_k.feet, e->feet);
         tgt.y = 0.0f;
         f32 tl = vec3_len(tgt);
         Vec3 dir = tl > 1e-3f ? vec3_scale(tgt, 1.0f / tl) : vec3(0, 0, 0);
-        if (tl > 1e-3f) e->yaw = m_atan2(-dir.x, -dir.z);
+        if (tl > 1e-3f && (sees || fly)) e->yaw = m_atan2(-dir.x, -dir.z);
+
+        /* Yol: akış alanı; aynı karo / ulaşılamazsa doğrudan (görüyorsa) */
+        Vec3 path;
+        u16 steps = FLOW_INF;
+        b32 has_path = flow_dir(fly ? g_k.flow_air : g_k.flow_ground, e->feet, &path, &steps);
+        Vec3 chase = has_path ? path : (sees || steps == 0 ? dir : vec3(0, 0, 0));
+        if (!sees && has_path) e->yaw = m_atan2(-path.x, -path.z);
+
         if (e->kind == EN_GOLGE) {
-            if (tl > 1.1f) wish = dir;
+            if (tl > 1.1f) wish = (sees && steps <= 1u) ? dir : chase;
             if (sees && dist < 1.9f && e->cooldown <= 0.0f) {
                 e->cooldown = 0.9f;
                 sfx_at(&k_sfx_claw, e->feet);
                 hurt_player(12.0f, e->feet);
             }
-        } else {
-            /* Tükürgen: 6–13 m aralığını korur, görürse tükürür */
-            if (!sees || tl > 13.0f) wish = dir;
+        } else if (e->kind == EN_TUKURGEN) {
+            /* 6–13 m aralığını korur, görürse tükürür */
+            if (!sees || tl > 13.0f) wish = chase;
             else if (tl < 6.0f) wish = vec3_scale(dir, -1.0f);
             else wish = vec3(-dir.z * e->steer_sign * 0.6f, 0.0f, dir.x * e->steer_sign * 0.6f);
             if (sees && e->cooldown <= 0.0f && dist < 26.0f) {
-                Proj* p = proj_alloc();
-                if (p) {
-                    Vec3 aim = vec3_add(pe, vec3_scale(g_k.vel, dist / 12.0f * 0.5f));
-                    aim.y -= 0.35f;
-                    Vec3 ad = vec3_norm(vec3_sub(aim, eye));
-                    p->active = TRUE;
-                    p->from_player = FALSE;
-                    p->pos = vec3_add(eye, vec3_scale(ad, 0.8f));
-                    p->vel = vec3_scale(ad, 12.0f);
-                    p->life = 5.0f;
-                    p->dmg = 14.0f;
-                    p->splash = 0.0f;
-                    sfx_at(&k_sfx_spit, e->feet);
-                }
+                Vec3 aim = vec3_add(pe, vec3_scale(g_k.vel, dist / 12.0f * 0.5f));
+                aim.y -= 0.35f;
+                enemy_fire(e, eye, aim, 12.0f, 14.0f, 1u, 0.0f);
+                sfx_at(&k_sfx_spit, e->feet);
                 e->cooldown = 1.7f + rng_f32(&g_k.rng) * 0.6f;
             }
+        } else {
+            /* Gözcü: 5–10 m mesafede süzülür, yan kayar, 3'lü kızıl ok yağdırır */
+            if (!sees || tl > 10.0f) wish = chase;
+            else if (tl < 5.0f) wish = vec3_scale(dir, -1.0f);
+            else wish = vec3(-dir.z * e->steer_sign, 0.0f, dir.x * e->steer_sign);
+            if (e->burst > 0u) {
+                e->burst_t -= dt;
+                if (e->burst_t <= 0.0f) {
+                    if (sees) enemy_fire(e, eye, vec3(pe.x, pe.y - 0.3f, pe.z), 17.0f, 7.0f, 2u, 0.06f);
+                    sfx_at(&k_sfx_bolt, e->feet);
+                    e->burst--;
+                    e->burst_t = 0.13f;
+                }
+            } else if (sees && e->cooldown <= 0.0f && dist < 24.0f) {
+                e->burst = 3u;
+                e->burst_t = 0.0f;
+                e->cooldown = 2.2f + rng_f32(&g_k.rng) * 0.8f;
+            }
+            if (rng_f32(&g_k.rng) < dt * 0.4f) e->steer_sign = -e->steer_sign;
         }
-        /* Duvara takılınca kısa süre yana kay */
-        if (e->steer_t > 0.0f) {
+        if (!fly && e->steer_t > 0.0f) {
             e->steer_t -= dt;
             wish = vec3_norm(vec3_add(wish, vec3(-wish.z * e->steer_sign * 1.5f, 0.0f, wish.x * e->steer_sign * 1.5f)));
         }
@@ -1011,18 +1280,32 @@ static void enemy_think(Enemy* e, u32 idx, f32 dt) {
     f32 lp = vec3_len(dp);
     if (lp < 1.0f && lp > 1e-4f) wish = vec3_add(wish, vec3_scale(dp, (1.0f - lp) / lp * 2.0f));
 
+    if (fly) {
+        /* İrtifa: oyuncunun gözünün ~1 m üstü, zeminin en az 1.6 m üstü, tavanın 0.7 m altı */
+        i32 tx = (i32)m_floor(e->feet.x / TILE), tz = (i32)m_floor(e->feet.z / TILE);
+        char tc = tile_at(tx, tz);
+        f32 fl = tile_floor(tc) < LAVA_Y + 0.1f ? 0.0f : tile_floor(tc);
+        f32 want_y = e->alert ? pe.y + 1.0f : fl + 2.4f;
+        want_y = m_clamp(want_y + 0.25f * m_sin(e->anim * 2.3f), fl + 1.6f, tile_ceil(tc) - 0.7f);
+        e->vel.x = approach(e->vel.x, wish.x * speed, 14.0f * dt);
+        e->vel.z = approach(e->vel.z, wish.z * speed, 14.0f * dt);
+        e->vel.y = approach(e->vel.y, m_clamp((want_y - e->feet.y) * 3.0f, -4.0f, 4.0f), 12.0f * dt);
+        Sphere sp = sphere_make(e->feet, 0.45f);
+        phys_move_and_slide_sphere(&g_k.world, &sp, &e->vel, dt, PHYS_DEFAULT_SLOPE_COS);
+        e->feet = sp.center;
+        return;
+    }
+
+    wish = avoid_hazard(e->feet, wish);
     f32 acc = e->grounded ? 30.0f : 6.0f;
     e->vel.x = approach(e->vel.x, wish.x * speed, acc * dt);
     e->vel.z = approach(e->vel.z, wish.z * speed, acc * dt);
     e->vel.y += GRAVITY * dt;
     f32 r = e->kind == EN_GOLGE ? 0.45f : 0.6f;
-    Capsule cap = body_capsule(e->feet, r, e->kind == EN_GOLGE ? 1.9f : 1.4f);
-    SlideResult res = phys_move_and_slide(&g_k.world, &cap, &e->vel, dt, PHYS_DEFAULT_SLOPE_COS);
-    e->feet = vec3(cap.a.x, cap.a.y - r, cap.a.z);
+    SlideResult res = move_body(&e->feet, &e->vel, r, e->kind == EN_GOLGE ? 1.9f : 1.4f, e->grounded, dt);
     e->grounded = res.on_ground;
-    if (e->grounded && e->vel.y < 0.0f) e->vel.y = 0.0f;
     if (res.hit_wall && e->steer_t <= 0.0f && vec3_len(wish) > 0.1f) {
-        e->steer_t = 0.6f;
+        e->steer_t = 0.4f;
         e->steer_sign = -e->steer_sign;
     }
     /* Lav düşmanı da yakar */
@@ -1047,36 +1330,8 @@ static void player_step(Vec3 wish) {
         g_k.grounded = FALSE;
         sfx(&k_sfx_jump);
     }
-
-    b32 was_grounded = g_k.grounded;
-    Vec3 start = g_k.feet;
-    Vec3 v = g_k.vel;
-    Capsule cap = body_capsule(g_k.feet, PLAYER_R, PLAYER_H);
-    SlideResult res = phys_move_and_slide(&g_k.world, &cap, &v, STEP_DT, PHYS_DEFAULT_SLOPE_COS);
-
-    /* Basamak çıkma: yerdeyken duvara takıldıysa STEP_H yukarıdan tekrar dene, daha çok ilerlerse kabul */
-    if (was_grounded && res.hit_wall) {
-        Capsule c2 = body_capsule(g_k.feet, PLAYER_R, PLAYER_H);
-        Vec3 up = vec3(0.0f, STEP_H / STEP_DT, 0.0f);
-        phys_move_and_slide(&g_k.world, &c2, &up, STEP_DT, PHYS_DEFAULT_SLOPE_COS);
-        Vec3 hv = vec3(g_k.vel.x, 0.0f, g_k.vel.z);
-        phys_move_and_slide(&g_k.world, &c2, &hv, STEP_DT, PHYS_DEFAULT_SLOPE_COS);
-        Vec3 dn = vec3(0.0f, -(STEP_H + 0.05f) / STEP_DT, 0.0f);
-        SlideResult r3 = phys_move_and_slide(&g_k.world, &c2, &dn, STEP_DT, PHYS_DEFAULT_SLOPE_COS);
-        f32 d1x = cap.a.x - start.x, d1z = cap.a.z - start.z;
-        f32 d2x = c2.a.x - start.x, d2z = c2.a.z - start.z;
-        if (r3.on_ground && d2x * d2x + d2z * d2z > d1x * d1x + d1z * d1z + 1e-6f) {
-            cap = c2;
-            v = vec3(hv.x, 0.0f, hv.z);
-            res = r3;
-        }
-    }
-
-    g_k.vel = v;
-    g_k.feet = vec3(cap.a.x, cap.a.y - PLAYER_R, cap.a.z);
+    SlideResult res = move_body(&g_k.feet, &g_k.vel, PLAYER_R, PLAYER_H, g_k.grounded, STEP_DT);
     g_k.grounded = res.on_ground;
-    if (g_k.grounded && g_k.vel.y < 0.0f) g_k.vel.y = 0.0f;
-    if (res.hit_ceiling && g_k.vel.y > 0.0f) g_k.vel.y = 0.0f;
 }
 
 static void take_pickups(void) {
@@ -1166,7 +1421,7 @@ static void update_doors(f32 dt) {
     }
 }
 
-static void game_logic(f32 dt) {
+static void game_logic(f32 dt, Arena* scratch) {
     if (g_k.state != KS_PLAY) return;
     g_k.play_time += dt;
     g_k.lock_msg_cd -= dt;
@@ -1188,11 +1443,20 @@ static void game_logic(f32 dt) {
     /* Çıkış: ışık bacası */
     Vec3 de = vec3_sub(g_k.feet, g_k.exit_pos);
     if (de.x * de.x + de.z * de.z < 0.9f * 0.9f) {
-        g_k.state = KS_WIN;
         sfx(&k_sfx_win);
-        u32 total = g_k.enemy_count;
+        g_k.total_enemies += g_k.enemy_count;
+        if (g_k.level + 1u < LEVEL_COUNT) {
+            load_level(g_k.level + 1u, TRUE, scratch);
+            g_k.hp = m_min(g_k.hp + 25.0f, MAX_HP);
+            char buf[96];
+            fmt_format(buf, sizeof(buf), "%s  -  %s", k_levels[g_k.level].title, k_levels[g_k.level].intro);
+            say(buf, 5.0f);
+            return;
+        }
+        g_k.state = KS_WIN;
         char buf[96];
-        fmt_format(buf, sizeof(buf), "KUYUDAN CIKTIN!  %.1f sn, %u/%u yaratik  (R)", (f64)g_k.play_time, g_k.kills, total);
+        fmt_format(buf, sizeof(buf), "KUYUDAN CIKTIN!  %.1f sn, %u/%u yaratik  (R)", (f64)g_k.play_time,
+                   g_k.total_kills, g_k.total_enemies);
         say(buf, 1e9f);
     }
 }
@@ -1220,8 +1484,9 @@ static void collect_lights(Vec3 eye, Vec3 fwd) {
     for (u32 i = 0; i < MAX_PROJ; i++) {
         const Proj* p = &g_k.proj[i];
         if (!p->active) continue;
-        if (p->from_player) push_light(p->pos, vec3(3.0f, 1.3f, 0.35f), 7.0f);
-        else push_light(p->pos, vec3(0.7f, 2.2f, 0.4f), 5.0f);
+        if (p->kind == 0u) push_light(p->pos, vec3(3.0f, 1.3f, 0.35f), 7.0f);
+        else if (p->kind == 1u) push_light(p->pos, vec3(0.7f, 2.2f, 0.4f), 5.0f);
+        else push_light(p->pos, vec3(2.4f, 0.35f, 0.3f), 4.0f);
     }
     /* Patlamalar: büyük, taze turuncu parçacıklar */
     for (u32 i = 0; i < MAX_PARTICLES; i++) {
@@ -1331,7 +1596,7 @@ static void draw_world(void) {
     Vec3 lava_amb = vec3(1.25f + 0.15f * m_sin(t * 1.3f), 0.55f, 0.18f);
     for (i32 cz = 0; cz < CHUNKS_Z; cz++) {
         for (i32 cx = 0; cx < CHUNKS_X; cx++) {
-            const Chunk* ch = &g_k.chunks[cz][cx];
+            const Chunk* ch = &g_k.chunks[cz * CHUNKS_X + cx];
             draw_lit_box(ch->wall, &id, &g_k.tex_wall, vec4(1, 1, 1, 1), k_amb, ch->bmin, ch->bmax, G3D_CULL_BACK);
             draw_lit_box(ch->floor, &id, &g_k.tex_floor, vec4(1, 1, 1, 1), k_amb, ch->bmin, ch->bmax, G3D_CULL_BACK);
             draw_lit_box(ch->ceil, &id, &g_k.tex_ceil, vec4(1, 1, 1, 1), k_amb, ch->bmin, ch->bmax, G3D_CULL_BACK);
@@ -1461,6 +1726,30 @@ static void draw_world(void) {
                     draw_lit_at(g_k.cube, &m, &g_k.tex_skin, col, c, 1.2f);
                 }
             }
+        } else if (e->kind == EN_GOZCU) {
+            /* Gözcü: göz küresi + kızıl iris (oyuncuya bakar) + çırpan zar kanatlar */
+            Vec4 col = flash ? vec4(1.0f, 0.9f, 0.9f, 1.0f) : vec4(0.85f, 0.78f, 0.72f, 1.0f);
+            f32 sd = e->alive ? 1.0f : 1.0f - 0.5f * dead;
+            m = mat4_trs(e->feet, e->yaw, 0.0f, vec3(0.45f * sd, 0.45f * sd, 0.45f * sd));
+            draw_lit_at(g_k.sphere, &m, &g_k.tex_skin, col, c, 1.0f);
+            if (e->alive) {
+                Vec3 to = vec3_sub(g_k.eye, e->feet);
+                f32 tl = vec3_len(to);
+                Vec3 lk = tl > 1e-3f ? vec3_scale(to, 1.0f / tl) : fw;
+                f32 charge = e->burst > 0u ? 1.0f : (e->cooldown < 0.6f && e->alert ? 1.0f - e->cooldown / 0.6f : 0.0f);
+                Vec3 ip = vec3_add(e->feet, vec3_scale(lk, 0.4f));
+                f32 is = 0.17f + 0.05f * charge;
+                m = mat4_trs(ip, 0.0f, 0.0f, vec3(is, is, is));
+                draw_emissive(g_k.sphere, &m, vec4(1.0f, 0.15f + 0.5f * charge, 0.1f, 1.0f));
+                m = mat4_trs(vec3_add(e->feet, vec3_scale(lk, 0.5f)), 0.0f, 0.0f, vec3(0.07f, 0.07f, 0.07f));
+                draw_emissive(g_k.sphere, &m, vec4(0.05f, 0.02f, 0.02f, 1.0f));
+                f32 flap = m_sin(e->anim * 18.0f) * 0.7f;
+                for (i32 s = -1; s <= 1; s += 2) {
+                    Vec3 wp = vec3_add(e->feet, vec3_add(vec3_scale(rt, 0.62f * (f32)s), vec3(0.0f, 0.1f + 0.15f * flap, 0.0f)));
+                    m = mat4_trs(wp, e->yaw + 1.5708f, (f32)s * flap * 0.6f, vec3(0.08f, 0.04f, 0.6f));
+                    draw_lit_at(g_k.cube, &m, &g_k.tex_skin, vec4(0.45f, 0.2f, 0.22f, 1.0f), c, 1.0f);
+                }
+            }
         } else {
             f32 breathe = 1.0f + 0.06f * m_sin(e->anim * 3.0f);
             Vec4 col = flash ? vec4(1.0f, 1.0f, 0.8f, 1.0f) : vec4(0.55f, 0.62f, 0.32f, 1.0f);
@@ -1487,9 +1776,15 @@ static void draw_world(void) {
     for (u32 i = 0; i < MAX_PROJ; i++) {
         const Proj* p = &g_k.proj[i];
         if (!p->active) continue;
-        f32 s = p->from_player ? 0.16f : 0.2f;
-        Mat4 m = mat4_trs(p->pos, t * 8.0f, 0.0f, vec3(s, s, s));
-        draw_emissive(g_k.sphere, &m, p->from_player ? vec4(1.0f, 0.6f, 0.15f, 1.0f) : vec4(0.55f, 1.0f, 0.3f, 1.0f));
+        f32 s = p->kind == 0u ? 0.16f : p->kind == 1u ? 0.2f : 0.1f;
+        Vec4 col = p->kind == 0u ? vec4(1.0f, 0.6f, 0.15f, 1.0f) : p->kind == 1u ? vec4(0.55f, 1.0f, 0.3f, 1.0f)
+                                                                 : vec4(1.0f, 0.25f, 0.2f, 1.0f);
+        Mat4 m = mat4_trs(p->pos, t * 8.0f, 0.0f, vec3(s, s, p->kind == 2u ? s * 2.5f : s));
+        if (p->kind == 2u) {
+            Vec3 d = vec3_norm(p->vel);
+            m = mat4_trs(p->pos, m_atan2(-d.x, -d.z), m_atan2(d.y, m_sqrt(d.x * d.x + d.z * d.z)), vec3(s, s, s * 3.0f));
+        }
+        draw_emissive(g_k.sphere, &m, col);
     }
 
     /* Parçacıklar */
@@ -1615,6 +1910,7 @@ static void render(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     G3dContext ctx;
     raster_begin(r, low, frame);
     g3d_begin(&ctx, r, frame, camera_view(&cam), camera_proj(&cam, (f32)INNER_W / (f32)INNER_H), eye);
+    if (g_k.snap_on) g3d_set_snap(&ctx, 1u);
     g_k.ctx = &ctx;
     draw_world();
     raster_flush(r);
@@ -1672,12 +1968,14 @@ void scene_kuyu_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shader
                       const InputState* in, f32 dt, b32 use_jit, b32 pointer_locked) {
     if (dt > 0.1f) dt = 0.1f;
     g_k.anim_time += dt;
-    if (key_hit(in, KEY_R, &g_k.prev_r)) reset_game();
+    if (key_hit(in, KEY_R, &g_k.prev_r)) reset_game(frame);
+    if (g_k.pending_level) { load_level(g_k.pending_level - 1u, TRUE, frame); g_k.pending_level = 0; }
     if (key_hit(in, KEY_N, &g_k.prev_n)) {
         g_k.music_on = !g_k.music_on;
         if (!g_k.music_on) stop_music();
     }
     if (key_hit(in, KEY_V, &g_k.prev_v)) g_k.retro_on = !g_k.retro_on;
+    if (key_hit(in, KEY_G, &g_k.prev_g)) g_k.snap_on = !g_k.snap_on;
     if (g_k.music_on && !g_k.music_playing) start_music();
 
     /* Bakış: fare kilidi açıkken ham hareket, değilse sağ tuş sürükleme; oklar da çevirir */
@@ -1739,6 +2037,7 @@ void scene_kuyu_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shader
         if (g_k.step_snd <= 0.0f) { sfx(&k_sfx_step); g_k.step_snd = 3.0f; }
     }
 
+    flow_update(dt, frame);
     for (u32 i = 0; i < g_k.enemy_count; i++) enemy_think(&g_k.enemies[i], i, dt);
     update_projectiles(dt);
     update_doors(dt);
@@ -1750,7 +2049,7 @@ void scene_kuyu_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shader
         q->pos = vec3_add(q->pos, vec3_scale(q->vel, dt));
         if (q->pos.y < LAVA_Y) q->life = 0.0f;
     }
-    game_logic(dt);
+    game_logic(dt, frame);
 
     g_k.flash_t = m_max(g_k.flash_t - dt, 0.0f);
     g_k.recoil = m_max(g_k.recoil - dt * 5.0f, 0.0f);
@@ -1826,13 +2125,14 @@ void scene_kuyu_draw_hud(UiContext* ui, Framebuffer* fb) {
         const char* big = g_k.state == KS_WIN ? "OZGURSUN" : "KUYU SENI ALDI";
         hud_text(fb, &g_k.font_big, w / 2, h / 2 - 90, big, g_k.state == KS_WIN ? FB_RGBA(180, 220, 255, 255) : FB_RGBA(255, 80, 60, 255), TEXT_ALIGN_CENTER);
     }
-    fmt_format(line, sizeof(line), "%s  ciz %.1f ms  sun %.2f ms  V retro  N muzik",
-               g_k.retro_on ? "retro" : "duz", (f64)g_k.ms_draw, (f64)g_k.ms_present);
+    fmt_format(line, sizeof(line), "%s %s  ciz %.1f ms  sun %.2f ms  V retro  G titreme  N muzik",
+               k_levels[g_k.level].title, g_k.retro_on ? (g_k.snap_on ? "retro+snap" : "retro") : "duz",
+               (f64)g_k.ms_draw, (f64)g_k.ms_present);
     hud_text(fb, &g_k.font_small, 6, 24, line, FB_RGBA(150, 150, 160, 200), TEXT_ALIGN_LEFT);
 }
 
 const f32* scene_kuyu_debug(void) {
-    static f32 d[22];
+    static f32 d[24];
     u32 alive = 0;
     for (u32 i = 0; i < g_k.enemy_count; i++) alive += g_k.enemies[i].alive ? 1u : 0u;
     d[0] = g_k.feet.x; d[1] = g_k.feet.y; d[2] = g_k.feet.z;
@@ -1847,6 +2147,7 @@ const f32* scene_kuyu_debug(void) {
         f32 l = vec3_len(vec3_sub(e->feet, g_k.feet));
         if (d[21] < 0.0f || l < d[21]) { d[18] = e->feet.x; d[19] = e->feet.y; d[20] = e->feet.z; d[21] = l; }
     }
+    d[22] = (f32)g_k.level; d[23] = g_k.snap_on ? 1.0f : 0.0f;
     d[14] = g_k.ms_draw; d[15] = g_k.ms_present; d[16] = (f32)g_k.stats.tris_out; d[17] = (f32)g_k.light_count;
     return d;
 }
@@ -1855,4 +2156,5 @@ void scene_kuyu_debug_cmd(u32 cmd, f32 a, f32 b, f32 c) {
     if (cmd == 1u) { g_k.yaw = a; g_k.pitch = b; }
     else if (cmd == 2u) { g_k.feet = vec3(a, b, c); g_k.vel = vec3(0, 0, 0); }
     else if (cmd == 3u) { g_k.god = a != 0.0f; }
+    else if (cmd == 4u) { g_k.pending_level = (u32)a + 1u; }
 }

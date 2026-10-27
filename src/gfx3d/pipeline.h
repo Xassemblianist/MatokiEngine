@@ -66,6 +66,7 @@ typedef struct {
     ClipGuard   guard;
     Vec4        planes[5];   /* dünya uzayı: sol, sağ, alt, üst, yakın (n·p + d >= 0 içeride) */
     Mat4        shadow_mat;  /* dünya → gölge doku uzayı (G3D_ATTR_SHADOW_POS için), varsayılan birim */
+    u32         snap;        /* > 0: ekran köşeleri 1/snap piksel ızgarasına yakalanır (retro titreme), 0 kapalı */
     G3dStats    stats;
 } G3dContext;
 
@@ -78,6 +79,8 @@ void g3d_set_opt(u32 mask);
 u32  g3d_attr_components(G3dAttr a);
 void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj, Vec3 eye);
 void g3d_set_shadow(G3dContext* c, Mat4 world_to_shadow);
+/* Köşe yakalama (vertex snap): subpixel = 1 tam piksel, 2 yarım piksel...; 0 kapatır. g3d_begin sıfırlar. */
+void g3d_set_snap(G3dContext* c, u32 subpixel);
 b32  g3d_sphere_visible(const G3dContext* c, Vec3 center, f32 radius);
 /* Mesh'i çizer; nesne frustum dışındaysa FALSE döner. */
 b32  g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial* mat);
