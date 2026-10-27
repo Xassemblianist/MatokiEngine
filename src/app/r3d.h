@@ -60,6 +60,8 @@ typedef struct {
 
 /* shaders_init'ten sonra: @mipmap'siz varyantları derler, gölge haritasını kurar */
 void r3d_init(R3dRenderer* rr, Arena* perm, Arena* scratch, u32 shadow_size);
+/* Paralel ön uç (g3d_set_deferred + g3d_flush) açık/kapalı; varsayılan açık, çıktı aynı */
+void r3d_set_parallel(b32 on);
 /* Kareyi temizler, gölge + ana geçişi çizer, raster'ı boşaltır */
 void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderManager* sm,
                 const R3dFrame* f, R3dSceneFn scene, void* user, G3dStats* out_main, G3dStats* out_shadow);

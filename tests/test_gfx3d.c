@@ -438,3 +438,81 @@ TEST(gfx3d_vertex_snap) {
     CHECK(dac == 0);      /* tamsayı köşeli üçgenle birebir */
     CHECK(dcd > 0);       /* yakalamasız alt-piksel kayma kapsamayı değiştirir */
 }
+
+/* Ertelenmiş/paralel ön uç (D-105): anlık yolla bit düzeyinde aynı renk + derinlik + istatistik.
+ * Kırpılan zemin, iç içe küreler, alfa harmanlı (sıraya duyarlı) küp; küçük komut kapasitesi
+ * (ara boşaltma) ve küçük dilim (yedek yol) ayrıca denenir. */
+static void shade_var_rgb_half(ShadeBatch* b) {
+    shade_var_rgb(b);
+    u32 n = b->count * 4u;
+    for (u32 i = 0; i < n; i++) b->out_rgba[3u * n + i] = 0.5f;
+}
+
+static G3dStats render_mixed(Env* e, const Camera* cam, Mesh** meshes, u32 deferred_cap) {
+    env_frame(e);
+    G3dContext ctx;
+    g3d_begin(&ctx, &e->r, &e->frame, camera_view(cam), camera_proj(cam, 320.0f / 200.0f), camera_eye(cam));
+    if (deferred_cap) g3d_set_deferred(&ctx, deferred_cap);
+    G3dMaterial m = mat_basic(shade_var_rgb, BLEND_NONE, G3D_CULL_BACK, TRUE);
+    m.attrs[0] = G3D_ATTR_NORMAL;
+    m.attrs[1] = G3D_ATTR_UV;
+    m.attr_count = 2;
+    Mat4 id = mat4_identity();
+    g3d_draw(&ctx, meshes[0], &id, &m);
+    for (u32 i = 0; i < 6; i++) {
+        Mat4 mm = mat4_trs(vec3((f32)i * 1.3f - 3.0f, 0.8f, -2.0f - (f32)(i % 3)), (f32)i * 0.7f, 0.2f,
+                           vec3(1.0f, 1.0f, 1.0f));
+        g3d_draw(&ctx, meshes[1], &mm, &m);
+    }
+    G3dMaterial tr = m;
+    tr.shade_fn = shade_var_rgb_half;
+    tr.blend = BLEND_ALPHA;
+    tr.depth_write = FALSE;
+    for (u32 i = 0; i < 3; i++) {
+        Mat4 mm = mat4_trs(vec3((f32)i * 0.6f - 0.6f, 1.0f, -1.5f - (f32)i * 0.4f), 0.4f * (f32)i, 0.3f,
+                           vec3(1.0f, 1.0f, 1.0f));
+        g3d_draw(&ctx, meshes[2], &mm, &tr);
+    }
+    g3d_flush(&ctx);
+    raster_flush(&e->r);
+    return ctx.stats;
+}
+
+TEST(gfx3d_deferred_matches_immediate) {
+    Env e;
+    env_init(&e, 320, 200);
+    Mesh* meshes[3];
+    meshes[0] = mesh_plane(&e.perm, 200.0f, 60, 4.0f);
+    meshes[1] = mesh_sphere(&e.perm, 0.7f, 48, 32);
+    meshes[2] = mesh_cube(&e.perm, 0.5f);
+    Camera cam;
+    camera_init(&cam, CAM_FLY);
+    cam.pos = vec3(0.2f, 1.4f, 2.5f);
+    cam.yaw = 0.15f;
+    cam.pitch = -0.2f;
+
+    u32 n = 320u * 200u;
+    u32* ref_px = ARENA_PUSH_ARRAY(&e.perm, u32, n);
+    f32* ref_z  = ARENA_PUSH_ARRAY(&e.perm, f32, n);
+    G3dStats ref = render_mixed(&e, &cam, meshes, 0);
+    u64 ref_in = e.r.stat_tris_in, ref_binned = e.r.stat_tris_binned;
+    for (u32 i = 0; i < n; i++) { ref_px[i] = e.fb.px[i]; ref_z[i] = e.fb.depth[i]; }
+    CHECK(ref.tris_clipped > 0);
+    CHECK(ref.tris_out > 1000);
+
+    static const u32  caps[3]   = { 64, 2, 64 };
+    static const usize limits[3] = { 0, 0, KB(16) };
+    for (u32 v = 0; v < 3; v++) {
+        g3d_set_slice_limit(limits[v]);
+        G3dStats st = render_mixed(&e, &cam, meshes, caps[v]);
+        u32 diff = 0;
+        for (u32 i = 0; i < n; i++) diff += (e.fb.px[i] != ref_px[i]) || (e.fb.depth[i] != ref_z[i]);
+        CHECK(diff == 0);
+        CHECK(st.tris_out == ref.tris_out && st.tris_backface == ref.tris_backface);
+        CHECK(st.tris_clipped == ref.tris_clipped && st.tris_rejected == ref.tris_rejected);
+        CHECK(e.r.stat_tris_in == ref_in && e.r.stat_tris_binned == ref_binned);
+        if (limits[v]) CHECK(st.items_fallback > 0);
+        else           CHECK(st.items_fallback == 0);
+    }
+    g3d_set_slice_limit(0);
+}

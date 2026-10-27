@@ -1,5 +1,6 @@
 /* gfx3d/pipeline.h — 3D boru hattı: vertex aşaması (C), nesne frustum culling, homojen kırpma,
- * perspektif bölme, viewport ve arka yüz ayıklama; çıktı raster_triangle'a gider.
+ * perspektif bölme, viewport ve arka yüz ayıklama; çıktı raster_triangle'a gider ya da
+ * ertelenmiş modda (g3d_flush) köşe/üçgen aşamaları job sisteminde paralel çalışır.
  * Arka uçtan bağımsız tasarım (DECISIONS Ö-5): mesh + model matrisi + materyal alır.
  * Sözleşme: RasterVert.var HAM varying'dir (w ile çarpılmaz), inv_w = 1/w_clip; raster
  * perspektif-doğru interpolasyonu kendisi yapar. Derinlik reverse-Z: DEPTH_GREATER, temizleme 0.
@@ -55,7 +56,10 @@ typedef struct {
     u64 tris_clipped;    /* kırpıcıdan geçen */
     u64 tris_backface;   /* arka yüz / sıfır alan */
     u64 tris_out;        /* rasterizer'a gönderilen */
+    u64 items_fallback;  /* ertelenmiş modda dilimi yetmeyip ana iş parçacığında yeniden işlenen iş */
 } G3dStats;
+
+typedef struct G3dCmd G3dCmd;
 
 typedef struct {
     Rasterizer* r;
@@ -68,6 +72,8 @@ typedef struct {
     Mat4        shadow_mat;  /* dünya → gölge doku uzayı (G3D_ATTR_SHADOW_POS için), varsayılan birim */
     u32         snap;        /* > 0: ekran köşeleri 1/snap piksel ızgarasına yakalanır (retro titreme), 0 kapalı */
     G3dStats    stats;
+    G3dCmd*     cmds;        /* != NULL: ertelenmiş mod (g3d_set_deferred) */
+    u32         cmd_count, cmd_cap;
 } G3dContext;
 
 /* Ölçüm için vertex aşaması optimizasyon anahtarları (varsayılan: hepsi açık) */
@@ -75,6 +81,8 @@ typedef struct {
 #define G3D_OPT_INSIDE_SKIP  2u   /* tamamen içerideki nesnede outcode atla */
 #define G3D_OPT_ALL          3u
 void g3d_set_opt(u32 mask);
+/* Test: ertelenmiş moddaki iş parçacığı dilimi üst sınırı (bayt, 0 = otomatik) → yedek yolu zorlar */
+void g3d_set_slice_limit(usize bytes);
 
 u32  g3d_attr_components(G3dAttr a);
 void g3d_begin(G3dContext* c, Rasterizer* r, Arena* frame, Mat4 view, Mat4 proj, Vec3 eye);
@@ -84,6 +92,15 @@ void g3d_set_snap(G3dContext* c, u32 subpixel);
 b32  g3d_sphere_visible(const G3dContext* c, Vec3 center, f32 radius);
 /* Mesh'i çizer; nesne frustum dışındaysa FALSE döner. */
 b32  g3d_draw(G3dContext* c, const Mesh* m, const Mat4* model, const G3dMaterial* mat);
+
+/* Ertelenmiş mod (D-105): g3d_draw yalnız culling yapıp komut kaydeder (raster durumu kayıtta
+ * sabitlenir; uniforms/textures flush'a kadar geçerli kalmalı). g3d_flush köşe ve üçgen aşamalarını
+ * job sisteminde paralel çalıştırır, kurulmuş üçgenleri gönderim sırasıyla karolara dağıtır;
+ * çıktı anlık yolla bit düzeyinde aynıdır. Kapasite dolunca g3d_draw kendisi boşaltır.
+ * raster_flush / shadow_end'den önce g3d_flush çağrılmalı; arada doğrudan raster_triangle
+ * çağrısı sırayı bozar. max_draws = 0 anlık moda döner. g3d_begin'den sonra çağrılır. */
+void g3d_set_deferred(G3dContext* c, u32 max_draws);
+void g3d_flush(G3dContext* c);
 
 /* Model matrisi yardımcıları */
 Mat4 mat4_translate(Vec3 t);

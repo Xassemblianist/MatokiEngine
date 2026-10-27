@@ -123,6 +123,18 @@ void raster_set_shader_ex(Rasterizer* r, ShadeFn shade_fn, const void* uniforms,
 void raster_triangle(Rasterizer* r, RasterVert v0, RasterVert v1, RasterVert v2);
 void raster_flush(Rasterizer* r);
 
+/* Ertelenmiş/paralel ön uç için (gfx3d g3d_flush):
+ * raster_pin_state: geçerli durumun frame arena'daki sabit kopyası (çizim başına bir kez, ana iş parçacığı).
+ * raster_setup_tri: tek üçgen kurulumu; saf, iş parçacığı güvenli; vc en az varying_count*3 f32.
+ *   Sıfır alan / ayıklanan / ekran dışı → FALSE (out yazılmış olabilir ama kullanılmaz).
+ * raster_bin_tris: kurulmuş üçgenleri sırayla karolara dağıtır (ana iş parçacığı; önce tri_buf boşaltılır).
+ *   submitted: kuruluma gönderilen üçgen sayısı (istatistik; raster_triangle sayımıyla aynı anlam). */
+const RasterShaderState* raster_pin_state(Rasterizer* r);
+b32  raster_setup_tri(const RasterVert* v0, const RasterVert* v1, const RasterVert* v2,
+                      const RasterShaderState* state, b32 cull_back, i32 fb_w, i32 fb_h,
+                      BinnedTri* out, f32* vc);
+void raster_bin_tris(Rasterizer* r, BinnedTri* tris, u32 count, u32 submitted);
+
 /* Paralel karo dağıtım modu: TRUE = dinamik (atomik sayaç, grain=1), FALSE = statik bölme */
 void raster_set_parallel_dynamic(b32 dynamic_sched);
 b32  raster_get_parallel_dynamic(void);
