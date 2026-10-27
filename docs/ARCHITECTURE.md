@@ -53,6 +53,10 @@ u8*   engine_input_buf(void);     // InputState, JS yazar
 u32*  engine_framebuffer(void);   // RGBA8, w*h u32
 u32   engine_fb_width(void);
 u32   engine_fb_height(void);
+// İsteğe bağlı (D-103): fare kilidi. JS tuvale tıklamada wants=1 ise requestPointerLock çağırır,
+// kilit değişince set_pointer_lock(0/1) bildirir; kilitliyken mouse_dx/dy = movementX/Y (konum sabit).
+u32   engine_wants_pointer_lock(void);
+void  engine_set_pointer_lock(u32 locked);
 ```
 
 ### Imports (`src/plat/platform.h`, modül `env`)

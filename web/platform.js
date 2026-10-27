@@ -283,20 +283,36 @@ async function init() {
     inputI32[3] += clampedY - prevY;
   }
 
+  // Fare kilidi (pointer lock): motor isterse tuvale tıklamada kilitlenir; kilitliyken
+  // mouse_dx/dy ham hareketi (movementX/Y) taşır, konum değişmez. Durum engine_set_pointer_lock ile bildirilir.
+  const wantsLock = () => !!(exports.engine_wants_pointer_lock && exports.engine_wants_pointer_lock());
+  const isLocked = () => document.pointerLockElement === canvas;
+  document.addEventListener("pointerlockchange", () => {
+    if (exports.engine_set_pointer_lock) exports.engine_set_pointer_lock(isLocked() ? 1 : 0);
+  });
+
   window.addEventListener("mousemove", (e) => {
     refreshViews();
+    if (isLocked()) {
+      inputI32[2] += e.movementX | 0;
+      inputI32[3] += e.movementY | 0;
+      return;
+    }
     updateMouseCoords(e);
   });
 
   window.addEventListener("mousedown", (e) => {
     refreshViews();
-    updateMouseCoords(e);
+    if (!isLocked()) updateMouseCoords(e);
     inputU32[4] = e.buttons;
+    if (e.target === canvas && !isLocked() && wantsLock() && canvas.requestPointerLock) {
+      canvas.requestPointerLock();
+    }
   });
 
   window.addEventListener("mouseup", (e) => {
     refreshViews();
-    updateMouseCoords(e);
+    if (!isLocked()) updateMouseCoords(e);
     inputU32[4] = e.buttons;
   });
 
@@ -319,7 +335,8 @@ async function init() {
     lastTime = now;
 
     try {
-      exports.engine_frame(now, dt);
+      if (isLocked() && !wantsLock()) document.exitPointerLock();
+    exports.engine_frame(now, dt);
     } catch (err) {
       if (running) {
         showPanic(`Wasm çalışma hatası: ${err.message}`);

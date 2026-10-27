@@ -1,0 +1,40 @@
+// dungeon3d.mtk — zindan aydınlatması (retro FPS): en yakın komşu + mipmap doku, 4 nokta ışık
+// (pencereli 1/d² sönüm, yarım-Lambert) + sabit ortam, doğrusal uzayda mesafe sisi, gama 2.
+// Gölge yok; ışıkları çizim başına CPU seçer (meşale, namlu alevi, mermi ışığı).
+uniform amb:  vec4;          // rgb ortam ışınımı (doğrusal)
+uniform base: vec4;          // albedo çarpanı (sRGB) + alfa
+uniform fog:  vec4;          // rgb sis rengi (doğrusal), a yoğunluk (1/birim)
+uniform l0p:  vec4;          // xyz konum, w = 1/yarıçap²  (w = 0 → ışık kapalı)
+uniform l0c:  vec4;          // rgb ışınım
+uniform l1p:  vec4;
+uniform l1c:  vec4;
+uniform l2p:  vec4;
+uniform l2c:  vec4;
+uniform l3p:  vec4;
+uniform l3c:  vec4;
+uniform albedo: texture2d @mipmap;
+in uv:    vec2;
+in nrm:   vec3;
+in depth: f32;
+in wpos:  vec3;
+
+fn plight(lp: vec4, lc: vec4, p: vec3, n: vec3) -> vec3 {
+    let d = lp.xyz - p;
+    let d2 = dot(d, d);
+    let w = clamp(1.0 - d2 * lp.w, 0.0, 1.0);
+    let ndl = clamp(dot(n, d) * rsqrt(d2 + 0.0001) * 0.75 + 0.25, 0.0, 1.0);
+    return lc.rgb * (w * w * ndl / (1.0 + d2 * 0.25));
+}
+
+fn frag() -> rgba {
+    let tc = sample(albedo, uv) * base;
+    let alb = tc.rgb * tc.rgb;
+    let n = normalize(nrm);
+    let li = amb.rgb + plight(l0p, l0c, wpos, n) + plight(l1p, l1c, wpos, n)
+           + plight(l2p, l2c, wpos, n) + plight(l3p, l3c, wpos, n);
+    let c = alb * li;
+    let f = clamp(depth * fog.a, 0.0, 1.0);
+    let m = mix(c, fog.rgb, f);
+    let o = sqrt(clamp(m, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)));
+    return vec4(o.r, o.g, o.b, tc.a);
+}

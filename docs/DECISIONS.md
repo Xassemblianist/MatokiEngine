@@ -387,6 +387,16 @@ Sahne bir `R3dSceneFn` verir; `r3d_render` onu iki kez çağırır (gölge geçi
 Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, engel kalkınca üstel yumuşatmayla
 (≈6/s) geri açılır. Ölçüt: başlangıç sahnesinde kameranın 6 m'lik sütunun 0.4 m dışında kalıp ekranı kaplaması.
 
+### D-103 — Retro FPS ("Kuyu"): zindan ışıklandırması ve fare kilidi
+**KABUL** · M11_A
+- `dungeon3d.mtk`: gölgesiz, 4 nokta ışık (pencereli `(1-d²/r²)²/(1+d²/4)` sönüm, yarım-Lambert) + sabit ortam + sis;
+  doku en yakın komşu + mipmap. Işıklar CPU'da çizim başına seçilir: 4×4 karoluk seviye parçası veya nesne
+  kutusuna en çok katkı veren 4 ışık (meşale, namlu alevi, mermi, patlama). Gölge haritası geçişi yok → ucuz.
+- Sahne 320×180'e çizer, `retro_present` ile 640×360'a büyütür (15 bit + Bayer + tarama çizgisi; V ile kapatılır).
+- Silah modeli ayrı geçişte (derinlik temizlenir) çizilir: duvara gömülmez.
+- Fare kilidi JS sözleşmesine isteğe bağlı iki export olarak eklendi (ARCHITECTURE §2); kilitliyken
+  `mouse_dx/dy` ham `movementX/Y` taşır. Sahne değişince JS kilidi bırakır.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
