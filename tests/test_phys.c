@@ -636,3 +636,19 @@ TEST(phys_bvh_benchmark_100k) {
     CHECK(hits > 50000u);
     CHECK(brute_hits > 100u);
 }
+
+/* İnceleme (Claude): uzun takılmadan sonra birikmiş zaman atılır; sonsuz hızda alt adım sayısı tanımlı kalır */
+TEST(phys_review_spiral_and_inf_velocity) {
+    static u8 mem[MB(1)];
+    Arena a;
+    arena_init(&a, mem, sizeof(mem));
+    PhysWorld w;
+    phys_world_init(&w, &a, 4, 4, 1);
+    u32 id = phys_world_add_sphere(&w, vec3(0.0f, 5.0f, 0.0f), 0.5f, 1.0f, 0.0f, 0.5f);
+    CHECK(phys_world_update(&w, 10.0f) == 64u);
+    CHECK(phys_world_update(&w, 1.0f / 120.0f) <= 2u);   /* takılma sonrası normale döner */
+
+    w.bodies[id].vel = vec3(1e38f * 10.0f, 0.0f, 0.0f);  /* +inf */
+    phys_world_step(&w);                                 /* UBSan: f32→u32 taşması yok */
+    CHECK(TRUE);
+}

@@ -8,6 +8,14 @@
 #define MAX_SUBSTEPS     256u
 #define BVH_QUERY_CAP    256u
 
+/* ceil(dist / max_step) ∈ [1, MAX_SUBSTEPS]; sonsuz/NaN mesafede f32→u32 dönüşümü tanımsız olmasın diye önce f32'de kırpılır */
+static u32 substep_count(f32 dist, f32 max_step) {
+    f32 n = dist / max_step;
+    if (!(n > 1.0f)) return 1u;
+    if (n > (f32)MAX_SUBSTEPS) return MAX_SUBSTEPS;
+    return (u32)m_ceil(n);
+}
+
 void phys_world_init(PhysWorld* w, Arena* a, u32 max_bodies, u32 max_statics, u32 max_meshes) {
     w->gravity      = vec3(0.0f, PHYS_DEFAULT_GRAVITY, 0.0f);
     w->fixed_dt     = PHYS_FIXED_DT;
@@ -238,8 +246,7 @@ void phys_world_step(PhysWorld* w) {
 
         f32 disp = vec3_len(b->vel) * dt;
         f32 max_step = m_max(0.02f, b->radius * 0.4f);
-        u32 steps = (disp > max_step) ? (u32)m_ceil(disp / max_step) : 1u;
-        if (steps > MAX_SUBSTEPS) steps = MAX_SUBSTEPS;
+        u32 steps = substep_count(disp, max_step);
         f32 sub_dt = dt / (f32)steps;
 
         for (u32 s = 0; s < steps; s++) {
@@ -291,6 +298,9 @@ u32 phys_world_update(PhysWorld* w, f32 dt) {
         w->accum -= w->fixed_dt;
         steps++;
     }
+    /* Adım sınırına takıldıysa (uzun takılma, sekme arka planda) birikmiş zamanı at: aksi halde sonraki
+     * her kare 64 adım koşar ve oyun hiç toparlanamaz ("ölüm sarmalı"). */
+    if (w->accum >= w->fixed_dt) w->accum = 0.0f;
     return steps;
 }
 
@@ -354,8 +364,7 @@ static SlideResult move_and_slide_shape(const PhysWorld* w, PhysShape* sh, f32 r
 
     f32 total_dist = vec3_len(*vel) * dt;
     f32 max_step = m_max(0.02f, radius * 0.4f);
-    u32 steps = (total_dist > max_step) ? (u32)m_ceil(total_dist / max_step) : 1u;
-    if (steps > MAX_SUBSTEPS) steps = MAX_SUBSTEPS;
+    u32 steps = substep_count(total_dist, max_step);
     f32 sub_dt = dt / (f32)steps;
 
     for (u32 step = 0; step < steps; step++) {

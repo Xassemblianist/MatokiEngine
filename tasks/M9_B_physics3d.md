@@ -62,3 +62,11 @@ Tipler `core/types.h`, vektör/matris `core/math.h` (Vec3, Mat4, m_sqrt...), bel
 | 100k üçgen BVH kurulum süresi (`bvh_build`) | **92.81 ms** | 62.775 düğüm, 8-bin SAH, yaprak ≤ 4 üçgen |
 | 100k ışın `raycast_mesh` (BVH açık) | **155.70 ms** (**0.64 M ışın/s**) | 96.026 / 100.000 isabet |
 | Kaba kuvvet `raycast_mesh_brute` (100k üçgen) | **161 ışın/s** | BVH ile **~3900×** hızlanma |
+
+## İnceleme (Claude, 2026-10-27)
+- `phys_world_update` 64 adımda kesiyor ama birikmiş zamanı atmıyordu → uzun takılmadan sonra her kare 64 adım
+  ("ölüm sarmalı"); sınıra takılınca birikim sıfırlanır.
+- Alt adım sayısı `(u32)ceil(dist/step)` sonsuz hızda tanımsız davranıştı → `substep_count` f32'de kırpar.
+- Test: `phys_review_spiral_and_inf_velocity`.
+- Bilinen sınırlar (kabul): gövde başına mesh sorgusu 256 üçgenle sınırlı (çok yoğun mesh'te temas kaçabilir);
+  NaN köşeli mesh'te BVH bin indeksi tanımsız.
