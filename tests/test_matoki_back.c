@@ -16,6 +16,8 @@
 #include "matoki/ir.h"
 #include "matoki/codegen.h"
 #include "matoki/variant.h"
+#include "matoki/matoki.h"
+#include "masm/mdis.h"
 
 static void ensure_matoki_test_dir(void) {
     mkdir("build", 0755);
@@ -902,4 +904,44 @@ TEST(matoki_sprite_shader_codegen) {
     fclose(fp2);
 
     CHECK(system("wasm-validate --enable-all build/test_matoki/sprite.wasm") == 0);
+}
+
+/* P4: Basit, discard'sız çekirdeklerde v128.load32_splat ve 4x döngü açmanın (offset=0/16/32/48)
+ * üretildiğini doğrular. */
+TEST(matoki_unroll4x_and_load32_splat) {
+    ensure_matoki_test_dir();
+
+    static u8 arena_buf[MB(2)];
+    Arena arena;
+    arena_init(&arena, arena_buf, sizeof(arena_buf));
+
+    const char* src =
+        "uniform tint: vec4;\n"
+        "in v_color: vec4;\n"
+        "fn frag() -> rgba { return v_color * tint; }\n";
+
+    u8 wasm_buf[16384];
+    MtkLayout layout;
+    MtkDiag diag;
+    u32 wasm_len = mtk_compile_wasm(src, (u32)strlen(src), "vcolor_p4.mtk", NULL, &arena,
+                                    wasm_buf, sizeof(wasm_buf), &layout, &diag);
+    CHECK(wasm_len > 0);
+    CHECK(diag.count == 0);
+
+    MdisResult dr = mdis_disassemble(&arena, wasm_buf, wasm_len);
+    CHECK(dr.ok);
+
+    /* 4 adet uniform bileşeni v128.load32_splat ile yüklenmeli */
+    u32 splat_cnt = 0;
+    const char* p = dr.wat;
+    while ((p = strstr(p, "v128.load32_splat")) != NULL) {
+        splat_cnt++;
+        p += 17;
+    }
+    CHECK(splat_cnt == 4);
+
+    /* 4x açılmış döngüde offset=16, offset=32, offset=48 bellek erişimleri bulunmalı */
+    CHECK(strstr(dr.wat, "offset=16") != NULL);
+    CHECK(strstr(dr.wat, "offset=32") != NULL);
+    CHECK(strstr(dr.wat, "offset=48") != NULL);
 }

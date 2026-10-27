@@ -118,6 +118,10 @@ typedef struct {
     u32 stat_raw_locals;
     u32 stat_pooled_locals;
     u32 stat_inlined_ops;
+
+    /* 4x döngü açma (loop unrolling) durumu */
+    u32 unroll_offset;
+    u32 cached_var_idx;
 } CgCtx;
 
 static b32 cg_fail(char* err, u32 err_cap, const char* fmt, ...) {
@@ -204,6 +208,8 @@ static u32 count_dying_loop_locals(const CgCtx* ctx, u32 node, u32 root,
 static void analyze_liveness_and_trees(CgCtx* ctx) {
     const IrFunc* f = ctx->f;
     u32 n = f->count;
+    ctx->unroll_offset  = 0;
+    ctx->cached_var_idx = IR_NONE;
 
     for (u32 i = 0; i < n; i++) {
         ctx->use_count[i]        = 0;
@@ -908,10 +914,14 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
         break;
     case IR_VARYING: {
         u32 v_idx = in->imm.u;
-        mb_local_get(mf, ctx->loc_var_base[v_idx]);
-        mb_local_get(mf, ctx->loc_q16);
-        mb_i32_add(mf);
-        mb_v128_load(mf, 2, 0);
+        if (ctx->cached_var_idx == v_idx) {
+            mb_local_get(mf, ctx->loc_tmp_i32_b);
+        } else {
+            mb_local_get(mf, ctx->loc_var_base[v_idx]);
+            mb_local_get(mf, ctx->loc_q16);
+            mb_i32_add(mf);
+        }
+        mb_v128_load(mf, 2, ctx->unroll_offset);
     } break;
     case IR_FRAG_X:
         mb_local_get(mf, ctx->loc_qhdr);
@@ -1476,7 +1486,7 @@ static void emit_inst(CgCtx* ctx, u32 idx) {
             mb_local_get(mf, ctx->loc_q16);
             mb_i32_add(mf);
             emit_push_operand(ctx, in->a, TRUE);
-            mb_v128_store(mf, 2, 0);
+            mb_v128_store(mf, 2, ctx->unroll_offset);
         }
         return;
     }
@@ -1530,9 +1540,30 @@ static void emit_preheader_insts(CgCtx* ctx) {
             continue;
         }
 
+        if ((op == IR_UNIFORM_F32 || op == IR_UNIFORM_I32) &&
+            ctx->need_splat[i] && ctx->val_loc[i] == IR_NONE) {
+            mb_local_get(mf, ctx->loc_uniforms);
+            mb_v128_load32_splat(mf, 2, in->imm.u);
+            mb_local_set(mf, ctx->splat_loc[i]);
+            continue;
+        }
+
         emit_inst_expr(ctx, i);
         emit_store_result(ctx, i);
     }
+}
+
+/* İfade ağacında kullanılan ilk IR_VARYING indeksini bulur (yoksa IR_NONE döner) */
+static u32 find_tree_varying(const CgCtx* ctx, u32 idx) {
+    if (idx == IR_NONE) return IR_NONE;
+    const IrInst* in = &ctx->f->insts[idx];
+    if (in->op == IR_VARYING) return in->imm.u;
+    if (!ctx->inlined[idx]) return IR_NONE;
+    u32 v = find_tree_varying(ctx, in->a);
+    if (v != IR_NONE) return v;
+    v = find_tree_varying(ctx, in->b);
+    if (v != IR_NONE) return v;
+    return find_tree_varying(ctx, in->c);
 }
 
 /* Blend kaynaştırma (Blend Fusion) son aşaması:
@@ -1861,83 +1892,109 @@ u32 mtk_codegen(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
 
     emit_preheader_insts(ctx);
 
-    /* 4. Alt-testli (do-while) q = 0..count-1 döngüsü:
-     * Her iterasyonda q<<4 ve quads+(q<<3) hesaplamak yerine loc_q16 (+16) ve loc_qhdr (+8)
-     * indüksiyon değişkenlerini doğrudan ilerlet! */
-    if (ctx->need_q16) {
+    /* Basit, discard'sız, dokusuz ve kısa (<= 32 IR komutu) çekirdeklerde 4x döngü açma uygunluğu */
+    b32 can_unroll_4x = (opts->fuse_blend == MTK_FUSE_NONE) &&
+                        ctx->need_q16 && !ctx->need_qhdr &&
+                        !ctx->has_any_tex && !ctx->has_deriv;
+    b32 unroll_per_out = TRUE;
+    if (can_unroll_4x) {
+        u32 loop_ir_cnt = 0;
+        for (u32 i = 0; i < f->count; i++) {
+            if (ctx->is_preheader[i]) continue;
+            const IrInst* in = &f->insts[i];
+            IrOp op = (IrOp)in->op;
+            if (op == IR_NOP) continue;
+            if (op == IR_IF_BEGIN || op == IR_ELSE || op == IR_IF_END) {
+                can_unroll_4x = FALSE;
+                break;
+            }
+            if (!ctx->is_simd[i] && (op == IR_IMIN_S || op == IR_IMAX_S)) {
+                unroll_per_out = FALSE;
+            }
+            if (op != IR_OUTPUT) {
+                if (ctx->use_count[i] == 0) continue;
+                if (!ctx->inlined[i]) unroll_per_out = FALSE;
+            }
+            loop_ir_cnt++;
+        }
+        if (loop_ir_cnt > 32) {
+            can_unroll_4x = FALSE;
+        }
+    }
+
+    if (can_unroll_4x) {
+        /* 4x açılmış ana döngü (offset = 0, 16, 32, 48, adım = 64 byte) + 1x kuyruk döngüsü */
+        mb_i32_const(mf, 0);
+        mb_local_set(mf, ctx->loc_q16);
         mb_local_get(mf, ctx->loc_count);
         mb_i32_const(mf, 4);
         mb_i32_shl(mf);
-        mb_local_set(mf, ctx->loc_count);
-        mb_i32_const(mf, 0);
-        mb_local_set(mf, ctx->loc_q16);
-        if (ctx->need_qhdr) {
-            mb_local_get(mf, ctx->loc_quads);
-            mb_local_set(mf, ctx->loc_qhdr);
-        }
-    } else if (ctx->need_qhdr) {
-        mb_local_get(mf, ctx->loc_quads);
-        mb_local_tee(mf, ctx->loc_qhdr);
-        mb_local_get(mf, ctx->loc_count);
-        mb_i32_const(mf, 3);
-        mb_i32_shl(mf);
-        mb_i32_add(mf);
-        mb_local_set(mf, ctx->loc_count);
-    }
+        mb_local_tee(mf, ctx->loc_count);
+        mb_i32_const(mf, -64);
+        mb_i32_and(mf);
+        mb_local_tee(mf, ctx->loc_q);
 
-    mb_loop(mf, MB_BLOCK_VOID);
+        mb_if(mf, MB_BLOCK_VOID);
+        mb_loop(mf, MB_BLOCK_VOID);
 
-    if (ctx->has_deriv && ctx->need_active_mask) {
-        /* Türev kullanan shader: kontrol akışı 4 lane'in hepsiyle (yardımcı lane'ler dahil) yürür;
-         * kapsama maskesi yalnızca yazımı (discard / füzyonlu blend) belirler. */
-        if (opts->fuse_blend != MTK_FUSE_NONE) {
-            mb_local_get(mf, ctx->loc_qhdr);
-            mb_i32_load(mf, 2, QUAD_OFF_MASK);
-            mb_i32x4_splat(mf);
-            mb_local_get(mf, ctx->loc_v_mask_bits);
-            mb_v128_and(mf);
-            mb_local_get(mf, ctx->loc_v_mask_bits);
-            mb_i32x4_eq(mf);
-            mb_local_set(mf, ctx->loc_blend_mask);
-        }
-        mb_i32x4_const(mf, -1, -1, -1, -1);
-        mb_local_set(mf, ctx->loc_active);
-    } else if (ctx->need_active_mask || opts->fuse_blend != MTK_FUSE_NONE) {
-        mb_local_get(mf, ctx->loc_qhdr);
-        mb_i32_load(mf, 2, QUAD_OFF_MASK);
-        mb_i32x4_splat(mf);
-        mb_local_get(mf, ctx->loc_v_mask_bits);
-        mb_v128_and(mf);
-        mb_local_get(mf, ctx->loc_v_mask_bits);
-        mb_i32x4_eq(mf);
-        if (ctx->need_active_mask && opts->fuse_blend != MTK_FUSE_NONE) {
-            mb_local_tee(mf, ctx->loc_blend_mask);
-            mb_local_set(mf, ctx->loc_active);
-        } else if (opts->fuse_blend != MTK_FUSE_NONE) {
-            mb_local_set(mf, ctx->loc_blend_mask);
+        if (unroll_per_out) {
+            for (u32 i = 0; i < f->count; i++) {
+                if (ctx->is_preheader[i]) continue;
+                const IrInst* in = &f->insts[i];
+                if (in->op != IR_OUTPUT) continue;
+                u32 ch = in->imm.u;
+                u32 v_idx = find_tree_varying(ctx, in->a);
+                if (v_idx != IR_NONE) {
+                    mb_local_get(mf, ctx->loc_var_base[v_idx]);
+                    mb_local_get(mf, ctx->loc_q16);
+                    mb_i32_add(mf);
+                    mb_local_set(mf, ctx->loc_tmp_i32_b);
+                    ctx->cached_var_idx = v_idx;
+                }
+                mb_local_get(mf, ctx->loc_out_base[ch]);
+                mb_local_get(mf, ctx->loc_q16);
+                mb_i32_add(mf);
+                mb_local_set(mf, ctx->loc_tmp_i32);
+
+                for (u32 u = 0; u < 4; u++) {
+                    ctx->unroll_offset = u * 16u;
+                    mb_local_get(mf, ctx->loc_tmp_i32);
+                    emit_push_operand(ctx, in->a, TRUE);
+                    mb_v128_store(mf, 2, ctx->unroll_offset);
+                }
+                ctx->cached_var_idx = IR_NONE;
+                ctx->unroll_offset  = 0;
+            }
         } else {
-            mb_local_set(mf, ctx->loc_active);
+            for (u32 u = 0; u < 4; u++) {
+                ctx->unroll_offset = u * 16u;
+                for (u32 i = 0; i < f->count; i++) {
+                    if (ctx->is_preheader[i]) continue;
+                    emit_inst(ctx, i);
+                }
+            }
+            ctx->unroll_offset = 0;
         }
-    }
 
-    /* 5. Döngü içi IR komutlarını üret */
-    for (u32 i = 0; i < f->count; i++) {
-        if (ctx->is_preheader[i]) continue;
-        emit_inst(ctx, i);
-    }
+        mb_local_get(mf, ctx->loc_q16);
+        mb_i32_const(mf, 64);
+        mb_i32_add(mf);
+        mb_local_tee(mf, ctx->loc_q16);
+        mb_local_get(mf, ctx->loc_q);
+        mb_i32_ne(mf);
+        mb_br_if(mf, 0);
+        mb_end(mf); /* loop4 sonu */
+        mb_end(mf); /* if (end64 != 0) sonu */
 
-    /* 6. Kaynaştırılmış blend varsa uygula */
-    if (opts->fuse_blend != MTK_FUSE_NONE) {
-        emit_fused_blend_epilogue(ctx);
-    }
-
-    /* İndüksiyon değişkenlerini ilerlet ve döngü sonunu kontrol et */
-    if (ctx->need_q16) {
-        if (ctx->need_qhdr) {
-            mb_local_get(mf, ctx->loc_qhdr);
-            mb_i32_const(mf, QUAD_SIZE);
-            mb_i32_add(mf);
-            mb_local_set(mf, ctx->loc_qhdr);
+        /* Kalan (count & 3) quad için 1x kuyruk döngüsü */
+        mb_local_get(mf, ctx->loc_q16);
+        mb_local_get(mf, ctx->loc_count);
+        mb_i32_ne(mf);
+        mb_if(mf, MB_BLOCK_VOID);
+        mb_loop(mf, MB_BLOCK_VOID);
+        for (u32 i = 0; i < f->count; i++) {
+            if (ctx->is_preheader[i]) continue;
+            emit_inst(ctx, i);
         }
         mb_local_get(mf, ctx->loc_q16);
         mb_i32_const(mf, 16);
@@ -1946,17 +2003,106 @@ u32 mtk_codegen(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
         mb_local_get(mf, ctx->loc_count);
         mb_i32_ne(mf);
         mb_br_if(mf, 0);
+        mb_end(mf); /* kuyruk loop sonu */
+        mb_end(mf); /* if (q16 != count) sonu */
     } else {
-        mb_local_get(mf, ctx->loc_qhdr);
-        mb_i32_const(mf, QUAD_SIZE);
-        mb_i32_add(mf);
-        mb_local_tee(mf, ctx->loc_qhdr);
-        mb_local_get(mf, ctx->loc_count);
-        mb_i32_ne(mf);
-        mb_br_if(mf, 0);
-    }
+        /* 4. Alt-testli (do-while) q = 0..count-1 döngüsü:
+         * Her iterasyonda q<<4 ve quads+(q<<3) hesaplamak yerine loc_q16 (+16) ve loc_qhdr (+8)
+         * indüksiyon değişkenlerini doğrudan ilerlet! */
+        if (ctx->need_q16) {
+            mb_local_get(mf, ctx->loc_count);
+            mb_i32_const(mf, 4);
+            mb_i32_shl(mf);
+            mb_local_set(mf, ctx->loc_count);
+            mb_i32_const(mf, 0);
+            mb_local_set(mf, ctx->loc_q16);
+            if (ctx->need_qhdr) {
+                mb_local_get(mf, ctx->loc_quads);
+                mb_local_set(mf, ctx->loc_qhdr);
+            }
+        } else if (ctx->need_qhdr) {
+            mb_local_get(mf, ctx->loc_quads);
+            mb_local_tee(mf, ctx->loc_qhdr);
+            mb_local_get(mf, ctx->loc_count);
+            mb_i32_const(mf, 3);
+            mb_i32_shl(mf);
+            mb_i32_add(mf);
+            mb_local_set(mf, ctx->loc_count);
+        }
 
-    mb_end(mf); /* loop sonu */
+        mb_loop(mf, MB_BLOCK_VOID);
+
+        if (ctx->has_deriv && ctx->need_active_mask) {
+            /* Türev kullanan shader: kontrol akışı 4 lane'in hepsiyle (yardımcı lane'ler dahil) yürür;
+             * kapsama maskesi yalnızca yazımı (discard / füzyonlu blend) belirler. */
+            if (opts->fuse_blend != MTK_FUSE_NONE) {
+                mb_local_get(mf, ctx->loc_qhdr);
+                mb_i32_load(mf, 2, QUAD_OFF_MASK);
+                mb_i32x4_splat(mf);
+                mb_local_get(mf, ctx->loc_v_mask_bits);
+                mb_v128_and(mf);
+                mb_local_get(mf, ctx->loc_v_mask_bits);
+                mb_i32x4_eq(mf);
+                mb_local_set(mf, ctx->loc_blend_mask);
+            }
+            mb_i32x4_const(mf, -1, -1, -1, -1);
+            mb_local_set(mf, ctx->loc_active);
+        } else if (ctx->need_active_mask || opts->fuse_blend != MTK_FUSE_NONE) {
+            mb_local_get(mf, ctx->loc_qhdr);
+            mb_i32_load(mf, 2, QUAD_OFF_MASK);
+            mb_i32x4_splat(mf);
+            mb_local_get(mf, ctx->loc_v_mask_bits);
+            mb_v128_and(mf);
+            mb_local_get(mf, ctx->loc_v_mask_bits);
+            mb_i32x4_eq(mf);
+            if (ctx->need_active_mask && opts->fuse_blend != MTK_FUSE_NONE) {
+                mb_local_tee(mf, ctx->loc_blend_mask);
+                mb_local_set(mf, ctx->loc_active);
+            } else if (opts->fuse_blend != MTK_FUSE_NONE) {
+                mb_local_set(mf, ctx->loc_blend_mask);
+            } else {
+                mb_local_set(mf, ctx->loc_active);
+            }
+        }
+
+        /* 5. Döngü içi IR komutlarını üret */
+        for (u32 i = 0; i < f->count; i++) {
+            if (ctx->is_preheader[i]) continue;
+            emit_inst(ctx, i);
+        }
+
+        /* 6. Kaynaştırılmış blend varsa uygula */
+        if (opts->fuse_blend != MTK_FUSE_NONE) {
+            emit_fused_blend_epilogue(ctx);
+        }
+
+        /* İndüksiyon değişkenlerini ilerlet ve döngü sonunu kontrol et */
+        if (ctx->need_q16) {
+            if (ctx->need_qhdr) {
+                mb_local_get(mf, ctx->loc_qhdr);
+                mb_i32_const(mf, QUAD_SIZE);
+                mb_i32_add(mf);
+                mb_local_set(mf, ctx->loc_qhdr);
+            }
+            mb_local_get(mf, ctx->loc_q16);
+            mb_i32_const(mf, 16);
+            mb_i32_add(mf);
+            mb_local_tee(mf, ctx->loc_q16);
+            mb_local_get(mf, ctx->loc_count);
+            mb_i32_ne(mf);
+            mb_br_if(mf, 0);
+        } else {
+            mb_local_get(mf, ctx->loc_qhdr);
+            mb_i32_const(mf, QUAD_SIZE);
+            mb_i32_add(mf);
+            mb_local_tee(mf, ctx->loc_qhdr);
+            mb_local_get(mf, ctx->loc_count);
+            mb_i32_ne(mf);
+            mb_br_if(mf, 0);
+        }
+
+        mb_end(mf); /* loop sonu */
+    }
 
     mb_func_end(mf);
     mb_export_func(&mod, "shade", mf->func_idx);
