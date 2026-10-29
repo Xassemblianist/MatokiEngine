@@ -321,6 +321,14 @@ static LowerVal lower_builtin_call(LowerCtx* ctx, const AstExpr* e, b32* out_han
         return res;
     }
 
+    if (str_eq(name, "sample_depth")) {
+        LowerVal tex = lower_expr(ctx, e->as.call.args[0]);
+        LowerVal uv  = lower_expr(ctx, e->as.call.args[1]);
+        LowerVal res = make_val(MTK_TYPE_F32);
+        res.id[0] = ir_emit_sample_depth(f, tex.tex_slot, uv.id[0], uv.id[1], tex.tex_flags);
+        return res;
+    }
+
     if (str_eq(name, "sample_level")) {
         LowerVal tex = lower_expr(ctx, e->as.call.args[0]);
         LowerVal uv  = lower_expr(ctx, e->as.call.args[1]);
@@ -550,7 +558,7 @@ static LowerVal lower_expr(LowerCtx* ctx, const AstExpr* e) {
         const AstDecl* d = find_top_decl(ctx->prog, name);
         if (d) {
             if (d->kind == AST_DECL_UNIFORM) {
-                if (d->type == MTK_TYPE_TEXTURE2D) {
+                if (mtk_type_is_texture(d->type)) {
                     res.tex_slot  = d->as.uniform_decl.offset_or_slot;
                     res.tex_flags = d->as.uniform_decl.tex_flags;
                     return res;

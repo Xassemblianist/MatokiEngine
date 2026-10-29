@@ -140,10 +140,11 @@ static MtkType parse_type_name(Parser* p, u32* out_line, u32* out_col) {
     if (str_eq(name, "ivec2"))     return MTK_TYPE_IVEC2;
     if (str_eq(name, "ivec3"))     return MTK_TYPE_IVEC3;
     if (str_eq(name, "ivec4"))     return MTK_TYPE_IVEC4;
-    if (str_eq(name, "mat3"))      return MTK_TYPE_MAT3;
-    if (str_eq(name, "mat4"))      return MTK_TYPE_MAT4;
-    if (str_eq(name, "texture2d")) return MTK_TYPE_TEXTURE2D;
-    if (str_eq(name, "void"))      return MTK_TYPE_VOID;
+    if (str_eq(name, "mat3"))          return MTK_TYPE_MAT3;
+    if (str_eq(name, "mat4"))          return MTK_TYPE_MAT4;
+    if (str_eq(name, "texture2d"))     return MTK_TYPE_TEXTURE2D;
+    if (str_eq(name, "texture2d_f32")) return MTK_TYPE_TEXTURE2D_F32;
+    if (str_eq(name, "void"))          return MTK_TYPE_VOID;
 
     parser_error_at(p, &tok, "bilinmeyen tip '%s'", name);
     return MTK_TYPE_VOID;
@@ -490,6 +491,9 @@ static AstDecl* parse_uniform_decl(Parser* p) {
         return d;
     }
     d->type = parse_type_name(p, &d->type_line, &d->type_col);
+    if (d->type == MTK_TYPE_TEXTURE2D_F32) {
+        d->as.uniform_decl.tex_flags |= TEX_FLAG_F32;
+    }
 
     /* Opsiyonel @bilinear, @clamp, @nearest, @wrap, @mipmap nitelikleri */
     while (parser_match(p, TOK_AT)) {
@@ -499,7 +503,7 @@ static AstDecl* parse_uniform_decl(Parser* p) {
         }
         char attr[32];
         copy_name(attr, attr_tok.start, attr_tok.len);
-        if (d->type != MTK_TYPE_TEXTURE2D) {
+        if (!mtk_type_is_texture(d->type)) {
             parser_error_at(p, &attr_tok, "ornekleme niteligi '@%s' yalnizca texture2d tipinde kullanilabilir", attr);
         } else if (str_eq(attr, "bilinear")) {
             d->as.uniform_decl.tex_flags |= TEX_FLAG_BILINEAR;
@@ -510,7 +514,11 @@ static AstDecl* parse_uniform_decl(Parser* p) {
         } else if (str_eq(attr, "wrap")) {
             d->as.uniform_decl.tex_flags &= ~TEX_FLAG_CLAMP;
         } else if (str_eq(attr, "mipmap")) {
-            d->as.uniform_decl.tex_flags |= TEX_FLAG_MIPMAP;
+            if (d->type == MTK_TYPE_TEXTURE2D_F32) {
+                parser_error_at(p, &attr_tok, "'@mipmap' niteligi texture2d_f32 tipinde desteklenmez");
+            } else {
+                d->as.uniform_decl.tex_flags |= TEX_FLAG_MIPMAP;
+            }
         } else {
             parser_error_at(p, &attr_tok, "bilinmeyen ornekleme niteligi '@%s'", attr);
         }

@@ -519,6 +519,64 @@ void ir_emit_sample_level(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u32 flag
     ir_emit_sample_impl(f, slot, u, v, ir_clamp_level(f, slot, level), flags & ~TEX_FLAG_MIPMAP, out_rgba);
 }
 
+/* Yardımcı: tek bir (tx, ty) koordinat çiftini wrap veya clamp ile sarıp f32 texel yükler */
+static u32 ir_load_texel_f32(IrFunc* f, u32 slot, u32 tx, u32 ty, u32 w_i, u32 w_m1, u32 h_m1,
+                             u32 zero_i, u32 flags) {
+    u32 wx, wy;
+    if (flags & TEX_FLAG_CLAMP) {
+        wx = ir_op2(f, IR_IMIN_S, ir_op2(f, IR_IMAX_S, tx, zero_i), w_m1);
+        wy = ir_op2(f, IR_IMIN_S, ir_op2(f, IR_IMAX_S, ty, zero_i), h_m1);
+    } else {
+        wx = ir_op2(f, IR_IAND, tx, w_m1);
+        wy = ir_op2(f, IR_IAND, ty, h_m1);
+    }
+    u32 row = ir_op2(f, IR_IMUL, wy, w_i);
+    u32 idx = ir_op2(f, IR_IADD, row, wx);
+    u32 raw = ir_texel_load(f, slot, idx);
+    return ir_op1(f, IR_BITCAST_I2F, raw);
+}
+
+u32 ir_emit_sample_depth(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags) {
+    u32 w_i    = ir_tex_info(f, IR_TEX_W, slot);
+    u32 h_i    = ir_tex_info(f, IR_TEX_H, slot);
+    u32 w_f    = ir_op1(f, IR_I2F, w_i);
+    u32 h_f    = ir_op1(f, IR_I2F, h_i);
+    u32 one_i  = ir_const_i32(f, 1);
+    u32 zero_i = ir_const_i32(f, 0);
+    u32 w_m1   = ir_op2(f, IR_ISUB, w_i, one_i);
+    u32 h_m1   = ir_op2(f, IR_ISUB, h_i, one_i);
+
+    if (!(flags & TEX_FLAG_BILINEAR)) {
+        u32 uf = ir_op1(f, IR_FFLOOR, ir_op2(f, IR_FMUL, u, w_f));
+        u32 vf = ir_op1(f, IR_FFLOOR, ir_op2(f, IR_FMUL, v, h_f));
+        u32 tx = ir_op1(f, IR_F2I, uf);
+        u32 ty = ir_op1(f, IR_F2I, vf);
+        return ir_load_texel_f32(f, slot, tx, ty, w_i, w_m1, h_m1, zero_i, flags);
+    } else {
+        u32 half_f = ir_const_f32(f, 0.5f);
+        u32 fu     = ir_op2(f, IR_FSUB, ir_op2(f, IR_FMUL, u, w_f), half_f);
+        u32 fv     = ir_op2(f, IR_FSUB, ir_op2(f, IR_FMUL, v, h_f), half_f);
+        u32 x0_f   = ir_op1(f, IR_FFLOOR, fu);
+        u32 y0_f   = ir_op1(f, IR_FFLOOR, fv);
+        u32 ax     = ir_op2(f, IR_FSUB, fu, x0_f);
+        u32 ay     = ir_op2(f, IR_FSUB, fv, y0_f);
+
+        u32 x0 = ir_op1(f, IR_F2I, x0_f);
+        u32 y0 = ir_op1(f, IR_F2I, y0_f);
+        u32 x1 = ir_op2(f, IR_IADD, x0, one_i);
+        u32 y1 = ir_op2(f, IR_IADD, y0, one_i);
+
+        u32 t00 = ir_load_texel_f32(f, slot, x0, y0, w_i, w_m1, h_m1, zero_i, flags);
+        u32 t10 = ir_load_texel_f32(f, slot, x1, y0, w_i, w_m1, h_m1, zero_i, flags);
+        u32 t01 = ir_load_texel_f32(f, slot, x0, y1, w_i, w_m1, h_m1, zero_i, flags);
+        u32 t11 = ir_load_texel_f32(f, slot, x1, y1, w_i, w_m1, h_m1, zero_i, flags);
+
+        u32 top = ir_op2(f, IR_FADD, t00, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, t10, t00), ax));
+        u32 bot = ir_op2(f, IR_FADD, t01, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, t11, t01), ax));
+        return ir_op2(f, IR_FADD, top, ir_op2(f, IR_FMUL, ir_op2(f, IR_FSUB, bot, top), ay));
+    }
+}
+
 static b32 verify_fail(char* err, u32 err_cap, const char* fmt, ...) {
     if (err && err_cap > 0) {
         VaList ap;

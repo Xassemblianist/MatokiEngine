@@ -697,4 +697,101 @@ TEST(matoki_trig_single_poly_accuracy) {
     }
 }
 
+TEST(matoki_texture2d_f32_and_sample_depth) {
+    const char* src =
+        "uniform sh_near: texture2d_f32 @clamp;\n"
+        "uniform sh_bili: texture2d_f32 @bilinear @clamp;\n"
+        "in uv: vec2;\n"
+        "fn frag() -> rgba {\n"
+        "    let d0 = sample_depth(sh_near, uv);\n"
+        "    let d1 = sample_depth(sh_bili, uv);\n"
+        "    let sz = tex_size(sh_near);\n"
+        "    return vec4(d0, d1, f32(sz.x), f32(sz.y));\n"
+        "}\n";
+
+    Arena arena;
+    arena_init(&arena, g_test_arena_buf, sizeof(g_test_arena_buf));
+    IrFunc ir;
+    MtkLayout layout;
+    MtkDiag diag;
+
+    CHECK(mtk_compile_ir(src, c_strlen(src), "shadow_f32.mtk", &arena, &ir, &layout, &diag));
+    CHECK(diag.count == 0);
+    CHECK(layout.texture_count == 2);
+    CHECK(layout.syms[0].kind == MTK_SYM_TEXTURE);
+    CHECK(layout.syms[0].type == MTK_TYPE_TEXTURE2D_F32);
+    CHECK(layout.syms[1].kind == MTK_SYM_TEXTURE);
+    CHECK(layout.syms[1].type == MTK_TYPE_TEXTURE2D_F32);
+
+    ir_optimize(&ir);
+    char err[256];
+    CHECK(ir_verify(&ir, err, sizeof(err)));
+
+    /* 4x4 f32 derinlik dokusu: d(x, y) = 0.1 * x + 0.2 * y + 0.05 */
+    f32 depth_buf[16];
+    for (u32 y = 0; y < 4; y++) {
+        for (u32 x = 0; x < 4; x++) {
+            depth_buf[y * 4 + x] = 0.1f * (f32)x + 0.2f * (f32)y + 0.05f;
+        }
+    }
+
+    Texture texs[2];
+    __builtin_memset(texs, 0, sizeof(texs));
+    texs[0].px = (u32*)depth_buf;
+    texs[0].w = 4; texs[0].h = 4;
+    texs[0].w_mask = 3; texs[0].h_mask = 3; texs[0].log2_w = 2;
+    texs[0].flags = TEX_FLAG_CLAMP | TEX_FLAG_F32;
+    texs[0].levels = 1;
+
+    texs[1] = texs[0];
+    texs[1].flags = TEX_FLAG_CLAMP | TEX_FLAG_BILINEAR | TEX_FLAG_F32;
+
+    QuadHeader q = { 0xFu, 0, 0 };
+    /* Lane 0: (0.125, 0.125) -> texel (0,0) = 0.05
+     * Lane 1: (0.5, 0.5)     -> nearest texel (2,2) = 0.65; bilinear merkez (1..2, 1..2) ort = 0.50
+     * Lane 2: (-0.5, 2.0)    -> clamp texel (0,3) = 0.65
+     * Lane 3: (0.875, 0.375) -> texel (3,1) = 0.55 */
+    f32 varyings[8] = {
+        0.125f, 0.5f, -0.5f, 0.875f,
+        0.125f, 0.5f,  2.0f, 0.375f
+    };
+    f32 out_rgba[16];
+
+    ShadeBatch batch;
+    __builtin_memset(&batch, 0, sizeof(batch));
+    batch.count         = 1;
+    batch.varying_count = 2;
+    batch.quads         = &q;
+    batch.varyings      = varyings;
+    batch.out_rgba      = out_rgba;
+    batch.textures      = texs;
+
+    ir_eval(&ir, &batch);
+
+    /* Nearest + clamp sonuçları (kanal 0) */
+    CHECK_NEAR(out_rgba[0 * 4 + 0], 0.05f, 1e-6);
+    CHECK_NEAR(out_rgba[0 * 4 + 1], 0.65f, 1e-6);
+    CHECK_NEAR(out_rgba[0 * 4 + 2], 0.65f, 1e-6);
+    CHECK_NEAR(out_rgba[0 * 4 + 3], 0.55f, 1e-6);
+
+    /* Bilinear + clamp sonuçları (kanal 1) */
+    CHECK_NEAR(out_rgba[1 * 4 + 0], 0.05f, 1e-6);
+    CHECK_NEAR(out_rgba[1 * 4 + 1], 0.50f, 1e-6);
+    CHECK_NEAR(out_rgba[1 * 4 + 2], 0.65f, 1e-6);
+    CHECK_NEAR(out_rgba[1 * 4 + 3], 0.55f, 1e-6);
+
+    /* tex_size(sh_near) = (4, 4) */
+    CHECK_NEAR(out_rgba[2 * 4 + 0], 4.0f, 1e-6);
+    CHECK_NEAR(out_rgba[3 * 4 + 0], 4.0f, 1e-6);
+
+    /* Negatif sema testleri: sample/sample_depth tip uyuşmazlığı ve @mipmap yasağı */
+    const char* bad1 = "uniform s: texture2d_f32;\nin uv: vec2;\nfn frag() -> rgba { return sample(s, uv); }\n";
+    const char* bad2 = "uniform t: texture2d;\nin uv: vec2;\nfn frag() -> rgba { return vec4(sample_depth(t, uv)); }\n";
+    const char* bad3 = "uniform s: texture2d_f32 @mipmap;\nfn frag() -> rgba { return vec4(1.0); }\n";
+    CHECK(!mtk_compile_ir(bad1, c_strlen(bad1), "b1.mtk", &arena, &ir, &layout, &diag) && diag.count > 0);
+    CHECK(!mtk_compile_ir(bad2, c_strlen(bad2), "b2.mtk", &arena, &ir, &layout, &diag) && diag.count > 0);
+    CHECK(!mtk_compile_ir(bad3, c_strlen(bad3), "b3.mtk", &arena, &ir, &layout, &diag) && diag.count > 0);
+}
+
+
 

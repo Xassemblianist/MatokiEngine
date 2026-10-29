@@ -31,6 +31,7 @@ typedef struct Texture {
 #define TEX_FLAG_CLAMP     1u   /* yoksa wrap */
 #define TEX_FLAG_BILINEAR  2u   /* yoksa en yakın komşu */
 #define TEX_FLAG_MIPMAP    4u   /* sample() seviyeyi quad türevlerinden seçer */
+#define TEX_FLAG_F32       8u   /* px aslında f32* (tek kanal f32 doku: texture2d_f32 / sample_depth) */
 
 /* MIP ZİNCİRİ YERLEŞİMİ (DECISIONS D-086): tüm seviyeler px'ten başlayarak bitişik.
  *  w = 2^a, h = 2^b; seviye k (0 <= k < levels): wk = w >> k, hk = h >> k;
@@ -49,7 +50,9 @@ typedef struct Texture {
  *  Bilinear:  fu = u * w - 0.5, fv = v * h - 0.5; x0 = floor(fu), y0 = floor(fv)
  *             ax = fu - x0, ay = fv - y0; 4 texel (x0|x0+1, y0|y0+1) yukarıdaki wrap/clamp ile
  *             sonuç = lerp(lerp(t00, t10, ax), lerp(t01, t11, ax), ay)   (kanal başına, f32)
- *  Texel → f32: kanal / 255.0f, sıra R,G,B,A (px & 0xFF = R). Örnekleme sonrası sRGB dönüşümü YOK. */
+ *  Texel → f32: kanal / 255.0f, sıra R,G,B,A (px & 0xFF = R). Örnekleme sonrası sRGB dönüşümü YOK.
+ *  Tek kanal f32 (texture2d_f32 / sample_depth): px doğrudan f32* (ör. fb.depth) dizisidir;
+ *  32-bit texel bit-yeniden-yorumlama (f32.reinterpret_i32) ile doğrudan f32 olarak okunur. */
 
 typedef struct {
     u32         count;           /* batch'teki quad sayısı (<= SHADE_MAX_QUADS) */

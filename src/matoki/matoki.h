@@ -34,6 +34,7 @@ typedef enum {
     MTK_TYPE_MAT3,
     MTK_TYPE_MAT4,
     MTK_TYPE_TEXTURE2D,
+    MTK_TYPE_TEXTURE2D_F32,
     MTK_TYPE_COUNT
 } MtkType;
 
@@ -73,6 +74,7 @@ b32         mtk_type_is_float(MtkType t);
 b32         mtk_type_is_int(MtkType t);
 b32         mtk_type_is_vector(MtkType t);
 b32         mtk_type_is_matrix(MtkType t);
+b32         mtk_type_is_texture(MtkType t);
 MtkType     mtk_type_scalar_base(MtkType t);
 MtkType     mtk_type_make_vector(MtkType scalar_base, u32 comps);
 

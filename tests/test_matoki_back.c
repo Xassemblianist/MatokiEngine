@@ -11,6 +11,7 @@
 
 #include "test.h"
 #include "core/arena.h"
+#include "core/math.h"
 #include "core/rng.h"
 #include "core/log.h"
 #include "matoki/ir.h"
@@ -18,6 +19,7 @@
 #include "matoki/variant.h"
 #include "matoki/matoki.h"
 #include "masm/mdis.h"
+#include "raster/ref_shaders.h"
 
 static void ensure_matoki_test_dir(void) {
     mkdir("build", 0755);
@@ -980,4 +982,355 @@ TEST(matoki_alpha_cmp_int_fold) {
     CHECK(strstr(dr.wat, "f32x4.lt") == NULL);
     CHECK(strstr(dr.wat, "i32x4.lt_s") != NULL);
     CHECK(strstr(dr.wat, "v128.const i32x4 3 3 3 3") != NULL);
+}
+
+/* M14_B (D-107): shaders/pbr3d.mtk (texture2d_f32 + sample_depth) için:
+ *  1) ir_eval, Wasm SIMD ve Wasm fused çıktılarının bit-bit eşdeğerliği,
+ *  2) C referansı (ref_shade_pbr3d) ile eşdeğerliği,
+ *  3) Önceki 24-bit RGB kodlu gölge haritası + sdepth() yaklaşımıyla eşdeğerliği. */
+static f32 host_pbr_sample_depth(const Texture* sht, f32 u, f32 v) {
+    i32 wi = (i32)sht->w;
+    i32 hi = (i32)sht->h;
+    i32 tx = (i32)m_floor(u * (f32)wi);
+    i32 ty = (i32)m_floor(v * (f32)hi);
+    if (sht->flags & TEX_FLAG_CLAMP) {
+        tx = CLAMP(tx, 0, wi - 1);
+        ty = CLAMP(ty, 0, hi - 1);
+    } else {
+        tx &= (i32)sht->w_mask;
+        ty &= (i32)sht->h_mask;
+    }
+    const f32* depth_px = (const f32*)sht->px;
+    return depth_px[((u32)ty << sht->log2_w) + (u32)tx];
+}
+
+static void host_ref_shade_pbr3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    const Texture* tex = &batch->textures[0];
+    const Texture* sht = &batch->textures[1];
+    const f32 k_pi = 3.14159265f;
+    i32 level = 0;
+    for (u32 i = 0; i < n; i++) {
+        if ((i & 3u) == 0u && (tex->flags & TEX_FLAG_MIPMAP)) {
+            level = ref_tex_mip_level(tex, &v[i], &v[n + i]);
+        }
+        f32 tc[4];
+        ref_sample_tex_level(tex, v[i], v[n + i], level, tc);
+        f32 alb[3], f0[3];
+        for (u32 k = 0; k < 3; k++) { tc[k] *= u[20 + k]; alb[k] = tc[k] * tc[k]; }
+        tc[3] *= u[23];
+        f32 metal = u[24], rough = m_max(u[25], 0.04f);
+
+        f32 nx = v[2u * n + i], ny = v[3u * n + i], nz = v[4u * n + i];
+        f32 il = 1.0f / m_sqrt(nx * nx + ny * ny + nz * nz);
+        nx *= il; ny *= il; nz *= il;
+        f32 vx = u[16] - v[6u * n + i], vy = u[17] - v[7u * n + i], vz = u[18] - v[8u * n + i];
+        il = 1.0f / m_sqrt(vx * vx + vy * vy + vz * vz);
+        vx *= il; vy *= il; vz *= il;
+        f32 hx = vx + u[0], hy = vy + u[1], hz = vz + u[2];
+        il = 1.0f / m_sqrt(hx * hx + hy * hy + hz * hz);
+        hx *= il; hy *= il; hz *= il;
+        f32 ndl = m_max(nx * u[0] + ny * u[1] + nz * u[2], 0.0f);
+        f32 ndv = m_max(nx * vx + ny * vy + nz * vz, 0.0001f);
+        f32 ndh = m_max(nx * hx + ny * hy + nz * hz, 0.0f);
+        f32 vdh = m_max(vx * hx + vy * hy + vz * hz, 0.0f);
+
+        f32 sz = u[27], dt = 1.0f / sz;
+        f32 stx = v[9u * n + i] * sz - 0.5f, sty = v[10u * n + i] * sz - 0.5f;
+        f32 flx = m_floor(stx), fly = m_floor(sty);
+        f32 frx = stx - flx, fry = sty - fly;
+        f32 p0x = (flx + 0.5f) * dt, p0y = (fly + 0.5f) * dt;
+        f32 z = v[11u * n + i] + u[26];
+        f32 s4[4];
+        for (u32 k = 0; k < 4; k++) {
+            f32 d = host_pbr_sample_depth(sht, p0x + (f32)(k & 1u) * dt, p0y + (f32)(k >> 1) * dt);
+            s4[k] = (z >= d) ? 1.0f : 0.0f;
+        }
+        f32 a0 = s4[0] + (s4[1] - s4[0]) * frx, a1 = s4[2] + (s4[3] - s4[2]) * frx;
+        f32 sh = a0 + (a1 - a0) * fry;
+
+        f32 a = rough * rough, a2 = a * a;
+        f32 dd = ndh * ndh * (a2 - 1.0f) + 1.0f;
+        f32 dist = a2 / (k_pi * dd * dd);
+        f32 kk = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
+        f32 vis = 0.25f / ((ndl * (1.0f - kk) + kk) * (ndv * (1.0f - kk) + kk));
+        f32 x = 1.0f - vdh, x2 = x * x, fw = x2 * x2 * x;
+        f32 hemi_t = ny * 0.5f + 0.5f;
+        f32 fogf = m_clamp(v[5u * n + i] * u[31], 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f0[k] = 0.04f + (alb[k] - 0.04f) * metal;
+            f32 fres = f0[k] + (1.0f - f0[k]) * fw;
+            f32 kd = (1.0f - fres) * (1.0f - metal);
+            f32 direct = (kd * alb[k] * (1.0f / k_pi) + fres * (dist * vis)) * u[4 + k] * (ndl * sh);
+            f32 hemi = u[12 + k] + (u[8 + k] - u[12 + k]) * hemi_t;
+            f32 amb = hemi * (alb[k] * (1.0f - metal) + f0[k] * ((1.0f - rough) * 0.5f + 0.25f));
+            f32 c = direct + amb;
+            c = c + (u[28 + k] - c) * fogf;
+            f32 tm = (c * (c * 2.51f + 0.03f)) / (c * (c * 2.43f + 0.59f) + 0.14f);
+            o[k * n + i] = m_sqrt(m_clamp(tm, 0.0f, 1.0f));
+        }
+        o[3u * n + i] = tc[3];
+    }
+}
+
+TEST(matoki_pbr3d_shadow_f32_jit_and_ref) {
+    ensure_matoki_test_dir();
+
+    static u8 arena_buf[MB(4)];
+    Arena arena;
+    arena_init(&arena, arena_buf, sizeof(arena_buf));
+
+    FILE* fp = fopen("shaders/pbr3d.mtk", "rb");
+    CHECK(fp != NULL);
+    char pbr_src[8192];
+    u32 pbr_len = (u32)fread(pbr_src, 1, sizeof(pbr_src) - 1, fp);
+    fclose(fp);
+    pbr_src[pbr_len] = '\0';
+    CHECK(pbr_len > 100);
+
+    IrFunc ir_new;
+    MtkLayout layout;
+    MtkDiag diag;
+    CHECK(mtk_compile_ir(pbr_src, pbr_len, "shaders/pbr3d.mtk", &arena, &ir_new, &layout, &diag));
+    CHECK(diag.count == 0);
+    CHECK(layout.texture_count == 2);
+    CHECK(layout.syms[layout.sym_count - 6].type == MTK_TYPE_TEXTURE2D_F32);
+    ir_optimize(&ir_new);
+
+    char err[256];
+    CHECK(ir_verify(&ir_new, err, sizeof(err)));
+
+    MtkCodegenOpts opts_simd  = { FALSE, TRUE, MTK_FUSE_NONE };
+    MtkCodegenOpts opts_fused = { FALSE, TRUE, MTK_FUSE_REPLACE };
+    u8 wasm_simd[65536], wasm_fused[65536];
+    u32 len_simd  = mtk_codegen(&ir_new, &opts_simd,  &arena, wasm_simd,  sizeof(wasm_simd),  err, sizeof(err));
+    u32 len_fused = mtk_codegen(&ir_new, &opts_fused, &arena, wasm_fused, sizeof(wasm_fused), err, sizeof(err));
+    CHECK(len_simd > 0 && len_fused > 0);
+
+    FILE* f_simd = fopen("build/test_matoki/pbr3d_simd.wasm", "wb");
+    CHECK(f_simd != NULL);
+    fwrite(wasm_simd, 1, len_simd, f_simd);
+    fclose(f_simd);
+
+    FILE* f_fusd = fopen("build/test_matoki/pbr3d_fused.wasm", "wb");
+    CHECK(f_fusd != NULL);
+    fwrite(wasm_fused, 1, len_fused, f_fusd);
+    fclose(f_fusd);
+
+    CHECK(system("wasm-validate --enable-all build/test_matoki/pbr3d_simd.wasm") == 0);
+    CHECK(system("wasm-validate --enable-all build/test_matoki/pbr3d_fused.wasm") == 0);
+
+    /* 8x8 albedo (RGBA8) ve 8x8 gölge derinliği (f32) dokuları */
+    Rng rng;
+    rng_seed(&rng, 0x14B0F32ULL);
+    u32 alb_px[64];
+    f32 sh_depth[64];
+    u32 sh_rgb24[64];
+    for (u32 i = 0; i < 64; i++) {
+        alb_px[i] = rng_u32(&rng) | 0xFF000000u;
+        f32 d = 0.15f + 0.7f * rng_f32(&rng);
+        sh_depth[i] = d;
+        u32 q = (u32)(d * 16777215.0f + 0.5f);
+        if (q > 0xFFFFFFu) q = 0xFFFFFFu;
+        sh_rgb24[i] = ((q >> 16) & 0xFFu) | (((q >> 8) & 0xFFu) << 8) | ((q & 0xFFu) << 16) | 0xFF000000u;
+    }
+
+    Texture texs_new[2];
+    memset(texs_new, 0, sizeof(texs_new));
+    texs_new[0].px = alb_px; texs_new[0].w = 8; texs_new[0].h = 8;
+    texs_new[0].w_mask = 7; texs_new[0].h_mask = 7; texs_new[0].log2_w = 3;
+    texs_new[0].flags = TEX_FLAG_BILINEAR; texs_new[0].levels = 1;
+
+    texs_new[1].px = (u32*)sh_depth; texs_new[1].w = 8; texs_new[1].h = 8;
+    texs_new[1].w_mask = 7; texs_new[1].h_mask = 7; texs_new[1].log2_w = 3;
+    texs_new[1].flags = TEX_FLAG_CLAMP | TEX_FLAG_F32; texs_new[1].levels = 1;
+
+    /* PBR uniform bloğu (128 byte = 32 x f32) */
+    _Alignas(16) f32 u_f32[32] = {
+        /* sun_dir@0 */  0.36f, 0.80f, 0.48f, 0.0f,
+        /* sun_col@4 */  2.5f,  2.3f,  2.0f,  0.0f,
+        /* sky_col@8 */  0.25f, 0.35f, 0.50f, 0.0f,
+        /* gnd_col@12 */ 0.10f, 0.08f, 0.06f, 0.0f,
+        /* eye@16 */     0.0f,  3.0f,  5.0f,  0.0f,
+        /* base@20 */    0.9f,  0.85f, 0.8f,  1.0f,
+        /* mat@24 */     0.2f,  0.45f, -0.002f, 8.0f,
+        /* fog@28 */     0.5f,  0.6f,  0.7f,  0.02f
+    };
+
+    enum { Q = 4, VCOUNT = 12 };
+    QuadHeader quads_eval[Q], quads_simd[Q];
+    for (u32 q = 0; q < Q; q++) {
+        quads_eval[q].mask = 0xFu;
+        quads_eval[q].x    = (u16)(q * 2);
+        quads_eval[q].y    = 0;
+        quads_simd[q]      = quads_eval[q];
+    }
+
+    /* Varying SoA: uv(0,1), nrm(2,3,4), depth(5), wpos(6,7,8), spos(9,10,11) */
+    f32 varyings[VCOUNT * Q * 4];
+    for (u32 i = 0; i < Q * 4; i++) {
+        f32 t = (f32)i / 15.0f;
+        varyings[0  * Q * 4 + i] = 0.1f + 0.8f * t;           /* u */
+        varyings[1  * Q * 4 + i] = 0.2f + 0.6f * t;           /* v */
+        varyings[2  * Q * 4 + i] = 0.1f * (t - 0.5f);         /* nx */
+        varyings[3  * Q * 4 + i] = 0.95f;                     /* ny */
+        varyings[4  * Q * 4 + i] = 0.2f;                      /* nz */
+        varyings[5  * Q * 4 + i] = 4.0f + 2.0f * t;           /* depth */
+        varyings[6  * Q * 4 + i] = -1.0f + 2.0f * t;          /* wx */
+        varyings[7  * Q * 4 + i] = 0.0f;                      /* wy */
+        varyings[8  * Q * 4 + i] = -2.0f + t;                 /* wz */
+        varyings[9  * Q * 4 + i] = 0.15f + 0.7f * t;          /* spos.x */
+        varyings[10 * Q * 4 + i] = 0.25f + 0.5f * t;          /* spos.y */
+        /* spos.z: gölge haritasındaki derinliklerin etrafında tarama */
+        varyings[11 * Q * 4 + i] = sh_depth[(i * 3) & 63] + ((i & 1) ? 0.02f : -0.02f);
+    }
+
+    f32 eval_rgba[4 * Q * 4];
+    u32 fb_dummy[DIFF_FB_PIXELS];
+    memset(fb_dummy, 0, sizeof(fb_dummy));
+
+    ShadeBatch batch = {0};
+    batch.count         = Q;
+    batch.varying_count = VCOUNT;
+    batch.quads         = quads_eval;
+    batch.varyings      = varyings;
+    batch.uniforms      = (const u8*)u_f32;
+    batch.out_rgba      = eval_rgba;
+    batch.textures      = texs_new;
+    batch.fb_px         = fb_dummy;
+    batch.fb_stride     = DIFF_FB_W;
+
+    CHECK(write_batch_bin("build/test_matoki/pbr3d_in.bin", &batch, sizeof(u_f32), 2,
+                          DIFF_FB_W, DIFF_FB_H, fb_dummy));
+    ir_eval(&ir_new, &batch);
+
+    u32 eval_fb[DIFF_FB_PIXELS];
+    memset(eval_fb, 0, sizeof(eval_fb));
+    f32 dummy_rgba[4 * Q * 4];
+    QuadHeader quads_f_eval[Q];
+    for (u32 q = 0; q < Q; q++) quads_f_eval[q] = quads_simd[q];
+    ShadeBatch batch_f_eval = batch;
+    batch_f_eval.quads    = quads_f_eval;
+    batch_f_eval.out_rgba = dummy_rgba;
+    batch_f_eval.fb_px    = eval_fb;
+    ir_eval_ex(&ir_new, &batch_f_eval, MTK_FUSE_REPLACE);
+
+    CHECK(system("node tools/host/run_shade.mjs build/test_matoki/pbr3d_simd.wasm "
+                 "build/test_matoki/pbr3d_in.bin build/test_matoki/pbr3d_out_simd.bin") == 0);
+    CHECK(system("node tools/host/run_shade.mjs build/test_matoki/pbr3d_fused.wasm "
+                 "build/test_matoki/pbr3d_in.bin build/test_matoki/pbr3d_out_fused.bin") == 0);
+
+    f32 simd_rgba[4 * Q * 4], fused_rgba[4 * Q * 4];
+    u32 simd_masks[Q], fused_masks[Q], out_fb[DIFF_FB_PIXELS], out_fb_fused[DIFF_FB_PIXELS];
+    CHECK(read_output_bin("build/test_matoki/pbr3d_out_simd.bin", Q, simd_rgba, simd_masks, DIFF_FB_PIXELS, out_fb));
+    CHECK(read_output_bin("build/test_matoki/pbr3d_out_fused.bin", Q, fused_rgba, fused_masks, DIFF_FB_PIXELS, out_fb_fused));
+
+    /* 1) ir_eval == Wasm SIMD (hem standart hem fused modda bit-bit aynı) + C referans ref_shade_pbr3d eşdeğerliği */
+    f32 ref_rgba[4 * Q * 4];
+    QuadHeader quads_ref[Q];
+    for (u32 q = 0; q < Q; q++) quads_ref[q] = quads_eval[q];
+    ShadeBatch batch_ref = batch;
+    batch_ref.quads    = quads_ref;
+    batch_ref.out_rgba = ref_rgba;
+    host_ref_shade_pbr3d(&batch_ref);
+
+    for (u32 i = 0; i < 4 * Q * 4; i++) {
+        CHECK(f32_bit_eq_or_nan(simd_rgba[i], eval_rgba[i]));
+        CHECK_NEAR(simd_rgba[i], ref_rgba[i], 1e-6);
+    }
+    for (u32 px = 0; px < DIFF_FB_PIXELS; px++) {
+        CHECK(out_fb_fused[px] == eval_fb[px]);
+    }
+
+    /* 2) Önceki 24-bit RGB kodlu gölge haritası + sdepth() shader'ı ile karşılaştırma */
+    const char* legacy_sdepth_patch =
+        "uniform sun_dir: vec3;\n"
+        "uniform sun_col: vec3;\n"
+        "uniform sky_col: vec3;\n"
+        "uniform gnd_col: vec3;\n"
+        "uniform eye:     vec3;\n"
+        "uniform base:    vec4;\n"
+        "uniform mat:     vec4;\n"
+        "uniform fog:     vec4;\n"
+        "uniform albedo:  texture2d @bilinear @mipmap;\n"
+        "uniform shadow:  texture2d @clamp;\n"
+        "in uv:    vec2;\n"
+        "in nrm:   vec3;\n"
+        "in depth: f32;\n"
+        "in wpos:  vec3;\n"
+        "in spos:  vec3;\n"
+        "const PI = 3.14159265;\n"
+        "fn sdepth(t: vec4) -> f32 {\n"
+        "    return t.r * 0.99609381 + t.g * 0.0038910 + t.b * 0.0000152;\n"
+        "}\n"
+        "fn lit_tap(p: vec2, z: f32) -> f32 {\n"
+        "    return step(sdepth(sample(shadow, p)), z);\n"
+        "}\n";
+    const char* frag_pos = strstr(pbr_src, "fn frag()");
+    CHECK(frag_pos != NULL);
+    char legacy_src[8192];
+    snprintf(legacy_src, sizeof(legacy_src), "%s%s", legacy_sdepth_patch, frag_pos);
+
+    IrFunc ir_old;
+    MtkLayout layout_old;
+    CHECK(mtk_compile_ir(legacy_src, (u32)strlen(legacy_src), "pbr3d_old.mtk", &arena, &ir_old, &layout_old, &diag));
+    ir_optimize(&ir_old);
+
+    /* Yeni pbr3d.mtk döngü içi komut sayısı ve wasm boyutu eski RGB24 çözmeli sürümden küçük olmalı */
+    CHECK(ir_count_loop_insts(&ir_new) < ir_count_loop_insts(&ir_old));
+
+    Texture texs_old[2] = { texs_new[0], texs_new[1] };
+    texs_old[1].px    = sh_rgb24;
+    texs_old[1].flags = TEX_FLAG_CLAMP;
+
+    f32 old_rgba[4 * Q * 4];
+    QuadHeader quads_old[Q];
+    for (u32 q = 0; q < Q; q++) quads_old[q] = quads_eval[q];
+    ShadeBatch batch_old = batch;
+    batch_old.quads    = quads_old;
+    batch_old.out_rgba = old_rgba;
+    batch_old.textures = texs_old;
+    ir_eval(&ir_old, &batch_old);
+
+    for (u32 i = 0; i < 4 * Q * 4; i++) {
+        CHECK_NEAR(eval_rgba[i], old_rgba[i], 1e-5);
+    }
+
+    /* 3) Varyant istatistikleri (IR/Wasm döngü komut sayısı ve modül boyutu) */
+    Arena cache_arena = arena_sub(&arena, KB(512));
+    MtkVariantCache vcache;
+    mtk_variant_cache_init(&vcache, &cache_arena);
+    MtkVariantKey k_old, k_new;
+    memset(&k_old, 0, sizeof(k_old));
+    k_old.src      = legacy_src;
+    k_old.src_len  = (u32)strlen(legacy_src);
+    k_old.src_hash = mtk_hash_source(k_old.src, k_old.src_len);
+    k_old.cg_opts  = opts_simd;
+
+    memset(&k_new, 0, sizeof(k_new));
+    k_new.src      = pbr_src;
+    k_new.src_len  = pbr_len;
+    k_new.src_hash = mtk_hash_source(k_new.src, k_new.src_len);
+    k_new.cg_opts  = opts_simd;
+
+    const MtkVariant* v_old = mtk_variant_get(&vcache, &k_old, &arena, &diag);
+    const MtkVariant* v_new = mtk_variant_get(&vcache, &k_new, &arena, &diag);
+    CHECK(v_old != NULL && v_new != NULL);
+    CHECK(v_new->loop_inst_count < v_old->loop_inst_count);
+    CHECK(v_new->wasm_loop_ops < v_old->wasm_loop_ops);
+    CHECK(v_new->wasm_len < v_old->wasm_len);
+
+    FILE* f_old = fopen("build/test_matoki/pbr3d_old.wasm", "wb");
+    CHECK(f_old != NULL);
+    fwrite(v_old->wasm, 1, v_old->wasm_len, f_old);
+    fclose(f_old);
+
+    printf("  [bench M14_B IR/Wasm] pbr3d.mtk: IR %u -> %u, dongu IR %u -> %u, Wasm dongu op %u -> %u, Wasm boyutu %u -> %u B\n",
+           ir_old.count, ir_new.count,
+           v_old->loop_inst_count, v_new->loop_inst_count,
+           v_old->wasm_loop_ops, v_new->wasm_loop_ops,
+           v_old->wasm_len, v_new->wasm_len);
 }

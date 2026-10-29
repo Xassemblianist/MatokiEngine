@@ -221,7 +221,7 @@ static MtkType check_type_ctor(Sema* s, AstExpr* e, MtkType target) {
             return target;
         }
         MtkType src_t = e->as.call.args[0]->type;
-        if (mtk_type_components(src_t) != 1 || src_t == MTK_TYPE_TEXTURE2D) {
+        if (mtk_type_components(src_t) != 1 || mtk_type_is_texture(src_t)) {
             sema_error(s, e->line, e->col, "'%s' tipinden '%s' tipine donusum gecersiz",
                        mtk_type_name(src_t), mtk_type_name(target));
         }
@@ -301,6 +301,28 @@ static MtkType check_builtin_call(Sema* s, AstExpr* e, b32* out_handled) {
         return e->type;
     }
 
+    /* sample_depth(tex, uv) -> f32 (tek kanal f32 doku örneklemesi) */
+    if (str_eq(name, "sample_depth")) {
+        for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
+        e->type = MTK_TYPE_F32;
+        if (argc != 2) {
+            sema_error(s, e->line, e->col, "'sample_depth' 2 arguman bekler: (texture2d_f32, vec2)");
+            return e->type;
+        }
+        if (e->as.call.args[0]->type != MTK_TYPE_TEXTURE2D_F32) {
+            sema_error(s, e->as.call.args[0]->line, e->as.call.args[0]->col,
+                       "'sample_depth' ilk argumani 'texture2d_f32' olmalidir (bulunan '%s')",
+                       mtk_type_name(e->as.call.args[0]->type));
+        }
+        if (e->as.call.args[1]->type != MTK_TYPE_VEC2) {
+            sema_error(s, e->as.call.args[1]->line, e->as.call.args[1]->col,
+                       "'sample_depth' ikinci argumani 'vec2' olmalidir (bulunan '%s')",
+                       mtk_type_name(e->as.call.args[1]->type));
+        }
+        e->is_varying = e->as.call.args[1]->is_varying;
+        return e->type;
+    }
+
     /* sample_level(tex, uv, level: i32) -> vec4 (açık mip seviyesi) */
     if (str_eq(name, "sample_level")) {
         for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
@@ -331,7 +353,7 @@ static MtkType check_builtin_call(Sema* s, AstExpr* e, b32* out_handled) {
     /* tex_size(tex) -> ivec2 */
     if (str_eq(name, "tex_size")) {
         for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
-        if (argc != 1 || e->as.call.args[0]->type != MTK_TYPE_TEXTURE2D) {
+        if (argc != 1 || !mtk_type_is_texture(e->as.call.args[0]->type)) {
             sema_error(s, e->line, e->col, "'tex_size' tek bir 'texture2d' argumani bekler");
         }
         e->is_varying = FALSE;
@@ -625,7 +647,7 @@ static MtkType check_expr(Sema* s, AstExpr* e) {
         /* Karşılaştırmalar: ==, !=, <, <=, >, >= */
         if (op == TOK_EQ || op == TOK_NE || op == TOK_LT || op == TOK_LE || op == TOK_GT || op == TOK_GE) {
             b32 scalar_ok = (mtk_type_components(lt) == 1) && (lt == rt);
-            if (!scalar_ok || lt == MTK_TYPE_TEXTURE2D ||
+            if (!scalar_ok || mtk_type_is_texture(lt) ||
                 ((op != TOK_EQ && op != TOK_NE) && lt == MTK_TYPE_BOOL)) {
                 sema_error(s, e->line, e->col, "'%s' karsilastirmasi uyumsuz tipler arasinda ('%s', '%s')",
                            token_kind_name(op), mtk_type_name(lt), mtk_type_name(rt));
@@ -826,7 +848,7 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
         MtkType init_t = check_expr(s, st->as.var_decl.init);
         MtkType decl_t = st->as.var_decl.decl_type;
         if (decl_t != MTK_TYPE_VOID) {
-            if (decl_t == MTK_TYPE_TEXTURE2D || mtk_type_is_matrix(decl_t)) {
+            if (mtk_type_is_texture(decl_t) || mtk_type_is_matrix(decl_t)) {
                 sema_error(s, st->as.var_decl.type_line, st->as.var_decl.type_col,
                            "yerel degisken tipi '%s' olamaz", mtk_type_name(decl_t));
             }
@@ -841,7 +863,7 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
                            name, mtk_type_name(decl_t), mtk_type_name(init_t));
             }
         } else {
-            if (init_t == MTK_TYPE_VOID || init_t == MTK_TYPE_TEXTURE2D || mtk_type_is_matrix(init_t)) {
+            if (init_t == MTK_TYPE_VOID || mtk_type_is_texture(init_t) || mtk_type_is_matrix(init_t)) {
                 sema_error(s, st->line, st->col, "'%s' degiskeni gecersiz '%s' tipiyle ilklendirilemez",
                            name, mtk_type_name(init_t));
                 decl_t = MTK_TYPE_F32;
@@ -1054,7 +1076,7 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
                 sema_error(&s, d->line, d->col, "uniform '%s' gecersiz tipe sahip", d->name);
                 continue;
             }
-            if (d->type == MTK_TYPE_TEXTURE2D) {
+            if (mtk_type_is_texture(d->type)) {
                 u32 slot = out_layout ? out_layout->texture_count : 0;
                 if (slot >= SHADE_MAX_TEXTURES) {
                     sema_error(&s, d->line, d->col, "en fazla %u texture2d tanimlanabilir", SHADE_MAX_TEXTURES);
@@ -1156,14 +1178,14 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
         s.scope_depth     = 1;
         s.in_varying_cond = FALSE;
 
-        if (d->type == MTK_TYPE_TEXTURE2D || mtk_type_is_matrix(d->type)) {
+        if (mtk_type_is_texture(d->type) || mtk_type_is_matrix(d->type)) {
             sema_error(&s, d->type_line, d->type_col,
                        "fonksiyon donus tipi '%s' olamaz", mtk_type_name(d->type));
         }
 
         for (u32 p = 0; p < d->as.fn_decl.param_count; p++) {
             AstParam* prm = &d->as.fn_decl.params[p];
-            if (prm->type == MTK_TYPE_VOID || prm->type == MTK_TYPE_TEXTURE2D ||
+            if (prm->type == MTK_TYPE_VOID || mtk_type_is_texture(prm->type) ||
                 mtk_type_is_matrix(prm->type)) {
                 sema_error(&s, prm->line, prm->col,
                            "parametre '%s' gecersiz '%s' tipinde olamaz",

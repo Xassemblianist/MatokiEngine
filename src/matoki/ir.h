@@ -127,6 +127,8 @@ void ir_emit_sample(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags, u32 out_rgba[4
 void ir_emit_sample_level(IrFunc* f, u32 slot, u32 u, u32 v, u32 level, u32 flags, u32 out_rgba[4]);
 /* sample() için mip seviyesi (i32) — C referansı ref_tex_mip_level ile bit-bit aynı */
 u32  ir_emit_mip_level(IrFunc* f, u32 slot, u32 u, u32 v);
+/* sample_depth(tex, u, v) genişletmesi: tek kanal f32 doku (texture2d_f32) okuma (DECISIONS D-107). */
+u32  ir_emit_sample_depth(IrFunc* f, u32 slot, u32 u, u32 v, u32 flags);
 
 /* ---------- Doğrulama ve yazdırma ---------- */
 /* Her operand tanımdan önce mi, tipler tutarlı mı, IF dengeli mi, OUTPUT 4 kanal mı.

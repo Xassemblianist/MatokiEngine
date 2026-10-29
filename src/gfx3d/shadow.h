@@ -1,6 +1,7 @@
 /* gfx3d/shadow.h — Yönlü ışık (güneş) için gölge haritası: ışık uzayında ortografik, reverse-Z,
- * yalnız-derinlik geçişi (raster shade_fn = NULL), ardından derinliğin 24 bitlik RGB'ye kodlanıp
- * shader'ın örnekleyebileceği bir Texture'a yazılması (px = gölge framebuffer'ının renk tamponu).
+ * yalnız-derinlik geçişi (raster shade_fn = NULL). Gölge dokusu (tex.px) kodlama yapılmadan
+ * doğrudan fb.depth tamponuna (TEX_FLAG_F32 | TEX_FLAG_CLAMP) işaret eder; Matoki shader'ı
+ * sample_depth() ile f32 derinliği doğrudan okur (DECISIONS D-107).
  * Kırpma kutusu kameraya göre bir küreye oturtulur ve texel ızgarasına hizalanır (kamera hareketinde titreme yok).
  */
 #ifndef GFX3D_SHADOW_H
@@ -14,8 +15,8 @@
 #include "gfx3d/pipeline.h"
 
 typedef struct {
-    Framebuffer fb;          /* depth: gölge derinliği; px: kodlanmış doku pikselleri */
-    Texture     tex;         /* px = fb.px, CLAMP + en yakın komşu */
+    Framebuffer fb;          /* depth: gölge derinliği (f32) */
+    Texture     tex;         /* px = (u32*)fb.depth, TEX_FLAG_CLAMP | TEX_FLAG_F32 */
     u32         size;
     Mat4        view, proj;  /* ışık görüşü ve ortografik izdüşüm */
     Mat4        world_to_tex;/* dünya → (u, v, derinlik); g3d_set_shadow'a verilir */
@@ -30,11 +31,7 @@ void shadow_fit(ShadowMap* s, Vec3 sun_dir, Vec3 center, f32 radius, f32 caster_
 void shadow_begin(ShadowMap* s, G3dContext* ctx, Rasterizer* r, Arena* frame);
 /* Gölge düşüren materyal: yalnız derinlik, ön yüzleri ayıklar (arka yüzler yazılır → daha az "acne") */
 G3dMaterial shadow_caster_material(void);
-/* flush + derinliği dokuya kodlar */
+/* raster_flush ile gölge derinlik geçişini tamamlar (kodlama yok, fb.depth doğrudan okunur) */
 void shadow_end(ShadowMap* s, Rasterizer* r);
-
-/* Kodlama (testler ve C referans shader'ı için): d ∈ [0,1] → RGB 24 bit, a = 255 */
-u32 shadow_encode_depth(f32 d);
-f32 shadow_decode_texel(u32 px);
 
 #endif

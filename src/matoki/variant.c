@@ -169,10 +169,11 @@ const MtkVariant* mtk_variant_get(MtkVariantCache* cache, const MtkVariantKey* k
     if (key->sampler_mask != 0) {
         for (u32 i = 0; i < prog.decl_count; i++) {
             AstDecl* d = prog.decls[i];
-            if (d->kind == AST_DECL_UNIFORM && d->type == MTK_TYPE_TEXTURE2D) {
+            if (d->kind == AST_DECL_UNIFORM && mtk_type_is_texture(d->type)) {
                 u32 slot = d->as.uniform_decl.offset_or_slot;
                 if (slot < SHADE_MAX_TEXTURES && (key->sampler_mask & (1u << slot))) {
-                    d->as.uniform_decl.tex_flags = key->sampler_flags[slot];
+                    u32 f32_bit = (d->type == MTK_TYPE_TEXTURE2D_F32) ? TEX_FLAG_F32 : 0u;
+                    d->as.uniform_decl.tex_flags = key->sampler_flags[slot] | f32_bit;
                 }
             }
         }

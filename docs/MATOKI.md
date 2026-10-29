@@ -42,14 +42,15 @@ fn frag() -> rgba {
 | `ivec2 ivec3 ivec4` | i32 vektörleri |
 | `mat3 mat4` | sütun-öncelikli (sadece uniform olarak, v0) |
 | `rgba` | `vec4` takma adı (0..1 aralığında renk) |
-| `texture2d` | sadece uniform, opak tanıtıcı |
+| `texture2d` | sadece uniform, opak RGBA8 doku tanıtıcısı |
+| `texture2d_f32` | sadece uniform, opak tek kanal `f32` doku tanıtıcısı (ör. gölge derinlik tamponu) |
 
 Örtük dönüşüm YOK, `f32(x)`, `i32(x)` açıkça yazılır. Swizzle: `v.xy`, `c.rgb`, `v.zyx`.
 
 ## 5. Bildirimler
 
 - `uniform isim: tip;` → uniform bloğuna sırayla, 16-byte hizalı yerleşir. C tarafı yerleşimi derleyicinin döndürdüğü tablodan öğrenir.
-  `texture2d` uniform bildirimlerinde örnekleyici bayrakları opsiyonel niteliklerle belirtilir: `uniform tex: texture2d @bilinear @clamp;` (varsayılan: en yakın komşu + wrap; `@nearest` ve `@wrap` da açıkça yazılabilir).
+  `texture2d` ve `texture2d_f32` uniform bildirimlerinde örnekleyici bayrakları opsiyonel niteliklerle belirtilir: `uniform tex: texture2d @bilinear @clamp;`, `uniform shadow: texture2d_f32 @clamp;` (varsayılan: en yakın komşu + wrap; `@nearest` ve `@wrap` da açıkça yazılabilir; `@mipmap` yalnızca `texture2d` tipinde geçerlidir).
 - `in isim: tip;` → varying girdi, `ShadeBatch.varyings`'ten sırayla okunur.
 - `const isim = ifade;` → derleme zamanı sabiti.
 - `fn isim(p: tip, ...) -> tip { ... }` → yardımcı fonksiyonlar; **hepsi inline edilir**, özyineleme yasak.
@@ -67,11 +68,16 @@ fn frag() -> rgba {
 ## 7. Yerleşik fonksiyonlar
 
 `abs min max clamp mix step smoothstep floor fract sqrt rsqrt dot cross length normalize
- sin cos (polinom, inline) pow exp2 log2 sample(tex, uv) sample_level(tex, uv, level) tex_size(tex)
+ sin cos (polinom, inline) pow exp2 log2 sample(tex, uv) sample_depth(tex, uv) sample_level(tex, uv, level) tex_size(tex)
  dFdx dFdy fwidth`
 
 `sample`: örnekleyici davranışı `texture2d` uniform bildirimindeki `@bilinear`, `@clamp` ve `@mipmap`
 nitelikleriyle derleme zamanında seçilir (varsayılan: en yakın komşu + wrap, mip yok).
+
+`sample_depth(tex: texture2d_f32, uv: vec2) -> f32`: `Texture.px`'in doğrudan `f32*` (ör. `fb.depth`)
+dizisine işaret ettiği tek kanal `f32` dokuyu `@clamp` / `@wrap` ve `@nearest` / `@bilinear`
+niteliklerine göre örnekler; RGBA8 paket açma veya 24-bit sabit nokta çözme yapmadan ham 32-bit
+texel kelimesini doğrudan `f32` olarak döndürür (DECISIONS D-107).
 
 ### 7.1 Türevler (v1)
 `dFdx(x)`, `dFdy(x)`: **kaba (coarse)** quad türevi — 2×2 quad'ın 4 lane'inin hepsine

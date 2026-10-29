@@ -1,5 +1,5 @@
 // pbr3d.mtk — fiziksel tabanlı aydınlatma (metal/pürüzlülük): GGX dağılımı, Schlick-GGX görünürlük,
-// Schlick Fresnel; güneş + yarım küre ortam ışığı; 2×2 PCF gölge haritası (24 bit kodlu reverse-Z derinlik);
+// Schlick Fresnel; güneş + yarım küre ortam ışığı; 2×2 PCF gölge haritası (tek kanal f32 reverse-Z derinlik);
 // doğrusal uzayda sis, ACES yaklaşık ton eşleme, gama 2 (sRGB yaklaşığı: giriş c², çıkış √c).
 uniform sun_dir: vec3;       // dünya uzayı, ışığa doğru, birim
 uniform sun_col: vec3;       // güneş ışınımı (doğrusal, ton eşleme öncesi)
@@ -10,7 +10,7 @@ uniform base:    vec4;       // albedo çarpanı (sRGB) + alfa
 uniform mat:     vec4;       // x metallik, y pürüzlülük, z gölge sapması, w gölge haritası boyutu (texel)
 uniform fog:     vec4;       // rgb sis rengi (doğrusal), a yoğunluk (1/birim)
 uniform albedo:  texture2d @bilinear @mipmap;
-uniform shadow:  texture2d @clamp;
+uniform shadow:  texture2d_f32 @clamp;
 in uv:    vec2;
 in nrm:   vec3;
 in depth: f32;
@@ -19,13 +19,8 @@ in spos:  vec3;              // gölge doku uzayı (u, v, derinlik)
 
 const PI = 3.14159265;
 
-fn sdepth(t: vec4) -> f32 {
-    // r*65536 + g*256 + b, kanal = bayt/255 → (bayt) * 255/(2^24-1)
-    return t.r * 0.99609381 + t.g * 0.0038910 + t.b * 0.0000152;
-}
-
 fn lit_tap(p: vec2, z: f32) -> f32 {
-    return step(sdepth(sample(shadow, p)), z);
+    return step(sample_depth(shadow, p), z);
 }
 
 fn frag() -> rgba {

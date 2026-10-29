@@ -417,6 +417,17 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   memset etmez (alt arenanın kendi ayırmaları zaten sıfırlanır).
 - Gölge haritası kodlaması 16384 piksellik işlere bölündü.
 
+### D-107 — Tek kanal f32 doku biçimi (`texture2d_f32` / `sample_depth`) ve kodlamasız gölge haritası (eski Ö-10)
+**KABUL** · M14_B
+- Matoki'ye tek kanal 32-bit kayan nokta doku tipi `texture2d_f32` (`TEX_FLAG_F32`) ve `sample_depth(tex, uv) -> f32`
+  yerleşik fonksiyonu eklendi.
+- `sizeof(u32) == sizeof(f32) == 4` olduğundan `Texture.px` doğrudan `f32*` dizisine (`(u32*)s->fb.depth`) işaret eder;
+  `ir_emit_sample_depth` mevcut `IR_TEXEL_LOAD` + `IR_BITCAST_I2F` komutlarını kullanır (SIMD yolunda `IR_BITCAST_I2F`
+  0 komuttur, yeni IR opcode gerekmez).
+- `shadow_end` içindeki 1024² RGB24 kodlama geçişi (~1.06 ms Wasm SIMD) ve `shaders/pbr3d.mtk` içindeki `sdepth()`
+  çözme hesabı tamamen kaldırıldı (`pbr3d.mtk` Wasm döngü komutu 1324 → 1224, Wasm boyutu 4291 → 3973 B,
+  524k piksel gölgelendirme süresi 18.14 → 17.05 ms).
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -436,8 +447,6 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
 - **Ö-7** Ses render'ını bir worker'a taşımak (ana thread takılmalarına dayanıklılık). — M7_2
 - **Ö-8** JSON sayıları için tam doğru yuvarlama (Eisel-Lemire veya büyük tamsayı yedeği) — şu an ≤4 ULP. — M8_D
 - **Ö-9** glTF: çoklu primitive başına ayrı materyal varyantları, normal haritası/PBR (`pbr.mtk`), KTX/JPEG. — M8_D
-- **Ö-10** Matoki'ye f32 doku biçimi (`texture2d_f32` / `sample_depth`): gölge haritası derinliği kodlamadan
-  doğrudan okunur, ~1.5 ms/kare kodlama ve shader'daki çözme kalkar. — M9_A
 - **Ö-11** Matoki'yi shader dilinden **genel sistem diline** büyütmek (kullanıcı isteği, 2026-10-27): struct, dizi,
   doğrusal belleğe işaretçi, arena ile bellek, açık SIMD tipleri, çöp toplayıcı ve çalışma zamanı yok; oyun mantığı da
   Matoki ile yazılır ve JIT ile derlenir. Önce ölçüm: Matoki çıktısı ile elle yazılmış en iyi WAT aynı shader'larda. — M9_A

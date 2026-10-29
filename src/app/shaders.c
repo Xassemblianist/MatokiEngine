@@ -158,9 +158,21 @@ void ref_shade_lit3d(ShadeBatch* batch) {
 }
 
 /* pbr3d.mtk C referansı (shader ile aynı formüller). Uniform yerleşimi: sun_dir@0 sun_col@16 sky_col@32
- * gnd_col@48 eye@64 base@80 mat@96 fog@112; dokular: 0 albedo, 1 gölge. Varying: uv nrm depth wpos spos. */
-static f32 pbr_sdepth(const f32 t[4]) {
-    return t[0] * 0.99609381f + t[1] * 0.0038910f + t[2] * 0.0000152f;
+ * gnd_col@48 eye@64 base@80 mat@96 fog@112; dokular: 0 albedo, 1 gölge (texture2d_f32). Varying: uv nrm depth wpos spos. */
+static f32 pbr_sample_depth(const Texture* sht, f32 u, f32 v) {
+    i32 wi = (i32)sht->w;
+    i32 hi = (i32)sht->h;
+    i32 tx = (i32)m_floor(u * (f32)wi);
+    i32 ty = (i32)m_floor(v * (f32)hi);
+    if (sht->flags & TEX_FLAG_CLAMP) {
+        tx = CLAMP(tx, 0, wi - 1);
+        ty = CLAMP(ty, 0, hi - 1);
+    } else {
+        tx &= (i32)sht->w_mask;
+        ty &= (i32)sht->h_mask;
+    }
+    const f32* depth_px = (const f32*)sht->px;
+    return depth_px[((u32)ty << sht->log2_w) + (u32)tx];
 }
 
 void ref_shade_pbr3d(ShadeBatch* batch) {
@@ -203,10 +215,10 @@ void ref_shade_pbr3d(ShadeBatch* batch) {
         f32 frx = stx - flx, fry = sty - fly;
         f32 p0x = (flx + 0.5f) * dt, p0y = (fly + 0.5f) * dt;
         f32 z = v[11u * n + i] + u[26];
-        f32 t[4], s4[4];
+        f32 s4[4];
         for (u32 k = 0; k < 4; k++) {
-            ref_sample_tex_level(sht, p0x + (f32)(k & 1u) * dt, p0y + (f32)(k >> 1) * dt, 0, t);
-            s4[k] = (z >= pbr_sdepth(t)) ? 1.0f : 0.0f;
+            f32 d = pbr_sample_depth(sht, p0x + (f32)(k & 1u) * dt, p0y + (f32)(k >> 1) * dt);
+            s4[k] = (z >= d) ? 1.0f : 0.0f;
         }
         f32 a0 = s4[0] + (s4[1] - s4[0]) * frx, a1 = s4[2] + (s4[3] - s4[2]) * frx;
         f32 sh = a0 + (a1 - a0) * fry;
