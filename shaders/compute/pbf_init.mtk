@@ -1,0 +1,41 @@
+// GPU Akışkan (PBF) — Aşama 0: 262.144 (64^3) parçacık baraj yıkılması (dam-break) başlangıç dizilimi
+// Parçacıkları kova içinde sıkı 64x64x64 blok olarak deterministik mikro-jitter ile başlatır.
+
+uniform particle_count: u32;
+uniform init_origin: vec4;
+uniform init_vel: vec4;
+
+buffer positions: buffer<vec4>;
+buffer velocities: buffer<vec4>;
+
+fn compute() {
+    let idx: u32 = global_id;
+    if (idx < particle_count) {
+        let ix: u32 = idx & 63u;
+        let iz: u32 = (idx >> 6u) & 63u;
+        let iy: u32 = (idx >> 12u) & 63u;
+
+        // Deterministik tam sayı karma (simetri kırma için küçük jitter)
+        let h1: u32 = (idx * 747796405u) + 2891336453u;
+        let h2: u32 = ((h1 >> 13u) ^ h1) * 1597334677u;
+        let jx: f32 = (f32(h1 & 255u) * 0.0039215686) - 0.5;
+        let jy: f32 = (f32((h1 >> 8u) & 255u) * 0.0039215686) - 0.5;
+        let jz: f32 = (f32(h2 & 255u) * 0.0039215686) - 0.5;
+
+        let sp: f32 = init_origin.w;
+        let ja: f32 = init_vel.w;
+
+        let px: f32 = init_origin.x + (f32(ix) + jx * ja) * sp;
+        let py: f32 = init_origin.y + (f32(iy) + jy * ja) * sp;
+        let pz: f32 = init_origin.z + (f32(iz) + jz * ja) * sp;
+
+        // w bileşeni başlangıç yoğunluk/köpük oranı; alt katmanlara ileri baraj dalgası ivmesi verilir
+        let h_factor: f32 = 1.35 - f32(iy) * 0.012;
+        let vx: f32 = init_vel.x * h_factor + jx * 0.15;
+        let vy: f32 = init_vel.y + jy * 0.10;
+        let vz: f32 = init_vel.z + jz * 0.15;
+
+        positions[idx] = vec4(px, py, pz, 1.0);
+        velocities[idx] = vec4(vx, vy, vz, 0.25);
+    }
+}

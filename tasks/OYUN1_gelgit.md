@@ -1,6 +1,6 @@
 # OYUN1 — "Gelgit": fırtınalı okyanusta yelkenli (motorun ilk gerçek oyunu)
 
-Durum: TODO
+Durum: IN_PROGRESS (agy gemini-4-argon-high)
 
 > **Öne çekildi (2026-10-29):** Yalnız G1_A (GPU okyanus, main'de) gerekli. V1 (atmosfer/bulut), G1_B (GPU sahnesi), P1_A/B (fizik)
 > paralel çalışıyor ya da bekliyor: onları BEKLEME, mevcut `src/phys2` (ya da main'de hangisi varsa) ve G1_A'nın GPU okyanus/gök

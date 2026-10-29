@@ -1,0 +1,83 @@
+// GPU Akışkan (PBF — Macklin 2013) — Aşama 5: Yoğunluk kısıtı C_i ve Lagrange çarpanı lambda_i
+// Poly6 çekirdeği ile yerel yoğunluğu (rho_i), Spiky gradyanı ile kısıt türevlerini hesaplar.
+// 2x2x2 oktant komşu hücre taraması (8 hücre x 3 komşu, dalsız/branchless) ile önbellek dostu çalışır.
+
+uniform particle_count: u32;
+uniform grid_params: vec4;
+uniform box_min: vec4;
+uniform box_max: vec4;
+uniform kernel_params: vec4;
+uniform solver_params: vec4;
+uniform vort_params: vec4;
+uniform sphere0: vec4;
+uniform sphere0_vel: vec4;
+uniform sphere1: vec4;
+uniform box_obs: vec4;
+
+buffer sorted_pos: buffer<vec4>;
+buffer cell_counts: buffer<u32>;
+buffer cell_offsets: buffer<u32>;
+buffer lambda_buf: buffer<vec4>;
+
+fn compute() {
+    let idx: u32 = global_id;
+    let last_p: u32 = max(particle_count, 1u) - 1u;
+    let i_safe: u32 = min(idx, last_p);
+    let pi_v4: vec4 = sorted_pos[i_safe];
+    let pi: vec3 = vec3(pi_v4.x, pi_v4.y, pi_v4.z);
+
+    let h: f32 = kernel_params.x;
+    let h2: f32 = kernel_params.y;
+    let poly6_s: f32 = kernel_params.z;
+    let spiky_s: f32 = kernel_params.w;
+    let eps_cfm: f32 = solver_params.x;
+    let inv_cs: f32 = grid_params.w;
+
+    let rx: f32 = (pi.x - grid_params.x) * inv_cs - 0.5;
+    let ry: f32 = (pi.y - grid_params.y) * inv_cs - 0.5;
+    let rz: f32 = (pi.z - grid_params.z) * inv_cs - 0.5;
+    let bx: i32 = clamp(i32(floor(rx)), 0, 62);
+    let by: i32 = clamp(i32(floor(ry)), 0, 62);
+    let bz: i32 = clamp(i32(floor(rz)), 0, 62);
+
+    var rho_norm: f32 = vort_params.w;
+    var grad_i: vec3 = vec3(0.0, 0.0, 0.0);
+    var sum_grad2: f32 = 0.0;
+
+    for oct in 0..8 {
+        let ox: i32 = bx + (oct & 1);
+        let oz: i32 = bz + ((oct >> 1) & 1);
+        let oy: i32 = by + ((oct >> 2) & 1);
+        let ncell: u32 = u32(ox) + (u32(oz) << 6u) + (u32(oy) << 12u);
+        let start: u32 = cell_offsets[ncell];
+        let cnt: u32 = min(cell_counts[ncell], 3u);
+
+        for s in 0..3 {
+            let su: u32 = u32(s);
+            let valid_m: u32 = u32((i32(su) - i32(cnt)) >> 31);
+            let raw_j: u32 = min(start + su, last_p);
+            let j: u32 = i_safe ^ ((raw_j ^ i_safe) & valid_m);
+            let pj_v4: vec4 = sorted_pos[j];
+            let diff: vec3 = pi - vec3(pj_v4.x, pj_v4.y, pj_v4.z);
+            let r2: f32 = dot(diff, diff);
+            let gate: f32 = step(0.00000001, r2) * step(r2, h2);
+
+            let d2: f32 = max(h2 - r2, 0.0) * gate;
+            rho_norm = rho_norm + poly6_s * d2 * d2 * d2;
+
+            let r: f32 = sqrt(max(r2, 0.00000001));
+            let hr: f32 = max(h - r, 0.0) * gate;
+            let gs: f32 = (spiky_s * hr * hr) / r;
+            let gj: vec3 = diff * gs;
+            grad_i = grad_i + gj;
+            sum_grad2 = sum_grad2 + dot(gj, gj);
+        }
+    }
+
+    sum_grad2 = sum_grad2 + dot(grad_i, grad_i);
+    let c_i: f32 = max(rho_norm - 1.0, -0.25);
+    let lam: f32 = -c_i / (sum_grad2 + eps_cfm);
+    if (idx < particle_count) {
+        lambda_buf[idx] = vec4(lam, rho_norm, c_i, 0.0);
+    }
+}

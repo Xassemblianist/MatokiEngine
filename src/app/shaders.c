@@ -658,7 +658,7 @@ b32 shaders_compile_one(ManagedShader* out, const char* name,
     }
     out->ir_inst_count = live_insts;
 
-    u32 wasm_cap = 65536;
+    u32 wasm_cap = 262144;
     u8* wasm_buf = ARENA_PUSH_ARRAY(scratch, u8, wasm_cap);
 
     MtkCodegenOpts opts;

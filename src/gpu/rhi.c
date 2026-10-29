@@ -12,6 +12,7 @@ static b32          g_gpu_available;
 static u32          g_gpu_viewport_w = 1920u;
 static u32          g_gpu_viewport_h = 1080u;
 static u32          g_gpu_frame_time_us;
+static u32          g_gpu_sky_time_us;
 static b32          g_gpu_has_timestamp;
 static RhiErrorRing g_fallback_errors = { 0, 0, RHI_ERROR_RING_CAP, 0, { { 0 } } };
 
@@ -493,7 +494,7 @@ b32 rhi_begin_pass(Rhi* rhi, const RhiPassDesc* desc) {
         rhi, RHI_CMD_BEGIN_PASS, (u32)sizeof(RhiCmdBeginPass));
     if (!cmd) return FALSE;
 
-    u32 flags = (desc->sample_count & 0xFFu) << 8;
+    u32 flags = (desc->sample_count & 0xFFFFu) << 8;
     if (desc->clear_color) flags |= RHI_PASS_CLEAR_COLOR;
     if (desc->clear_depth) flags |= RHI_PASS_CLEAR_DEPTH;
 
@@ -661,16 +662,24 @@ b32 rhi_end_pass(Rhi* rhi) {
     return TRUE;
 }
 
-b32 rhi_begin_compute_pass(Rhi* rhi) {
+b32 rhi_begin_compute_pass_ex(Rhi* rhi, u32 flags) {
     if (!rhi || rhi->in_pass || rhi->in_compute_pass) {
         if (rhi) rhi->dropped_cmds++;
         return FALSE;
     }
+    u32 sz = (flags != 0u) ? 12u : (u32)sizeof(RhiCmdBeginComputePass);
     RhiCmdBeginComputePass* cmd = (RhiCmdBeginComputePass*)rhi_alloc_cmd(
-        rhi, RHI_CMD_BEGIN_COMPUTE_PASS, (u32)sizeof(RhiCmdBeginComputePass));
+        rhi, RHI_CMD_BEGIN_COMPUTE_PASS, sz);
     if (!cmd) return FALSE;
+    if (flags != 0u) {
+        ((u32*)(void*)cmd)[2] = flags;
+    }
     rhi->in_compute_pass = TRUE;
     return TRUE;
+}
+
+b32 rhi_begin_compute_pass(Rhi* rhi) {
+    return rhi_begin_compute_pass_ex(rhi, 0u);
 }
 
 b32 rhi_set_compute_pipeline(Rhi* rhi, RhiComputePipeline pipeline) {
@@ -839,6 +848,14 @@ EXPORT(engine_gpu_set_frame_time_us) void engine_gpu_set_frame_time_us(u32 us) {
 
 EXPORT(engine_gpu_frame_time_us) u32 engine_gpu_frame_time_us(void) {
     return g_gpu_frame_time_us;
+}
+
+EXPORT(engine_gpu_set_sky_time_us) void engine_gpu_set_sky_time_us(u32 us) {
+    g_gpu_sky_time_us = us;
+}
+
+EXPORT(engine_gpu_sky_time_us) u32 engine_gpu_sky_time_us(void) {
+    return g_gpu_sky_time_us;
 }
 
 EXPORT(engine_gpu_set_has_timestamp) void engine_gpu_set_has_timestamp(b32 has_ts) {

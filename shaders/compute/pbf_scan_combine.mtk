@@ -1,0 +1,17 @@
+// GPU Akışkan (PBF) — Aşama 3b: Üst seviye blok önek toplamlarını hücre ofsetlerine ekleme
+// Seviye-1 (i >> 6) ve Seviye-2 (i >> 12) blok başlangıç ofsetlerini birleştirir.
+
+uniform cell_count: u32;
+
+buffer cell_offsets: buffer<u32>;
+buffer l1_offsets: buffer<u32>;
+buffer l2_offsets: buffer<u32>;
+
+fn compute() {
+    let i: u32 = global_id;
+    if (i < cell_count) {
+        let b1: u32 = i >> 6u;
+        let b2: u32 = i >> 12u;
+        cell_offsets[i] = cell_offsets[i] + l1_offsets[b1] + l2_offsets[b2];
+    }
+}

@@ -1,0 +1,111 @@
+// GPU Akışkan (PBF — Macklin 2013) — Aşama 6: Konum düzeltmesi Delta p_i (s_corr dahil) ve çarpışmalar
+// Çekme kararsızlığı düzeltmesi (s_corr = -k * (W(r)/W(dq))^4), katı cisim (küre + kutu engel)
+// tek yönlü çarpışma tepkisi ve kova (container) sınır kısıtlarını uygular.
+
+uniform particle_count: u32;
+uniform grid_params: vec4;
+uniform box_min: vec4;
+uniform box_max: vec4;
+uniform kernel_params: vec4;
+uniform solver_params: vec4;
+uniform vort_params: vec4;
+uniform sphere0: vec4;
+uniform sphere0_vel: vec4;
+uniform sphere1: vec4;
+uniform box_obs: vec4;
+
+buffer sorted_pos: buffer<vec4>;
+buffer lambda_buf: buffer<vec4>;
+buffer cell_counts: buffer<u32>;
+buffer cell_offsets: buffer<u32>;
+buffer pred_pos: buffer<vec4>;
+
+fn compute() {
+    let idx: u32 = global_id;
+    let last_p: u32 = max(particle_count, 1u) - 1u;
+    let i_safe: u32 = min(idx, last_p);
+    let pi_v4: vec4 = sorted_pos[i_safe];
+    let pi: vec3 = vec3(pi_v4.x, pi_v4.y, pi_v4.z);
+    let lam_v4: vec4 = lambda_buf[i_safe];
+    let lam_i: f32 = lam_v4.x;
+    let rho_i: f32 = lam_v4.y;
+
+    let h: f32 = kernel_params.x;
+    let h2: f32 = kernel_params.y;
+    let spiky_s: f32 = kernel_params.w;
+    let scorr_k: f32 = solver_params.y;
+    let inv_dq: f32 = solver_params.z;
+    let inv_cs: f32 = grid_params.w;
+
+    let rx: f32 = (pi.x - grid_params.x) * inv_cs - 0.5;
+    let ry: f32 = (pi.y - grid_params.y) * inv_cs - 0.5;
+    let rz: f32 = (pi.z - grid_params.z) * inv_cs - 0.5;
+    let bx: i32 = clamp(i32(floor(rx)), 0, 62);
+    let by: i32 = clamp(i32(floor(ry)), 0, 62);
+    let bz: i32 = clamp(i32(floor(rz)), 0, 62);
+
+    var dp: vec3 = vec3(0.0, 0.0, 0.0);
+
+    for oct in 0..8 {
+        let ox: i32 = bx + (oct & 1);
+        let oz: i32 = bz + ((oct >> 1) & 1);
+        let oy: i32 = by + ((oct >> 2) & 1);
+        let ncell: u32 = u32(ox) + (u32(oz) << 6u) + (u32(oy) << 12u);
+        let start: u32 = cell_offsets[ncell];
+        let cnt: u32 = min(cell_counts[ncell], 3u);
+
+        for s in 0..3 {
+            let su: u32 = u32(s);
+            let valid_m: u32 = u32((i32(su) - i32(cnt)) >> 31);
+            let raw_j: u32 = min(start + su, last_p);
+            let j: u32 = i_safe ^ ((raw_j ^ i_safe) & valid_m);
+            let pj_v4: vec4 = sorted_pos[j];
+            let diff: vec3 = pi - vec3(pj_v4.x, pj_v4.y, pj_v4.z);
+            let r2: f32 = dot(diff, diff);
+            let gate: f32 = step(0.00000001, r2) * step(r2, h2);
+
+            let lam_j: f32 = lambda_buf[j].x;
+            let diff2: f32 = max(h2 - r2, 0.0) * gate;
+            let w_ratio: f32 = diff2 * inv_dq;
+            let w_r2: f32 = w_ratio * w_ratio;
+            let scorr: f32 = scorr_k * w_r2 * w_r2;
+
+            let r: f32 = sqrt(max(r2, 0.00000001));
+            let hr: f32 = max(h - r, 0.0) * gate;
+            let gs: f32 = (spiky_s * hr * hr) / r;
+            dp = dp + diff * ((lam_i + lam_j + scorr) * gs);
+        }
+    }
+
+    let max_dp: f32 = h * 0.45;
+    var np: vec3 = pi + clamp(dp, vec3(-max_dp, -max_dp, -max_dp), vec3(max_dp, max_dp, max_dp));
+
+    // Katı cisim (rigid body) tek yönlü çarpışma 1: Etkileşimli küre 0
+    let s0_c: vec3 = vec3(sphere0.x, sphere0.y, sphere0.z);
+    let d0: vec3 = np - s0_c;
+    let dist0: f32 = max(length(d0), 0.0001);
+    let push0: f32 = max(sphere0.w - dist0, 0.0);
+    np = np + d0 * (push0 / dist0);
+
+    // Katı cisim tek yönlü çarpışma 2: Yüzen/sabit küre 1
+    let s1_c: vec3 = vec3(sphere1.x, sphere1.y, sphere1.z);
+    let d1: vec3 = np - s1_c;
+    let dist1: f32 = max(length(d1), 0.0001);
+    let push1: f32 = max(sphere1.w - dist1, 0.0);
+    np = np + d1 * (push1 / dist1);
+
+    // Katı cisim tek yönlü çarpışma 3: Kova tabanındaki silindirik/kapsül sütun engel
+    let ob_c: vec3 = vec3(box_obs.x, np.y, box_obs.z);
+    let dob: vec3 = np - ob_c;
+    let dist_ob: f32 = max(length(dob), 0.0001);
+    let in_ob_y: f32 = step(np.y, box_obs.y + 0.85);
+    let push_ob: f32 = max(box_obs.w - dist_ob, 0.0) * in_ob_y;
+    np = np + dob * (push_ob / dist_ob);
+
+    // Kova (container) duvar sınırları
+    np = clamp(np, vec3(box_min.x, box_min.y, box_min.z), vec3(box_max.x, box_max.y, box_max.z));
+
+    if (idx < particle_count) {
+        pred_pos[idx] = vec4(np.x, np.y, np.z, rho_i);
+    }
+}
