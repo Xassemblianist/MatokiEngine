@@ -86,10 +86,15 @@ function detectSharedMemory() {
 export function selectEngineWasmUrl(caps) {
   if (typeof location !== "undefined" && location.search) {
     const params = new URLSearchParams(location.search);
+    if (params.get("st") === "1" || params.get("threads") === "0") return "./engine_st.wasm";
     if (params.get("relaxed") === "0") return "./engine.wasm";
     if (params.get("relaxed") === "1") return "./engine_relaxed.wasm";
   }
-  return caps && caps.relaxedSimd ? "./engine_relaxed.wasm" : "./engine.wasm";
+  // SharedArrayBuffer veya worker threads yoksa ST yedeğine düş (D-109, H10)
+  if (!caps || !caps.sab || !caps.threads) {
+    return "./engine_st.wasm";
+  }
+  return caps.relaxedSimd ? "./engine_relaxed.wasm" : "./engine.wasm";
 }
 
 export function applyCapsToEngine(exports, caps) {
@@ -200,8 +205,10 @@ export async function detectCaps() {
     webCodecs,
     webTransport,
     wasmUrl: "",
+    isSt: false,
   };
   caps.wasmUrl = selectEngineWasmUrl(caps);
+  caps.isSt = caps.wasmUrl.includes("engine_st.wasm");
   if (caps.wasmUrl.includes("relaxed")) {
     caps.mask = (caps.mask | CAP_RELAXED_BUILD) >>> 0;
   }

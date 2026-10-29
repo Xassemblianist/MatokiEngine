@@ -8,3 +8,4 @@ out/
 .DS_Store
 __pycache__/
 web/engine_relaxed.wasm
+web/engine_st.wasm
