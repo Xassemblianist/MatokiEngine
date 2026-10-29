@@ -1,6 +1,6 @@
 # V1 — Fiziksel atmosfer + hacimsel bulutlar + gün döngüsü (GPU)
 
-Durum: IN_PROGRESS (agy gemini-4-argon-high)
+Durum: TODO
 
 ## Amaç
 Okyanus sahnesinin gökyüzünü "AAA" seviyeye çıkar (WebGPU yolunda; CPU yolunda basit yedek kalır):

@@ -10,7 +10,6 @@
 #include "core/rng.h"
 #include "core/embed.h"
 #include "gfx3d/ocean.h"
-#include "gfx3d/atmos.h"
 #include "gpu/gpu_ocean.h"
 #include "matoki/matoki.h"
 #include "../build/gen/embed_shaders.c"
@@ -292,91 +291,4 @@ TEST(ocean_gpu_matoki_compute_fft) {
     f32 max_err = 1.0f;
     CHECK(gpu_ocean_test_compute_fft(&a, &o, 2u, 3.25, &max_err));
     CHECK(max_err < 1e-3f);
-}
-
-/* V1 Hillaire 2020 fiziksel atmosfer LUT, Beer-Powder zayıflaması, 3B Perlin-Worley gürültü ve gün döngüsü */
-TEST(ocean_v1_hillaire_atmosphere_and_clouds) {
-    AtmosParams ap = atmos_default_params();
-
-    /* (a) Transmittance LUT fiziksel özellikleri */
-    Vec3 t_zen = atmos_eval_transmittance(&ap, 0.02f, 0.95f);
-    Vec3 t_hor = atmos_eval_transmittance(&ap, 0.02f, 0.04f);
-    Vec3 t_hi  = atmos_eval_transmittance(&ap, 25.0f, 0.20f);
-    Vec3 t_lo  = atmos_eval_transmittance(&ap, 0.50f, 0.20f);
-
-    CHECK(t_zen.x > 0.75f && t_zen.z > 0.55f && t_zen.x <= 1.0f);
-    CHECK(t_zen.x > t_hor.x && t_zen.z > t_hor.z);
-    /* Gün batımı ufuk ışınında Rayleigh mavi saçılımı yüzünden kırmızı geçirgenlik maviden çok büyük olmalı */
-    CHECK(t_hor.x > t_hor.z * 2.5f);
-    /* İrtifa arttıkça atmosferik optik derinlik azalmalı (geçirgenlik artmalı) */
-    CHECK(t_hi.x > t_lo.x && t_hi.y > t_lo.y && t_hi.z > t_lo.z);
-
-    /* (b) Çoklu saçılım (Multi-Scattering) pozitifliği */
-    Vec3 ms = atmos_eval_multiscatter(&ap, 1.0f, 0.6f);
-    CHECK(ms.x > 0.0f && ms.y > 0.0f && ms.z > 0.0f);
-    CHECK(ms.x < 1.0f && ms.y < 1.0f && ms.z < 1.0f);
-
-    /* (c) Sky-View: öğle vakti zenitte mavi baskın, gün batımı ufkunda turuncu-kırmızı baskın */
-    Vec3 sun_noon   = vec3_norm(vec3(0.0f, 0.85f, -0.52f));
-    Vec3 sun_sunset = vec3_norm(vec3(0.0f, 0.04f, -0.99f));
-    Vec3 sky_noon_z = atmos_eval_sky_ray(&ap, 0.02f, vec3(0.0f, 0.95f, -0.31f), sun_noon);
-    Vec3 sky_set_h  = atmos_eval_sky_ray(&ap, 0.02f, vec3(0.0f, 0.05f, -0.99f), sun_sunset);
-    CHECK(sky_noon_z.z > sky_noon_z.x * 1.4f);
-    CHECK(sky_set_h.x  > sky_set_h.z  * 1.3f);
-
-    /* (d) 3B Aerial Perspective: mesafe arttıkça geçirgenlik azalmalı, saçılan ışık artmalı */
-    Vec3 ap_near_ins, ap_far_ins;
-    f32  ap_near_tr = 0.0f, ap_far_tr = 0.0f;
-    atmos_eval_aerial(&ap, 0.05f, vec3(0.0f, 0.04f, -0.99f), sun_noon, 2.0f,  &ap_near_ins, &ap_near_tr);
-    atmos_eval_aerial(&ap, 0.05f, vec3(0.0f, 0.04f, -0.99f), sun_noon, 28.0f, &ap_far_ins,  &ap_far_tr);
-    CHECK(ap_near_tr > ap_far_tr && ap_near_tr <= 1.0f && ap_far_tr > 0.0f);
-    CHECK(ap_far_ins.z > ap_near_ins.z);
-
-    /* (e) Beer-Powder hacimsel bulut ışık zayıflaması */
-    f32 bp0 = atmos_beer_powder(0.0f);
-    f32 bp1 = atmos_beer_powder(0.6f);
-    f32 bp6 = atmos_beer_powder(6.0f);
-    CHECK(bp0 >= 0.0f && bp0 <= 1.5f);
-    CHECK(bp1 > 0.25f && bp6 < bp1);
-
-    /* (f) 3B Perlin-Worley bulut gürültüsü [0, 1] sınırları ve varyansı */
-    f32 r_min = 1.0f, r_max = 0.0f;
-    for (u32 z = 0; z < 8u; z++) {
-        for (u32 y = 0; y < 8u; y++) {
-            for (u32 x = 0; x < 8u; x++) {
-                f32 nw[4];
-                atmos_cloud_noise_texel(x * 4u, y * 4u, z * 4u, 32u, nw);
-                CHECK(nw[0] >= 0.0f && nw[0] <= 1.0f);
-                CHECK(nw[1] >= 0.0f && nw[1] <= 1.0f);
-                CHECK(nw[2] >= 0.0f && nw[2] <= 1.0f);
-                CHECK(nw[3] >= 0.0f && nw[3] <= 1.0f);
-                if (nw[0] < r_min) r_min = nw[0];
-                if (nw[0] > r_max) r_max = nw[0];
-            }
-        }
-    }
-    CHECK((r_max - r_min) > 0.15f);
-
-    /* Periyodiklik: x + N == x */
-    f32 p0[4], p1[4];
-    atmos_cloud_noise_texel(5u, 11u, 19u, 32u, p0);
-    atmos_cloud_noise_texel(5u + 32u, 11u + 64u, 19u + 32u, 32u, p1);
-    CHECK_NEAR(p0[0], p1[0], 1e-5f);
-    CHECK_NEAR(p0[1], p1[1], 1e-5f);
-    CHECK_NEAR(p0[2], p1[2], 1e-5f);
-    CHECK_NEAR(p0[3], p1[3], 1e-5f);
-
-    /* (g) Gün döngüsü (Öğle / Gün Batımı / Gece) aydınlatma geçişleri */
-    atmos_set_sun_angles(&ap, 0.80f, 0.35f);
-    CHECK(ap.star_intensity < 0.01f && ap.sun_dir.y > 0.65f);
-    atmos_set_sun_angles(&ap, -0.45f, 0.35f);
-    CHECK(ap.star_intensity > 0.70f && ap.moon_intensity > 0.70f && ap.moon_dir.y > 0.20f);
-}
-
-/* V1 Matoki @compute çekirdeklerinin (atmos_transmittance, atmos_multiscatter, atmos_skyview,
- * atmos_aerial, cloud_noise) IR + WGSL derleme ve CPU yorumlayıcı doğrulaması */
-TEST(ocean_v1_gpu_atmos_and_cloud_compute) {
-    Arena a;
-    arena_init(&a, g_ocean_test_mem, sizeof(g_ocean_test_mem));
-    CHECK(gpu_ocean_test_atmos_compute(&a));
 }

@@ -489,16 +489,10 @@ _Static_assert(__builtin_offsetof(RhiErrorRing, entries)   == RHI_ERR_RING_OFF_E
 
 /* --- C Tarafı Kaynak Tanımlayıcıları (Descriptors) --- */
 
-/* 3B doku derinliğini mip_levels üst 16 bitinde ikili akış uyumlu kodlar */
-#define RHI_MIP_DEPTH(mips, depth) (((u32)(depth) << 16) | ((u32)(mips) & 0xFFFFu))
-
-/* Atmosfer/bulut timestamp-query ölçüm bayrağı (compute flags veya pass sample_count/load_op) */
-#define RHI_PASS_TIMED_SKY 0x100u
-
 typedef struct {
     u32            width;
     u32            height;
-    u32            mip_levels;   /* 0 ise 1 kabul edilir; üst 16 bit > 1 ise 3B doku derinliği */
+    u32            mip_levels;   /* 0 ise 1 kabul edilir */
     RhiTextureFormat format;
     u32            usage;        /* RHI_TEX_* */
 } RhiTextureDesc;
@@ -614,7 +608,6 @@ b32 rhi_write_texture(Rhi* rhi, RhiTexture dst, u32 mip_level,
                       u32 bytes_per_row, const void* data, u32 data_len);
 
 b32 rhi_begin_compute_pass(Rhi* rhi);
-b32 rhi_begin_compute_pass_ex(Rhi* rhi, u32 flags);
 b32 rhi_set_compute_pipeline(Rhi* rhi, RhiComputePipeline pipeline);
 b32 rhi_dispatch(Rhi* rhi, u32 x, u32 y, u32 z);
 b32 rhi_end_compute_pass(Rhi* rhi);
@@ -648,8 +641,6 @@ u32           engine_gpu_viewport_width(void);
 u32           engine_gpu_viewport_height(void);
 void          engine_gpu_set_frame_time_us(u32 us);
 u32           engine_gpu_frame_time_us(void);
-void          engine_gpu_set_sky_time_us(u32 us);
-u32           engine_gpu_sky_time_us(void);
 void          engine_gpu_set_has_timestamp(b32 has);
 b32           engine_gpu_has_timestamp(void);
 const u8*     engine_gpu_cmd_stream(void);

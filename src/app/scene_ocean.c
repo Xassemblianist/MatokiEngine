@@ -5,7 +5,6 @@
  */
 #include "app/scene_ocean.h"
 #include "gfx3d/ocean.h"
-#include "gfx3d/atmos.h"
 #include "gfx3d/pipeline.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/mesh.h"
@@ -24,7 +23,6 @@
 #define KEY_UP    38
 #define KEY_RIGHT 39
 #define KEY_DOWN  40
-#define KEY_B     66
 #define KEY_C     67
 #define KEY_F     70
 #define KEY_G     71
@@ -33,10 +31,8 @@
 #define KEY_K     75
 #define KEY_L     76
 #define KEY_M     77
-#define KEY_N     78
 #define KEY_O     79
 #define KEY_R     82
-#define KEY_T     84
 #define KEY_U     85
 #define KEY_V     86
 
@@ -101,26 +97,22 @@ typedef struct {
     Texture   tex_deck;
     Texture   tex_sail;
 
-    f64         sim_time;
-    f32         time_scale;
-    b32         paused;
-    f32         sun_elev;      /* radyan: -0.85 (gece) .. 0.06 (gün batımı) .. 1.35 (öğle) */
-    f32         sun_azim;      /* radyan */
-    u32         wireframe;     /* 0: kapalı, 1: yüzey+tel kafes, 2: yalnız tel kafes */
-    b32         show_hud;
-    b32         auto_day_cycle;
-    AtmosParams atmos;
-    Mat4        prev_vp;
-    b32         has_prev_vp;
+    f64       sim_time;
+    f32       time_scale;
+    b32       paused;
+    f32       sun_elev;      /* radyan: 0.08 (altın gün batımı) .. 0.85 (öğle) */
+    f32       sun_azim;      /* radyan */
+    u32       wireframe;     /* 0: kapalı, 1: yüzey+tel kafes, 2: yalnız tel kafes */
+    b32       show_hud;
 
     /* Ölçümler */
-    f32         fft_ms;
-    f32         mesh_ms;
-    f32         shade_ms;
-    u32         tris_drawn;
-    f32         debug_buf[16];
-    b32         gpu_spectrum_dirty;
-    b32         gpu_first_update;
+    f32       fft_ms;
+    f32       mesh_ms;
+    f32       shade_ms;
+    u32       tris_drawn;
+    f32       debug_buf[12];
+    b32       gpu_spectrum_dirty;
+    b32       gpu_first_update;
 
     /* Önceki kare tuş durumları */
     u8        prev_keys[256];
@@ -541,17 +533,12 @@ static void reset_scene_params(OceanScene* sc) {
     sc->gpu_spectrum_dirty = TRUE;
     sc->gpu_first_update   = TRUE;
 
-    sc->sim_time       = 4.25;
-    sc->time_scale     = 1.0f;
-    sc->paused         = FALSE;
-    sc->sun_elev       = 0.15f;   /* altın ikindi güneşi: parlak güneş diski + yakamoz + turkuaz SSS */
-    sc->sun_azim       = 0.42f;
-    sc->wireframe      = 0u;
-    sc->auto_day_cycle = FALSE;
-    sc->has_prev_vp    = FALSE;
-    sc->prev_vp        = mat4_identity();
-    sc->atmos          = atmos_default_params();
-    atmos_set_sun_angles(&sc->atmos, sc->sun_elev, sc->sun_azim);
+    sc->sim_time   = 4.25;
+    sc->time_scale = 1.0f;
+    sc->paused     = FALSE;
+    sc->sun_elev   = 0.15f;   /* altın ikindi güneşi: parlak güneş diski + yakamoz + turkuaz SSS */
+    sc->sun_azim   = 0.42f;
+    sc->wireframe  = 0u;
 
     camera_init(&sc->cam, CAM_ORBIT);
     sc->cam.yaw    = 0.52f;
@@ -645,34 +632,19 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         g_sc.ocean.d.choppy = m_clamp(g_sc.ocean.d.choppy + chop_delta, 0.0f, 2.2f);
     }
 
-    /* Zaman ölçeği +/- (L / O) ve otomatik gün döngüsü (T) */
+    /* Zaman ölçeği +/- (L / O) */
     if (in->keys[KEY_O]) g_sc.time_scale = m_clamp(g_sc.time_scale + 0.75f * dt, 0.05f, 3.0f);
     if (in->keys[KEY_L]) g_sc.time_scale = m_clamp(g_sc.time_scale - 0.75f * dt, 0.05f, 3.0f);
-    if (sc_key_pressed(in, KEY_T)) {
-        g_sc.auto_day_cycle = !g_sc.auto_day_cycle;
-    }
 
-    /* Gün zamanı / Güneş yüksekliği +/- (G / F: gece -0.85 .. gün batımı 0.06 .. öğle 1.35) */
-    if (in->keys[KEY_G]) g_sc.sun_elev = m_clamp(g_sc.sun_elev + 0.45f * dt, -0.85f, 1.35f);
-    if (in->keys[KEY_F]) g_sc.sun_elev = m_clamp(g_sc.sun_elev - 0.45f * dt, -0.85f, 1.35f);
-
-    /* Bulut örtüsü (coverage) +/- (B / N) */
-    if (in->keys[KEY_B]) {
-        g_sc.atmos.cloud_coverage = m_clamp(g_sc.atmos.cloud_coverage + 0.35f * dt, 0.0f, 1.0f);
-    }
-    if (in->keys[KEY_N]) {
-        g_sc.atmos.cloud_coverage = m_clamp(g_sc.atmos.cloud_coverage - 0.35f * dt, 0.0f, 1.0f);
-    }
+    /* Güneş yüksekliği +/- (G / F) */
+    if (in->keys[KEY_G]) g_sc.sun_elev = m_clamp(g_sc.sun_elev + 0.35f * dt, 0.06f, 0.95f);
+    if (in->keys[KEY_F]) g_sc.sun_elev = m_clamp(g_sc.sun_elev - 0.35f * dt, 0.06f, 0.95f);
 
     __builtin_memcpy(g_sc.prev_keys, in->keys, sizeof(g_sc.prev_keys));
 
     /* Simülasyon adımı */
     f32 eff_dt = (g_sc.paused || dt <= 0.0f) ? 0.0f : (dt * g_sc.time_scale);
     g_sc.sim_time += (f64)eff_dt;
-    if (g_sc.auto_day_cycle && eff_dt > 0.0f) {
-        g_sc.sun_elev += 0.08f * eff_dt;
-        if (g_sc.sun_elev > 1.25f) g_sc.sun_elev = -0.75f;
-    }
 
     /* (1) FFT kademeleri + doku/mipmap güncellemesi */
     PROF_BEGIN("ocean_fft");
@@ -713,16 +685,25 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         g_sc.mesh_ms = 0.0f;
     }
 
-    /* Güneş, Ay ve fiziksel atmosfer aydınlatma güncellemesi (Hillaire 2020 + gün/gece döngüsü) */
-    atmos_set_sun_angles(&g_sc.atmos, g_sc.sun_elev, g_sc.sun_azim);
-    Vec3 sun_dir     = g_sc.atmos.sun_dir;
-    Vec3 sun_col     = g_sc.atmos.sun_color;
-    Vec3 sky_zenith  = g_sc.atmos.sky_zenith;
-    Vec3 sky_horiz   = g_sc.atmos.sky_horizon;
-    f32  warm        = m_clamp(1.0f - (g_sc.sun_elev - 0.08f) * 2.2f, 0.0f, 1.0f);
-    f32  night_dim   = 1.0f - g_sc.atmos.moon_intensity * 0.72f;
-    Vec3 sea_deep    = vec3_scale(vec3(0.005f, 0.042f, 0.115f), night_dim);
-    Vec3 sea_shallow = vec3_scale(vec3(0.025f, 0.42f, 0.38f),   night_dim);
+    /* Güneş ve atmosfer renkleri (kamera bakış kongrüansı: -sin(azim), sin(elev), -cos(azim)) */
+    f32 ce = m_cos(g_sc.sun_elev), se = m_sin(g_sc.sun_elev);
+    Vec3 sun_dir = vec3_norm(vec3(-ce * m_sin(g_sc.sun_azim), se, -ce * m_cos(g_sc.sun_azim)));
+    f32 warm = m_clamp(1.0f - (g_sc.sun_elev - 0.08f) * 2.2f, 0.0f, 1.0f);
+
+    Vec3 sun_noon   = vec3(3.2f, 3.0f, 2.65f);
+    Vec3 sun_golden = vec3(4.1f, 2.25f, 1.05f);
+    Vec3 sun_col    = vec3_add(sun_noon, vec3_scale(vec3_sub(sun_golden, sun_noon), warm));
+
+    Vec3 zen_noon   = vec3(0.035f, 0.18f, 0.58f);
+    Vec3 zen_golden = vec3(0.028f, 0.13f, 0.44f);
+    Vec3 sky_zenith = vec3_add(zen_noon, vec3_scale(vec3_sub(zen_golden, zen_noon), warm));
+
+    Vec3 hor_noon   = vec3(0.36f, 0.58f, 0.82f);
+    Vec3 hor_golden = vec3(0.68f, 0.46f, 0.34f);
+    Vec3 sky_horiz  = vec3_add(hor_noon, vec3_scale(vec3_sub(hor_golden, hor_noon), warm));
+
+    Vec3 sea_deep    = vec3(0.005f, 0.042f, 0.115f);
+    Vec3 sea_shallow = vec3(0.025f, 0.42f, 0.38f);
     Vec3 fog_srgb    = vec3(m_sqrt(m_clamp(sky_horiz.x, 0.0f, 1.0f)),
                             m_sqrt(m_clamp(sky_horiz.y, 0.0f, 1.0f)),
                             m_sqrt(m_clamp(sky_horiz.z, 0.0f, 1.0f)));
@@ -736,7 +717,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         f32 aspect = (vp_h > 0u) ? ((f32)vp_w / (f32)vp_h) : ((f32)fb->w / (f32)fb->h);
         Mat4 view = camera_view(&g_sc.cam);
         Mat4 proj = camera_proj(&g_sc.cam, aspect);
-        Mat4 cur_vp = mat4_mul(proj, view);
 
         const EmbeddedFile* ef_ocean = find_embedded_mtk("ocean.mtk");
         const EmbeddedFile* ef_sky   = find_embedded_mtk("sky.mtk");
@@ -749,7 +729,7 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         gp.sim_time       = g_sc.sim_time;
         gp.eff_dt         = eff_dt;
         gp.spectrum_dirty = g_sc.gpu_spectrum_dirty;
-        gp.first_update   = g_sc.gpu_first_update || (chop_delta != 0.0f) || !g_sc.has_prev_vp;
+        gp.first_update   = g_sc.gpu_first_update || (chop_delta != 0.0f);
         gp.view           = view;
         gp.proj           = proj;
         gp.eye            = eye;
@@ -763,13 +743,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         gp.fog_srgb       = fog_srgb;
         gp.fog_dens       = fog_dens;
         gp.warm           = warm;
-        gp.moon_dir       = g_sc.atmos.moon_dir;
-        gp.star_intensity = g_sc.atmos.star_intensity;
-        gp.moon_intensity = g_sc.atmos.moon_intensity;
-        gp.cloud_coverage = g_sc.atmos.cloud_coverage;
-        gp.cloud_wind_x   = g_sc.atmos.cloud_wind_x;
-        gp.cloud_wind_z   = g_sc.atmos.cloud_wind_z;
-        gp.prev_vp        = g_sc.has_prev_vp ? g_sc.prev_vp : cur_vp;
         gp.wireframe      = g_sc.wireframe;
         gp.sky_mesh       = g_sc.sky_mesh;
         gp.hull_mesh      = g_sc.hull_mesh;
@@ -787,8 +760,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         if (gpu_ocean_render(frame, &gp, &g_sc.tris_drawn)) {
             g_sc.gpu_spectrum_dirty = FALSE;
             g_sc.gpu_first_update   = FALSE;
-            g_sc.prev_vp            = cur_vp;
-            g_sc.has_prev_vp        = TRUE;
             g_sc.shade_ms = (f32)engine_gpu_frame_time_us() * 0.001f;
 
             /* 2B HUD katmanı için arka planı saydam temizle (alttaki 1080p WebGPU tuvali görünsün) */
@@ -810,10 +781,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
             g_sc.debug_buf[9]  = g_sc.boat.pitch;
             g_sc.debug_buf[10] = g_sc.boat.roll;
             g_sc.debug_buf[11] = (f32)g_sc.tris_drawn;
-            g_sc.debug_buf[12] = (f32)engine_gpu_sky_time_us() * 0.001f;
-            g_sc.debug_buf[13] = g_sc.sun_elev;
-            g_sc.debug_buf[14] = g_sc.atmos.cloud_coverage;
-            g_sc.debug_buf[15] = g_sc.atmos.star_intensity;
             return;
         }
     }
@@ -1006,10 +973,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
     g_sc.debug_buf[9]  = g_sc.boat.pitch;
     g_sc.debug_buf[10] = g_sc.boat.roll;
     g_sc.debug_buf[11] = (f32)g_sc.tris_drawn;
-    g_sc.debug_buf[12] = 0.0f;
-    g_sc.debug_buf[13] = g_sc.sun_elev;
-    g_sc.debug_buf[14] = g_sc.atmos.cloud_coverage;
-    g_sc.debug_buf[15] = g_sc.atmos.star_intensity;
 }
 
 /* ---------- HUD Çizimi ---------- */
@@ -1021,31 +984,28 @@ void scene_ocean_draw_hud(UiContext* ui, const Framebuffer* fb) {
     i32 y = (i32)fb->h - 24;
     ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 38, FB_RGBA(10, 16, 28, 195));
 
-    const char* tod_str = (g_sc.sun_elev < -0.05f) ? "Gece" :
-                          (g_sc.sun_elev <  0.22f) ? "GunBatimi" : "Ogle";
-    f64 cov_pct = (f64)(g_sc.atmos.cloud_coverage * 100.0f);
-
     if (engine_gpu_available()) {
         u32 vp_w = engine_gpu_viewport_width();
         u32 vp_h = engine_gpu_viewport_height();
         f64 gpu_ms = (f64)engine_gpu_frame_time_us() * 0.001;
-        f64 sky_ms = (f64)engine_gpu_sky_time_us() * 0.001;
         const char* ts_tag = engine_gpu_has_timestamp() ? "ts" : "sub";
         fmt_format(line, sizeof(line),
-                   "GPU %ux%u | Top %.2fms (%s) | Atmos/Bulut %.2fms | %s Bulut:%.0f%% | Hs=%.2fm",
-                   vp_w, vp_h, gpu_ms, ts_tag, sky_ms, tod_str, cov_pct, (f64)g_sc.ocean.hs);
+                   "GPU %ux%u | GPU %.2fms (%s) | Fizik %.2fms | Hs=%.2fm (teo %.2fm) | Ucgen %u",
+                   vp_w, vp_h, gpu_ms, ts_tag, (f64)g_sc.fft_ms,
+                   (f64)g_sc.ocean.hs, (f64)g_sc.ocean.theory_hs, g_sc.tris_drawn);
     } else {
         fmt_format(line, sizeof(line),
-                   "CPU %ux%u | FFT %.2fms | Shade %.2fms | %s Bulut:%.0f%% | Hs=%.2fm | Ucgen %u",
-                   fb->w, fb->h, (f64)g_sc.fft_ms, (f64)g_sc.shade_ms,
-                   tod_str, cov_pct, (f64)g_sc.ocean.hs, g_sc.tris_drawn);
+                   "CPU %ux%u | FFT %.2fms | Mesh %.2fms | Shade %.2fms | Hs=%.2fm (teo %.2fm) | Ucgen %u",
+                   fb->w, fb->h, (f64)g_sc.fft_ms, (f64)g_sc.mesh_ms, (f64)g_sc.shade_ms,
+                   (f64)g_sc.ocean.hs, (f64)g_sc.ocean.theory_hs, g_sc.tris_drawn);
     }
     ui_draw_text(ui, 5, y - 11, line, FB_RGBA(110, 230, 255, 255), 1);
 
     const char* wf_str = (g_sc.wireframe == 0u) ? "Kap" : (g_sc.wireframe == 1u) ? "Karma" : "Tel";
     fmt_format(line, sizeof(line),
-               "[F/G/T]Gun(%s) [N/B]Bulut:%.0f%% [U/I]Ruzgar:%.1f [H/K]Chop:%.2f [M]Tel:%s [C]%s",
-               tod_str, cov_pct, (f64)g_sc.ocean.d.wind_speed, (f64)g_sc.ocean.d.choppy,
+               "[U/I]Ruzgar %.1f [H/K]Chop %.2f [L/O/Spc]Hiz %.1fx%s [F/G]Gunes [M]Tel:%s [C]%s",
+               (f64)g_sc.ocean.d.wind_speed, (f64)g_sc.ocean.d.choppy,
+               (f64)g_sc.time_scale, g_sc.paused ? "*" : "",
                wf_str, (g_sc.cam.mode == CAM_ORBIT) ? "Orb" : "Ucus");
     ui_draw_text(ui, 5, y + 1, line, FB_RGBA(225, 235, 248, 255), 1);
 }
@@ -1075,41 +1035,18 @@ void scene_ocean_debug_cmd(u32 cmd, f32 a, f32 b, f32 c) {
         g_sc.ocean.has_updated  = FALSE;
         g_sc.gpu_spectrum_dirty = TRUE;
         g_sc.gpu_first_update   = TRUE;
-        g_sc.has_prev_vp        = FALSE;
         ocean_update(&g_sc.ocean, g_sc.sim_time, 0.0f);
         reset_boat_to_water(&g_sc);
         g_sc.cam.target = vec3(g_sc.boat.pos.x, g_sc.boat.pos.y * 0.45f + 1.15f, g_sc.boat.pos.z);
         ocean_mesh_update(&g_sc.ocean, camera_eye(&g_sc.cam));
     } else if (cmd == 2u) {
-        g_sc.cam.yaw     = a;
-        g_sc.cam.pitch   = b;
-        g_sc.cam.dist    = c;
-        g_sc.has_prev_vp = FALSE;
+        g_sc.cam.yaw   = a;
+        g_sc.cam.pitch = b;
+        g_sc.cam.dist  = c;
         ocean_mesh_update(&g_sc.ocean, camera_eye(&g_sc.cam));
     } else if (cmd == 3u) {
-        g_sc.sun_elev    = m_clamp(a, -0.85f, 1.35f);
-        g_sc.time_scale  = m_clamp(b, 0.0f, 3.0f);
-        g_sc.wireframe   = ((u32)c) % 3u;
-        g_sc.has_prev_vp = FALSE;
-        atmos_set_sun_angles(&g_sc.atmos, g_sc.sun_elev, g_sc.sun_azim);
-    } else if (cmd == 4u) {
-        /* V1 önayarları: a=0 Öğle, a=1 Gün batımı, a=2 Gece; b=azimut; c=bulut örtüsü */
-        u32 preset = (u32)a;
-        if (preset == 0u) {
-            g_sc.sun_elev = 0.78f;
-            g_sc.sun_azim = (b != 0.0f) ? b : 0.36f;
-            g_sc.atmos.cloud_coverage = (c >= 0.0f) ? m_clamp(c, 0.0f, 1.0f) : 0.50f;
-        } else if (preset == 1u) {
-            g_sc.sun_elev = 0.055f;
-            g_sc.sun_azim = (b != 0.0f) ? b : 0.42f;
-            g_sc.atmos.cloud_coverage = (c >= 0.0f) ? m_clamp(c, 0.0f, 1.0f) : 0.52f;
-        } else {
-            g_sc.sun_elev = -0.45f;
-            g_sc.sun_azim = (b != 0.0f) ? b : 0.42f;
-            g_sc.atmos.cloud_coverage = (c >= 0.0f) ? m_clamp(c, 0.0f, 1.0f) : 0.34f;
-        }
-        g_sc.has_prev_vp      = FALSE;
-        g_sc.gpu_first_update = TRUE;
-        atmos_set_sun_angles(&g_sc.atmos, g_sc.sun_elev, g_sc.sun_azim);
+        g_sc.sun_elev   = m_clamp(a, 0.06f, 0.95f);
+        g_sc.time_scale = m_clamp(b, 0.0f, 3.0f);
+        g_sc.wireframe  = ((u32)c) % 3u;
     }
 }
