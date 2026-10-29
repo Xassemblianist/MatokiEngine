@@ -1,0 +1,57 @@
+/* atmos_transmittance.mtk — Hillaire 2020 Transmittance LUT (256x64) compute çekirdeği.
+ * Atmosfer tepesine giden ışın boyunca Rayleigh + Mie + Ozon optik derinliğini 12 adımda
+ * integre eder ve Beer-Lambert geçirgenliğini (exp(-tau)) out_trans tamponuna yazar.
+ */
+
+uniform u_lut_size: vec4; /* x = width (256), y = height (64), z = r_bottom (6360), w = r_top (6460) */
+
+buffer out_trans: buffer<vec4>;
+
+const LOG2_E: f32 = 1.44269504;
+
+fn compute() {
+    let gid: u32  = global_id;
+    let lut: vec4 = u_lut_size;
+    let w: u32    = u32(lut.x);
+    let h: u32    = u32(lut.y);
+    if gid >= w * h {
+        return;
+    }
+
+    let y: u32 = u32(floor((f32(gid) + 0.5) / lut.x));
+    let x: u32 = gid - y * w;
+
+    let u: f32 = (f32(x) + 0.5) / lut.x;
+    let v: f32 = (f32(y) + 0.5) / lut.y;
+
+    let r_bot: f32 = lut.z;
+    let r_top: f32 = lut.w;
+
+    let mu: f32   = -0.25 + u * 1.25;
+    let h_km: f32 = v * v * (r_top - r_bot);
+    let r: f32    = clamp(r_bot + h_km, r_bot + 0.001, r_top - 0.001);
+
+    let disc: f32  = max(0.0, r * r * (mu * mu - 1.0) + r_top * r_top);
+    let s_max: f32 = max(0.0, -r * mu + sqrt(disc));
+    let ds: f32    = s_max * 0.08333333;
+
+    let beta_r: vec3 = vec3(0.005802, 0.013558, 0.033100);
+    let beta_m: vec3 = vec3(0.004440, 0.004440, 0.004440);
+    let beta_o: vec3 = vec3(0.000650, 0.001881, 0.000085);
+
+    var od_r: f32 = 0.0;
+    var od_m: f32 = 0.0;
+    var od_o: f32 = 0.0;
+
+    for i in 0..12 {
+        let s: f32   = (f32(i) + 0.5) * ds;
+        let r_s: f32 = sqrt(r * r + s * s + 2.0 * r * s * mu);
+        let hs: f32  = max(r_s - r_bot, 0.0);
+        od_r += exp2((-hs * 0.125) * LOG2_E) * ds;
+        od_m += exp2((-hs * 0.83333333) * LOG2_E) * ds;
+        od_o += max(0.0, 1.0 - abs(hs - 25.0) * 0.06666667) * ds;
+    }
+
+    let tau: vec3 = beta_r * od_r + beta_m * od_m + beta_o * od_o;
+    out_trans[gid] = vec4(exp2(-tau * LOG2_E), 1.0);
+}

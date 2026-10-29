@@ -1,0 +1,113 @@
+/* atmos_multiscatter.mtk — Hillaire 2020 Multi-Scattering LUT (32x32) compute çekirdeği.
+ * Transmittance LUT tamponunu (trans_lut) okuyarak 2. derece saçılma L_2nd ve
+ * çoklu saçılma transfer faktörü f_ms'yi hesaplar; Psi_ms = L_2nd / (1 - f_ms) yazar.
+ */
+
+uniform u_ms_params: vec4; /* x = w (32), y = h (32), z = r_bottom (6360), w = r_top (6460) */
+uniform u_trans_dim: vec4; /* x = trans_w (256), y = trans_h (64), z = ground_albedo (0.1), w = 0 */
+
+buffer trans_lut: buffer<vec4>;
+buffer out_ms:    buffer<vec4>;
+
+const ISO_PHASE: f32 = 0.07957747; /* 1 / (4 * pi) */
+
+fn fast_exp_neg(x: f32) -> f32 {
+    let u: f32 = max(x, 0.0) * 0.5;
+    let d: f32 = 1.0 + u * (1.0 + u * 0.5);
+    return 1.0 / (d * d);
+}
+
+fn ray_dist(r: f32, mu: f32, r_bot: f32, r_top: f32) -> f32 {
+    let db: f32    = r * r * (mu * mu - 1.0) + r_bot * r_bot;
+    let d_bot: f32 = max(0.0, -r * mu - sqrt(max(0.0, db)));
+    let dt: f32    = max(0.0, r * r * (mu * mu - 1.0) + r_top * r_top);
+    let d_top: f32 = max(0.0, -r * mu + sqrt(dt));
+    let hit_g: f32 = step(0.0, -mu) * step(0.0, db);
+    return mix(d_top, d_bot, hit_g);
+}
+
+fn compute() {
+    let gid: u32 = global_id;
+    let mp: vec4 = u_ms_params;
+    let td: vec4 = u_trans_dim;
+    let w: u32   = u32(mp.x);
+    let h: u32   = u32(mp.y);
+    if gid >= w * h {
+        return;
+    }
+
+    let y: u32 = u32(floor((f32(gid) + 0.5) / mp.x));
+    let x: u32 = gid - y * w;
+
+    let u: f32 = (f32(x) + 0.5) / mp.x;
+    let v: f32 = (f32(y) + 0.5) / mp.y;
+
+    let r_bot: f32 = mp.z;
+    let r_top: f32 = mp.w;
+
+    let mu_s: f32  = -0.2 + u * 1.2;
+    let h_km: f32  = v * v * (r_top - r_bot);
+    let r: f32     = clamp(r_bot + h_km, r_bot + 0.01, r_top - 0.01);
+    let tw: f32    = td.x;
+    let th: f32    = td.y;
+    let tw_u: u32  = u32(tw);
+    let u_sun: f32 = clamp((mu_s + 0.25) * 0.8, 0.0, 1.0);
+    let ix_s: u32  = u32(clamp(floor(u_sun * tw), 0.0, tw - 1.0));
+
+    let beta_r: vec3  = vec3(0.005802, 0.013558, 0.033100);
+    let beta_ms: vec3 = vec3(0.003996, 0.003996, 0.003996);
+    let beta_ma: vec3 = vec3(0.000444, 0.000444, 0.000444);
+    let beta_o: vec3  = vec3(0.000650, 0.001881, 0.000085);
+    let one3: vec3    = vec3(1.0, 1.0, 1.0);
+    let r_bot2: f32   = r_bot * r_bot;
+
+    var l_2nd: vec3 = vec3(0.0, 0.0, 0.0);
+    var f_ms:  vec3 = vec3(0.0, 0.0, 0.0);
+
+    for d in 0..2 {
+        let mu_v: f32  = -0.55 + f32(d) * 1.10;
+        let s_max: f32 = ray_dist(r, mu_v, r_bot, r_top);
+        let ds: f32    = s_max * 0.2;
+
+        var trans: vec3 = one3;
+        var dir_l: vec3 = vec3(0.0, 0.0, 0.0);
+        var dir_f: vec3 = vec3(0.0, 0.0, 0.0);
+
+        for i in 0..5 {
+            let s: f32   = (f32(i) + 0.5) * ds;
+            let r_s: f32 = sqrt(r * r + s * s + 2.0 * r * s * mu_v);
+            let h_s: f32 = max(0.0, r_s - r_bot);
+
+            let d_r: f32 = fast_exp_neg(h_s * 0.125);
+            let d_m: f32 = fast_exp_neg(h_s * 0.83333333);
+            let d_o: f32 = max(0.0, 1.0 - abs(h_s - 25.0) * 0.06666667);
+
+            let scat: vec3   = beta_r * d_r + beta_ms * d_m;
+            let ext: vec3    = scat + beta_ma * d_m + beta_o * d_o;
+            let tau_s: vec3  = ext * ds;
+            let step_t: vec3 = one3 / (one3 + tau_s * (one3 + tau_s * 0.5));
+            let sint: vec3   = (one3 + tau_s * 0.5) * step_t * ds;
+
+            let mu_hor: f32  = -sqrt(max(0.0, 1.0 - r_bot2 / (r_s * r_s)));
+            let sun_vis: f32 = step(mu_hor, mu_s);
+            let v_tr: f32    = sqrt(clamp(h_s * 0.01, 0.0, 1.0));
+            let iy_s: u32    = u32(clamp(floor(v_tr * th), 0.0, th - 1.0));
+            let t_sun: vec3  = trans_lut[iy_s * tw_u + ix_s].xyz * (sun_vis * ISO_PHASE);
+
+            let w_s: vec3 = trans * scat * sint;
+            dir_f += w_s;
+            dir_l += w_s * t_sun;
+            trans  = trans * step_t;
+        }
+
+        let hit_g: f32   = step(0.0, -mu_v) * step(0.0, mu_s);
+        let t_sun_g: vec3 = trans_lut[ix_s].xyz;
+        let g_alb: vec3   = vec3(0.04, 0.07, 0.12) * td.z;
+        dir_l += trans * t_sun_g * g_alb * (max(mu_s, 0.0) * 0.31830988 * hit_g);
+
+        l_2nd += dir_l * 0.5;
+        f_ms  += dir_f * 0.5;
+    }
+
+    out_ms[gid] = vec4(l_2nd / max(one3 - f_ms, vec3(0.05, 0.05, 0.05)), 1.0);
+}
