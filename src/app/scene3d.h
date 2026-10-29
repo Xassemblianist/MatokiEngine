@@ -1,7 +1,8 @@
-/* app/scene3d.h — 3D demo sahnesi: dokulu zemin, 1000 küplük ızgara, dönen küp ve küre.
- * gfx3d boru hattını (kırpma, reverse-Z derinlik, arka yüz ayıklama, frustum culling) ve
- * pbr3d.mtk (PBR + güneş gölge haritası + gece-gündüz) veya lit3d.mtk (Lambert) ile çizer.
- * Kamera: uçuş (WASD/QE + sürükle) / orbit (C). M: mipmap, L: PBR/Lambert, N: gün döngüsünü durdur, G: basılıyken 20× hızlı.
+/* app/scene3d.h — 3D demo sahnesi: dokulu zemin, 1000 küplük ızgara, dönen küp, küre ve parçacık sistemi.
+ * gfx3d boru hattını (kırpma, reverse-Z derinlik, arka yüz ayıklama, frustum culling, ertelenmiş paralel ön uç),
+ * pbr3d.mtk / lit3d.mtk, dairesel alfa harmanlı particle3d.mtk (ateş/duman + P ile kıvılcım patlaması) ve
+ * TPT SVF filtre + yankı ses efektlerini gösterir.
+ * Kamera: uçuş (WASD/QE + sürükle) / orbit (C). M: mipmap, L: PBR/Lambert, N: gün döngüsü, G: 20× hızlı, P: patlama.
  */
 #ifndef APP_SCENE3D_H
 #define APP_SCENE3D_H

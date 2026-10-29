@@ -1,0 +1,18 @@
+// particle3d.mtk — Yumuşak dairesel sönümlü ve mesafe sisli 3D parçacık (billboard) shader'ı.
+// Alev, duman ve kıvılcım dörtgenlerini doku gerektirmeden kenarları yumuşak daire olarak çizer.
+uniform fog: vec4;   // rgb sis rengi (sRGB), a = yoğunluk (1/birim)
+in uv:      vec2;
+in v_color: vec4;
+in depth:   f32;
+
+fn frag() -> rgba {
+    let dx = uv.x * 2.0 - 1.0;
+    let dy = uv.y * 2.0 - 1.0;
+    let t = clamp(1.0 - (dx * dx + dy * dy), 0.0, 1.0);
+    let w = t * t;
+    let f = clamp(depth * fog.a * 0.6, 0.0, 1.0);
+    let r = mix(v_color.r, fog.r, f);
+    let g = mix(v_color.g, fog.g, f);
+    let b = mix(v_color.b, fog.b, f);
+    return vec4(r, g, b, v_color.a * w);
+}
