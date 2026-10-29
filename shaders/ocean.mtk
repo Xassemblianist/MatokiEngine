@@ -27,9 +27,9 @@ fn frag() -> rgba {
     let t1 = sample(map1, uv1);
     let t2 = sample(map2, uv2);
 
-    // Uzaklıkla ince kademe ağırlıkları
-    let w1 = clamp(1.0 - depth * 0.0035, 0.25, 1.0);
-    let w2 = clamp(1.0 - depth * 0.012, 0.10, 1.0);
+    // Uzaklıkla ince kademe ağırlıkları (ufka doğru yüksek frekans aliasing'ini önler)
+    let w1 = clamp(1.0 - depth * 0.0045, 0.0, 1.0);
+    let w2 = clamp(1.0 - depth * 0.015, 0.0, 1.0);
 
     // RGBA8'den (128 = sıfır eğim) piksel başına eğim çözme
     let zc = vec2(0.50196078, 0.50196078);

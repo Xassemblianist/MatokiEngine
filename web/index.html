@@ -7,6 +7,7 @@
   <link rel="modulepreload" href="./caps.js">
   <link rel="modulepreload" href="./jit.js">
   <link rel="modulepreload" href="./threads.js">
+  <link rel="modulepreload" href="./gpu.js">
   <style>
     * {
       box-sizing: border-box;
@@ -23,7 +24,19 @@
       justify-content: center;
       font-family: monospace;
     }
+    #gpu-screen {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      display: none;
+      z-index: 1;
+      pointer-events: none;
+    }
     #screen {
+      position: relative;
+      z-index: 2;
       width: 100vw;
       height: 100vh;
       object-fit: contain;
@@ -46,6 +59,7 @@
   </style>
 </head>
 <body>
+  <canvas id="gpu-screen" width="1920" height="1080"></canvas>
   <canvas id="screen" width="640" height="360"></canvas>
   <div id="panic-overlay"></div>
   <script type="module" src="./platform.js"></script>

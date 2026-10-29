@@ -10,6 +10,7 @@
 #include "core/rng.h"
 #include "core/embed.h"
 #include "gfx3d/ocean.h"
+#include "gpu/gpu_ocean.h"
 #include "matoki/matoki.h"
 #include "../build/gen/embed_shaders.c"
 
@@ -272,4 +273,22 @@ TEST(ocean_shaders_compile) {
                                         wgsl_buf, 65536u, &layout, &diag);
         CHECK(wgsl_len > 64u);
     }
+}
+
+/* Matoki @compute FFT çekirdeklerinin (spektrum, kelebek, açma) WGSL derlemesi + CPU referans denkliği */
+TEST(ocean_gpu_matoki_compute_fft) {
+    Arena a;
+    arena_init(&a, g_ocean_test_mem, sizeof(g_ocean_test_mem));
+
+    OceanDesc d = ocean_default_desc();
+    d.cascades[0].n = 32u;
+    d.cascades[1].n = 16u;
+    d.cascades[2].n = 16u;
+    Ocean o;
+    ocean_init(&o, &a, &d);
+    ocean_update(&o, 3.25, 0.016f);
+
+    f32 max_err = 1.0f;
+    CHECK(gpu_ocean_test_compute_fft(&a, &o, 2u, 3.25, &max_err));
+    CHECK(max_err < 1e-3f);
 }

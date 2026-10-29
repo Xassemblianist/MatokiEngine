@@ -29,6 +29,11 @@ export const RHI_CMD_DRAW_INDEXED = 16;
 export const RHI_CMD_SET_VIEWPORT = 17;
 export const RHI_CMD_END_PASS = 18;
 export const RHI_CMD_PRESENT = 19;
+export const RHI_CMD_CREATE_COMPUTE_PIPELINE = 20;
+export const RHI_CMD_BEGIN_COMPUTE_PASS = 21;
+export const RHI_CMD_SET_COMPUTE_PIPELINE = 22;
+export const RHI_CMD_DISPATCH = 23;
+export const RHI_CMD_END_COMPUTE_PASS = 24;
 
 export const RHI_ERR_WGSL_COMPILE = 1;
 export const RHI_ERR_VALIDATION = 2;
@@ -51,11 +56,14 @@ const GPU_BUF_COPY_DST = 0x0008;
 const GPU_BUF_INDEX = 0x0010;
 const GPU_BUF_VERTEX = 0x0020;
 const GPU_BUF_UNIFORM = 0x0040;
+const GPU_BUF_STORAGE = 0x0080;
+const GPU_BUF_QUERY_RESOLVE = 0x0200;
 const GPU_MAP_READ = 0x0001;
 
 const GPU_TEX_COPY_SRC = 0x01;
 const GPU_TEX_COPY_DST = 0x02;
 const GPU_TEX_TEXTURE_BINDING = 0x04;
+const GPU_TEX_STORAGE_BINDING = 0x08;
 const GPU_TEX_RENDER_ATTACHMENT = 0x10;
 
 function decodeBytes(memory, ptr, len) {
@@ -130,6 +138,7 @@ function mapBufferUsage(rhiUsage) {
   if (rhiUsage & 4) u |= GPU_BUF_UNIFORM;
   if (rhiUsage & 8) u |= GPU_BUF_COPY_DST;
   if (rhiUsage & 16) u |= GPU_BUF_COPY_SRC;
+  if (rhiUsage & 32) u |= GPU_BUF_STORAGE;
   return u;
 }
 
@@ -145,6 +154,10 @@ function mapTextureFormat(rhiFormat, canvasFormat) {
       return "depth24plus";
     case 4:
       return "depth32float";
+    case 5:
+      return "rgba16float";
+    case 6:
+      return "rgba32float";
     default:
       return "rgba8unorm";
   }
@@ -156,6 +169,7 @@ function mapTextureUsage(rhiUsage) {
   if (rhiUsage & 2) u |= GPU_TEX_RENDER_ATTACHMENT;
   if (rhiUsage & 4) u |= GPU_TEX_COPY_DST;
   if (rhiUsage & 8) u |= GPU_TEX_COPY_SRC;
+  if (rhiUsage & 16) u |= GPU_TEX_STORAGE_BINDING;
   return u;
 }
 
@@ -250,10 +264,23 @@ export async function initGpu(canvas, exports, memory, options = {}) {
 
   let adapter = null;
   let device = null;
+  let hasTimestampQuery = false;
   try {
     adapter = await gpuRoot.requestAdapter();
     if (!adapter) throw new Error("WebGPU adapter bulunamadı");
-    device = await adapter.requestDevice();
+    const requiredFeatures = [];
+    if (adapter.features && typeof adapter.features.has === "function" && adapter.features.has("timestamp-query")) {
+      requiredFeatures.push("timestamp-query");
+      hasTimestampQuery = true;
+    }
+    try {
+      device = await adapter.requestDevice(
+        requiredFeatures.length > 0 ? { requiredFeatures } : undefined
+      );
+    } catch (_featErr) {
+      hasTimestampQuery = false;
+      device = await adapter.requestDevice();
+    }
   } catch (_err) {
     if (exports && typeof exports.engine_gpu_set_available === "function") {
       exports.engine_gpu_set_available(0);
@@ -261,8 +288,8 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     return null;
   }
 
-  const surfaceWidth = (canvas && canvas.width ? canvas.width : options.width || 640) >>> 0;
-  const surfaceHeight = (canvas && canvas.height ? canvas.height : options.height || 360) >>> 0;
+  let surfaceWidth = (canvas && canvas.width ? canvas.width : options.width || 640) >>> 0;
+  let surfaceHeight = (canvas && canvas.height ? canvas.height : options.height || 360) >>> 0;
   const context = options.context || null;
   const ctx2d = !context && canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
   if (!context && !ctx2d && canvas) {
@@ -270,6 +297,13 @@ export async function initGpu(canvas, exports, memory, options = {}) {
       exports.engine_gpu_set_available(0);
     }
     return null;
+  }
+
+  if (exports && typeof exports.engine_gpu_set_viewport_size === "function") {
+    exports.engine_gpu_set_viewport_size(surfaceWidth, surfaceHeight);
+  }
+  if (exports && typeof exports.engine_gpu_set_has_timestamp === "function") {
+    exports.engine_gpu_set_has_timestamp(hasTimestampQuery ? 1 : 0);
   }
 
   const canvasFormat = context
@@ -286,28 +320,86 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     });
   }
 
-  const surfaceTexture =
-    !context && typeof device.createTexture === "function"
-      ? device.createTexture({
-          size: { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 },
-          mipLevelCount: 1,
-          format: canvasFormat,
-          usage: GPU_TEX_RENDER_ATTACHMENT | GPU_TEX_COPY_SRC | GPU_TEX_TEXTURE_BINDING,
-        })
-      : null;
-  const surfaceView = surfaceTexture ? surfaceTexture.createView() : null;
-  const readbackBytesPerRow = (surfaceWidth * 4 + 255) & ~255;
-  const readbackByteSize = readbackBytesPerRow * surfaceHeight;
-  const readbackBuffer =
-    surfaceTexture && typeof device.createBuffer === "function"
-      ? device.createBuffer({
-          size: readbackByteSize,
-          usage: GPU_BUF_COPY_DST | GPU_BUF_MAP_READ,
-        })
-      : null;
-  const imageData = ctx2d && typeof ctx2d.createImageData === "function"
-    ? ctx2d.createImageData(surfaceWidth, surfaceHeight)
-    : null;
+  let surfaceTexture = null;
+  let surfaceView = null;
+  let readbackBytesPerRow = 0;
+  let readbackByteSize = 0;
+  let readbackBuffer = null;
+  let imageData = null;
+  let msaaColorTex = null;
+  let msaaColorView = null;
+  let msaaColorW = 0;
+  let msaaColorH = 0;
+  let msaaColorSamples = 0;
+  let msaaColorFmt = "";
+
+  function allocSurfaceTargets(w, h) {
+    surfaceWidth = w >>> 0;
+    surfaceHeight = h >>> 0;
+    if (exports && typeof exports.engine_gpu_set_viewport_size === "function") {
+      exports.engine_gpu_set_viewport_size(surfaceWidth, surfaceHeight);
+    }
+    if (surfaceTexture && typeof surfaceTexture.destroy === "function") surfaceTexture.destroy();
+    if (readbackBuffer && typeof readbackBuffer.destroy === "function") readbackBuffer.destroy();
+    if (msaaColorTex && typeof msaaColorTex.destroy === "function") {
+      msaaColorTex.destroy();
+      msaaColorTex = null;
+      msaaColorView = null;
+    }
+    surfaceTexture =
+      !context && typeof device.createTexture === "function"
+        ? device.createTexture({
+            size: { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 },
+            mipLevelCount: 1,
+            format: canvasFormat,
+            usage: GPU_TEX_RENDER_ATTACHMENT | GPU_TEX_COPY_SRC | GPU_TEX_TEXTURE_BINDING,
+          })
+        : null;
+    surfaceView = surfaceTexture ? surfaceTexture.createView() : null;
+    readbackBytesPerRow = (surfaceWidth * 4 + 255) & ~255;
+    readbackByteSize = readbackBytesPerRow * surfaceHeight;
+    readbackBuffer =
+      surfaceTexture && typeof device.createBuffer === "function"
+        ? device.createBuffer({
+            size: readbackByteSize,
+            usage: GPU_BUF_COPY_DST | GPU_BUF_MAP_READ,
+          })
+        : null;
+    imageData =
+      ctx2d && typeof ctx2d.createImageData === "function"
+        ? ctx2d.createImageData(surfaceWidth, surfaceHeight)
+        : null;
+  }
+
+  allocSurfaceTargets(surfaceWidth, surfaceHeight);
+
+  const MAX_TIMESTAMP_QUERIES = 16;
+  let querySet = null;
+  let queryResolveBuf = null;
+  let queryReadbackBuf = null;
+  let queryIndex = 0;
+  let queryReadbackInFlight = false;
+  let lastGpuTimeUs = 0;
+
+  if (hasTimestampQuery && typeof device.createQuerySet === "function") {
+    try {
+      querySet = device.createQuerySet({ type: "timestamp", count: MAX_TIMESTAMP_QUERIES });
+      queryResolveBuf = device.createBuffer({
+        size: MAX_TIMESTAMP_QUERIES * 8,
+        usage: GPU_BUF_QUERY_RESOLVE | GPU_BUF_COPY_SRC,
+      });
+      queryReadbackBuf = device.createBuffer({
+        size: MAX_TIMESTAMP_QUERIES * 8,
+        usage: GPU_BUF_COPY_DST | GPU_BUF_MAP_READ,
+      });
+    } catch (_qErr) {
+      querySet = null;
+      hasTimestampQuery = false;
+      if (exports && typeof exports.engine_gpu_set_has_timestamp === "function") {
+        exports.engine_gpu_set_has_timestamp(0);
+      }
+    }
+  }
   let readbackInFlight = false;
   let readbackPromise = null;
   let lastPixels = null;
@@ -333,13 +425,18 @@ export async function initGpu(canvas, exports, memory, options = {}) {
       }
       readbackBuffer.unmap();
 
-      if (exports && memory && typeof exports.engine_gpu_test_readback_buf === "function") {
+      if (
+        options.enableTestReadback !== false &&
+        exports &&
+        memory &&
+        typeof exports.engine_gpu_test_readback_buf === "function"
+      ) {
         const dstPtr = exports.engine_gpu_test_readback_buf() >>> 0;
         const dstLen =
           typeof exports.engine_gpu_test_readback_bytes === "function"
             ? exports.engine_gpu_test_readback_bytes() >>> 0
             : 0;
-        if (dstPtr && dstLen >= totalBytes) {
+        if (dstPtr && dstLen === totalBytes) {
           new Uint8Array(memory.buffer, dstPtr, totalBytes).set(lastPixels);
           if (typeof exports.engine_gpu_test_analyze_readback === "function") {
             exports.engine_gpu_test_analyze_readback();
@@ -384,6 +481,34 @@ export async function initGpu(canvas, exports, memory, options = {}) {
   const resources = new Map();
   let cmdEncoder = null;
   let passEncoder = null;
+  let computePassEncoder = null;
+
+  function ensureMsaaColorView(w, h, fmt, samples) {
+    if (
+      msaaColorView &&
+      msaaColorW === w &&
+      msaaColorH === h &&
+      msaaColorFmt === fmt &&
+      msaaColorSamples === samples
+    ) {
+      return msaaColorView;
+    }
+    if (msaaColorTex && typeof msaaColorTex.destroy === "function") {
+      msaaColorTex.destroy();
+    }
+    msaaColorTex = device.createTexture({
+      size: { width: w, height: h, depthOrArrayLayers: 1 },
+      sampleCount: samples,
+      format: fmt,
+      usage: GPU_TEX_RENDER_ATTACHMENT,
+    });
+    msaaColorView = msaaColorTex ? msaaColorTex.createView() : null;
+    msaaColorW = w;
+    msaaColorH = h;
+    msaaColorFmt = fmt;
+    msaaColorSamples = samples;
+    return msaaColorView;
+  }
 
   function reportStreamError(handle, msg) {
     pushGpuError(exports, memory, RHI_ERR_STREAM, handle, 0, 0, msg);
@@ -550,7 +675,9 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const colorFormat = dv.getUint32(off + 72, true);
           const blendMode = dv.getUint32(off + 76, true);
           const depthFormat = dv.getUint32(off + 80, true);
-          const depthTest = dv.getUint32(off + 84, true);
+          const depthTestRaw = dv.getUint32(off + 84, true);
+          const depthTest = depthTestRaw & 0xff;
+          const sampleCount = ((depthTestRaw >>> 8) & 0xff) || 1;
           const depthWrite = dv.getUint32(off + 88, true);
           const depthCompare = dv.getUint32(off + 92, true);
 
@@ -594,6 +721,10 @@ export async function initGpu(canvas, exports, memory, options = {}) {
             },
           };
 
+          if (sampleCount > 1) {
+            pDesc.multisample = { count: sampleCount };
+          }
+
           if (fsMod) {
             const target = {
               format: mapTextureFormat(colorFormat, canvasFormat),
@@ -617,6 +748,28 @@ export async function initGpu(canvas, exports, memory, options = {}) {
 
           const pipe = withValidationScope(handle, () => device.createRenderPipeline(pDesc));
           resources.set(handle, pipe);
+          break;
+        }
+
+        case RHI_CMD_CREATE_COMPUTE_PIPELINE: {
+          const handle = dv.getUint32(off + 8, true);
+          const csHandle = dv.getUint32(off + 12, true);
+          const entry = readFixedString16(memory, off + 16) || "main";
+          const csMod = resources.get(csHandle);
+          if (!csMod) {
+            reportStreamError(handle, "ComputePipeline için geçersiz compute shader tutamacı");
+            break;
+          }
+          const cpipe = withValidationScope(handle, () =>
+            device.createComputePipeline({
+              layout: "auto",
+              compute: {
+                module: csMod,
+                entryPoint: entry,
+              },
+            })
+          );
+          resources.set(handle, cpipe);
           break;
         }
 
@@ -644,11 +797,11 @@ export async function initGpu(canvas, exports, memory, options = {}) {
               reportStreamError(handle, `BindGroup girdisi için geçersiz kaynak (h=${resHandle})`);
               continue;
             }
-            if (kind === 1) {
+            if (kind === 1 || kind === 4) {
               const bEntry = { buffer: resObj, offset: bufOffset };
               if (bufSize > 0) bEntry.size = (bufSize + 3) & ~3;
               entries.push({ binding, resource: bEntry });
-            } else if (kind === 2) {
+            } else if (kind === 2 || kind === 5) {
               entries.push({ binding, resource: resObj.view || resObj });
             } else if (kind === 3) {
               entries.push({ binding, resource: resObj });
@@ -670,7 +823,10 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const obj = resources.get(handle);
           if (obj) {
             if (typeof obj.destroy === "function") obj.destroy();
-            else if (obj.texture && typeof obj.texture.destroy === "function") obj.texture.destroy();
+            else {
+              if (obj.texture && typeof obj.texture.destroy === "function") obj.texture.destroy();
+              if (obj.msaaTex && typeof obj.msaaTex.destroy === "function") obj.msaaTex.destroy();
+            }
             resources.delete(handle);
           }
           break;
@@ -715,6 +871,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const colorHandle = dv.getUint32(off + 8, true);
           const depthHandle = dv.getUint32(off + 12, true);
           const flags = dv.getUint32(off + 16, true);
+          const sampleCount = ((flags >>> 8) & 0xff) || 1;
           const clearR = dv.getFloat32(off + 20, true);
           const clearG = dv.getFloat32(off + 24, true);
           const clearB = dv.getFloat32(off + 28, true);
@@ -723,37 +880,82 @@ export async function initGpu(canvas, exports, memory, options = {}) {
 
           if (!cmdEncoder) {
             cmdEncoder = device.createCommandEncoder();
+            queryIndex = 0;
           }
 
           let colorView = null;
+          let targetW = surfaceWidth;
+          let targetH = surfaceHeight;
+          let targetFmt = canvasFormat;
           if (colorHandle === 0) {
             colorView = context ? context.getCurrentTexture().createView() : surfaceView;
           } else {
             const cEntry = resources.get(colorHandle);
-            colorView = cEntry ? cEntry.view : null;
+            if (cEntry) {
+              colorView = cEntry.view;
+              targetW = cEntry.width;
+              targetH = cEntry.height;
+              targetFmt = cEntry.format;
+            }
+          }
+
+          const colorAttachment = {
+            view: sampleCount > 1 ? ensureMsaaColorView(targetW, targetH, targetFmt, sampleCount) : colorView,
+            loadOp: flags & 1 ? "clear" : "load",
+            clearValue: { r: clearR, g: clearG, b: clearB, a: clearA },
+            storeOp: "store",
+          };
+          if (sampleCount > 1 && colorView) {
+            colorAttachment.resolveTarget = colorView;
           }
 
           const passDesc = {
-            colorAttachments: [
-              {
-                view: colorView,
-                loadOp: flags & 1 ? "clear" : "load",
-                clearValue: { r: clearR, g: clearG, b: clearB, a: clearA },
-                storeOp: "store",
-              },
-            ],
+            colorAttachments: [colorAttachment],
           };
 
           if (depthHandle !== 0) {
             const dEntry = resources.get(depthHandle);
             if (dEntry && dEntry.view) {
+              let depthView = dEntry.view;
+              if (sampleCount > 1) {
+                if (
+                  !dEntry.msaaView ||
+                  dEntry.msaaSamples !== sampleCount ||
+                  dEntry.msaaW !== dEntry.width ||
+                  dEntry.msaaH !== dEntry.height
+                ) {
+                  if (dEntry.msaaTex && typeof dEntry.msaaTex.destroy === "function") {
+                    dEntry.msaaTex.destroy();
+                  }
+                  dEntry.msaaTex = device.createTexture({
+                    size: { width: dEntry.width, height: dEntry.height, depthOrArrayLayers: 1 },
+                    sampleCount,
+                    format: dEntry.format,
+                    usage: GPU_TEX_RENDER_ATTACHMENT,
+                  });
+                  dEntry.msaaView = dEntry.msaaTex ? dEntry.msaaTex.createView() : dEntry.view;
+                  dEntry.msaaSamples = sampleCount;
+                  dEntry.msaaW = dEntry.width;
+                  dEntry.msaaH = dEntry.height;
+                }
+                depthView = dEntry.msaaView;
+              }
               passDesc.depthStencilAttachment = {
-                view: dEntry.view,
+                view: depthView,
                 depthLoadOp: flags & 2 ? "clear" : "load",
                 depthClearValue: clearDepth,
                 depthStoreOp: "store",
               };
             }
+          }
+
+          if (querySet && queryIndex + 2 <= MAX_TIMESTAMP_QUERIES) {
+            passDesc.timestampWrites = {
+              querySet,
+              beginningOfPassWriteIndex: queryIndex,
+              endOfPassWriteIndex: queryIndex + 1,
+            };
+            queryIndex += 2;
           }
 
           passEncoder = cmdEncoder.beginRenderPass(passDesc);
@@ -775,6 +977,8 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const bg = resources.get(bgHandle);
           if (passEncoder && bg) {
             passEncoder.setBindGroup(groupIndex, bg);
+          } else if (computePassEncoder && bg) {
+            computePassEncoder.setBindGroup(groupIndex, bg);
           }
           break;
         }
@@ -850,12 +1054,82 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           break;
         }
 
+        case RHI_CMD_BEGIN_COMPUTE_PASS: {
+          if (!cmdEncoder) {
+            cmdEncoder = device.createCommandEncoder();
+            queryIndex = 0;
+          }
+          const cpassDesc = {};
+          if (querySet && queryIndex + 2 <= MAX_TIMESTAMP_QUERIES) {
+            cpassDesc.timestampWrites = {
+              querySet,
+              beginningOfPassWriteIndex: queryIndex,
+              endOfPassWriteIndex: queryIndex + 1,
+            };
+            queryIndex += 2;
+          }
+          computePassEncoder = cmdEncoder.beginComputePass(cpassDesc);
+          break;
+        }
+
+        case RHI_CMD_SET_COMPUTE_PIPELINE: {
+          const pipeHandle = dv.getUint32(off + 8, true);
+          const cpipe = resources.get(pipeHandle);
+          if (computePassEncoder && cpipe) {
+            computePassEncoder.setPipeline(cpipe);
+          }
+          break;
+        }
+
+        case RHI_CMD_DISPATCH: {
+          const gx = dv.getUint32(off + 8, true);
+          const gy = dv.getUint32(off + 12, true);
+          const gz = dv.getUint32(off + 16, true);
+          if (computePassEncoder) {
+            computePassEncoder.dispatchWorkgroups(gx, gy, gz);
+          }
+          break;
+        }
+
+        case RHI_CMD_END_COMPUTE_PASS: {
+          if (computePassEncoder) {
+            computePassEncoder.end();
+            computePassEncoder = null;
+          }
+          break;
+        }
+
         case RHI_CMD_PRESENT: {
           if (passEncoder) {
             passEncoder.end();
             passEncoder = null;
           }
+          if (computePassEncoder) {
+            computePassEncoder.end();
+            computePassEncoder = null;
+          }
           if (cmdEncoder) {
+            const resolvedQueries =
+              querySet &&
+              queryResolveBuf &&
+              queryReadbackBuf &&
+              queryIndex > 0 &&
+              !queryReadbackInFlight &&
+              typeof cmdEncoder.resolveQuerySet === "function"
+                ? queryIndex
+                : 0;
+            if (resolvedQueries > 0) {
+              queryReadbackInFlight = true;
+              cmdEncoder.resolveQuerySet(querySet, 0, resolvedQueries, queryResolveBuf, 0);
+              cmdEncoder.copyBufferToBuffer(
+                queryResolveBuf,
+                0,
+                queryReadbackBuf,
+                0,
+                resolvedQueries * 8
+              );
+            }
+
             const shouldCopy =
               !readbackInFlight &&
               readbackBuffer &&
@@ -874,8 +1148,54 @@ export async function initGpu(canvas, exports, memory, options = {}) {
                 { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 }
               );
             }
+            const submitT0 = typeof performance !== "undefined" ? performance.now() : 0;
             device.queue.submit([cmdEncoder.finish()]);
             cmdEncoder = null;
+            queryIndex = 0;
+
+            if (resolvedQueries > 0) {
+              queryReadbackBuf
+                .mapAsync(GPU_MAP_READ)
+                .then(() => {
+                  const u64 = new BigUint64Array(
+                    queryReadbackBuf.getMappedRange(0, resolvedQueries * 8)
+                  );
+                  let totalNs = 0n;
+                  for (let i = 0; i + 1 < resolvedQueries; i += 2) {
+                    const t0 = u64[i];
+                    const t1 = u64[i + 1];
+                    if (t1 >= t0) totalNs += t1 - t0;
+                  }
+                  queryReadbackBuf.unmap();
+                  queryReadbackInFlight = false;
+                  const us = Math.max(1, Number((totalNs + 500n) / 1000n)) >>> 0;
+                  lastGpuTimeUs = us;
+                  if (exports && typeof exports.engine_gpu_set_frame_time_us === "function") {
+                    exports.engine_gpu_set_frame_time_us(us);
+                  }
+                })
+                .catch(() => {
+                  queryReadbackInFlight = false;
+                });
+            } else if (
+              !hasTimestampQuery &&
+              device.queue &&
+              typeof device.queue.onSubmittedWorkDone === "function"
+            ) {
+              device.queue
+                .onSubmittedWorkDone()
+                .then(() => {
+                  const dtMs =
+                    (typeof performance !== "undefined" ? performance.now() : submitT0) - submitT0;
+                  const us = Math.max(1, Math.round(dtMs * 1000)) >>> 0;
+                  lastGpuTimeUs = us;
+                  if (exports && typeof exports.engine_gpu_set_frame_time_us === "function") {
+                    exports.engine_gpu_set_frame_time_us(us);
+                  }
+                })
+                .catch(() => {});
+            }
+
             if (shouldCopy) {
               readbackPromise = finishReadback();
             }
@@ -930,28 +1250,48 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     return lastPixels;
   }
 
+  function resize(newW, newH) {
+    const w = newW >>> 0;
+    const h = newH >>> 0;
+    if (w === 0 || h === 0) return;
+    if (w === surfaceWidth && h === surfaceHeight) return;
+    allocSurfaceTargets(w, h);
+  }
+
   function destroy() {
     for (const obj of resources.values()) {
       if (obj && typeof obj.destroy === "function") obj.destroy();
-      else if (obj && obj.texture && typeof obj.texture.destroy === "function") obj.texture.destroy();
+      else if (obj) {
+        if (obj.texture && typeof obj.texture.destroy === "function") obj.texture.destroy();
+        if (obj.msaaTex && typeof obj.msaaTex.destroy === "function") obj.msaaTex.destroy();
+      }
     }
     resources.clear();
     if (surfaceTexture && typeof surfaceTexture.destroy === "function") surfaceTexture.destroy();
     if (readbackBuffer && typeof readbackBuffer.destroy === "function") readbackBuffer.destroy();
+    if (msaaColorTex && typeof msaaColorTex.destroy === "function") msaaColorTex.destroy();
+    if (querySet && typeof querySet.destroy === "function") querySet.destroy();
+    if (queryResolveBuf && typeof queryResolveBuf.destroy === "function") queryResolveBuf.destroy();
+    if (queryReadbackBuf && typeof queryReadbackBuf.destroy === "function") queryReadbackBuf.destroy();
   }
 
   return {
     adapter,
     device,
     context,
-    surfaceTexture,
+    get surfaceTexture() {
+      return surfaceTexture;
+    },
     format: canvasFormat,
+    hasTimestampQuery,
     resources,
     executeStream,
     executeFrame,
     readbackPixels,
+    resize,
     getLastPixels: () => lastPixels,
     getReadbackCount: () => readbackCount,
+    getLastGpuTimeUs: () => lastGpuTimeUs,
     destroy,
   };
 }

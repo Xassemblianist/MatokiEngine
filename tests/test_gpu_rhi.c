@@ -168,7 +168,18 @@ static b32 decode_and_verify_stream(const u8* buf, u32 len, DecodedStreamSummary
             break;
         case RHI_CMD_END_PASS:
         case RHI_CMD_PRESENT:
+        case RHI_CMD_BEGIN_COMPUTE_PASS:
+        case RHI_CMD_END_COMPUTE_PASS:
             if (size != 8u) return FALSE;
+            break;
+        case RHI_CMD_CREATE_COMPUTE_PIPELINE:
+            if (size != 32u || rd_u32(p + 8) == 0u || rd_u32(p + 12) == 0u) return FALSE;
+            break;
+        case RHI_CMD_SET_COMPUTE_PIPELINE:
+            if (size != 12u || rd_u32(p + 8) == 0u) return FALSE;
+            break;
+        case RHI_CMD_DISPATCH:
+            if (size != 20u || rd_u32(p + 8) == 0u || rd_u32(p + 12) == 0u || rd_u32(p + 16) == 0u) return FALSE;
             break;
         default:
             return FALSE;
@@ -617,5 +628,61 @@ TEST(gpu_rhi_corrupted_stream_and_availability) {
     u32 bad_op = 99u;
     memcpy(bad + 16, &bad_op, 4);
     CHECK(!decode_and_verify_stream(bad, 24u, NULL));
+}
+
+/* --- Test 8: Compute pipeline, storage binding, dispatch ve MSAA bayrakları --- */
+
+TEST(gpu_rhi_compute_and_msaa) {
+    static u8 mem[KB(64)];
+    Arena arena;
+    arena_init(&arena, mem, sizeof(mem));
+
+    Rhi rhi;
+    CHECK(rhi_init(&rhi, &arena, 32u, KB(32)));
+
+    const char* cs_wgsl = "@compute @workgroup_size(64) fn main() {}";
+    RhiShader cs = rhi_create_shader(&rhi, cs_wgsl, (u32)strlen(cs_wgsl));
+    CHECK(cs != RHI_INVALID_HANDLE);
+
+    RhiComputePipelineDesc cdesc = { .shader = cs, .entry = "main" };
+    RhiComputePipeline cpipe = rhi_create_compute_pipeline(&rhi, &cdesc);
+    CHECK(cpipe != RHI_INVALID_HANDLE);
+
+    RhiBuffer sbuf = rhi_create_buffer(&rhi, 256u, RHI_BUF_STORAGE | RHI_BUF_COPY_DST);
+    RhiTextureDesc stex_desc = {
+        .width = 64u, .height = 64u, .mip_levels = 1u,
+        .format = RHI_FMT_RGBA16_FLOAT, .usage = RHI_TEX_STORAGE | RHI_TEX_SAMPLED
+    };
+    RhiTexture stex = rhi_create_texture(&rhi, &stex_desc);
+    CHECK(sbuf != RHI_INVALID_HANDLE);
+    CHECK(stex != RHI_INVALID_HANDLE);
+
+    RhiBindGroupDesc cbg_desc = {
+        .pipeline    = cpipe,
+        .group_index = 0u,
+        .entries = {
+            { .binding = 0u, .kind = RHI_BIND_STORAGE_BUFFER,  .resource = sbuf, .offset = 0u, .size = 256u },
+            { .binding = 1u, .kind = RHI_BIND_STORAGE_TEXTURE, .resource = stex, .offset = 0u, .size = 0u }
+        },
+        .entry_count = 2u
+    };
+    RhiBindGroup cbg = rhi_create_bind_group(&rhi, &cbg_desc);
+    CHECK(cbg != RHI_INVALID_HANDLE);
+
+    CHECK(rhi_begin_compute_pass(&rhi));
+    CHECK(!rhi_begin_compute_pass(&rhi)); /* İç içe compute pass yasak */
+    CHECK(rhi_set_compute_pipeline(&rhi, cpipe));
+    CHECK(rhi_set_bind_group(&rhi, 0u, cbg));
+    CHECK(rhi_dispatch(&rhi, 4u, 1u, 1u));
+    CHECK(rhi_end_compute_pass(&rhi));
+    CHECK(rhi_present(&rhi));
+
+    DecodedStreamSummary sum;
+    CHECK(decode_and_verify_stream(rhi_stream_data(&rhi), rhi_stream_bytes(&rhi), &sum));
+    CHECK(sum.op_counts[RHI_CMD_CREATE_COMPUTE_PIPELINE] == 1u);
+    CHECK(sum.op_counts[RHI_CMD_BEGIN_COMPUTE_PASS]      == 1u);
+    CHECK(sum.op_counts[RHI_CMD_SET_COMPUTE_PIPELINE]    == 1u);
+    CHECK(sum.op_counts[RHI_CMD_DISPATCH]                == 1u);
+    CHECK(sum.op_counts[RHI_CMD_END_COMPUTE_PASS]        == 1u);
 }
 

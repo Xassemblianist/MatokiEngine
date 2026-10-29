@@ -23,6 +23,7 @@ typedef u32 RhiSampler;
 typedef u32 RhiShader;
 typedef u32 RhiPipeline;
 typedef u32 RhiBindGroup;
+typedef u32 RhiComputePipeline;
 
 #define RHI_INVALID_HANDLE      0u
 #define RHI_DEFAULT_MAX_RES     256u
@@ -31,13 +32,14 @@ typedef u32 RhiBindGroup;
 #define RHI_MAX_BINDINGS        8u
 
 typedef enum {
-    RHI_RES_NONE       = 0,
-    RHI_RES_BUFFER     = 1,
-    RHI_RES_TEXTURE    = 2,
-    RHI_RES_SAMPLER    = 3,
-    RHI_RES_SHADER     = 4,
-    RHI_RES_PIPELINE   = 5,
-    RHI_RES_BIND_GROUP = 6
+    RHI_RES_NONE             = 0,
+    RHI_RES_BUFFER           = 1,
+    RHI_RES_TEXTURE          = 2,
+    RHI_RES_SAMPLER          = 3,
+    RHI_RES_SHADER           = 4,
+    RHI_RES_PIPELINE         = 5,
+    RHI_RES_BIND_GROUP       = 6,
+    RHI_RES_COMPUTE_PIPELINE = 7
 } RhiResourceType;
 
 #define RHI_HANDLE_MAKE(type, gen, idx) \
@@ -53,7 +55,8 @@ typedef enum {
     RHI_BUF_INDEX    = 1u << 1,
     RHI_BUF_UNIFORM  = 1u << 2,
     RHI_BUF_COPY_DST = 1u << 3,
-    RHI_BUF_COPY_SRC = 1u << 4
+    RHI_BUF_COPY_SRC = 1u << 4,
+    RHI_BUF_STORAGE  = 1u << 5
 } RhiBufferUsage;
 
 typedef enum {
@@ -61,14 +64,17 @@ typedef enum {
     RHI_FMT_RGBA8_UNORM     = 1,
     RHI_FMT_BGRA8_UNORM     = 2,
     RHI_FMT_DEPTH24_PLUS    = 3,
-    RHI_FMT_DEPTH32_FLOAT   = 4
+    RHI_FMT_DEPTH32_FLOAT   = 4,
+    RHI_FMT_RGBA16_FLOAT    = 5,
+    RHI_FMT_RGBA32_FLOAT    = 6
 } RhiTextureFormat;
 
 typedef enum {
     RHI_TEX_SAMPLED           = 1u << 0,
     RHI_TEX_RENDER_ATTACHMENT = 1u << 1,
     RHI_TEX_COPY_DST          = 1u << 2,
-    RHI_TEX_COPY_SRC          = 1u << 3
+    RHI_TEX_COPY_SRC          = 1u << 3,
+    RHI_TEX_STORAGE           = 1u << 4
 } RhiTextureUsage;
 
 typedef enum {
@@ -129,9 +135,11 @@ typedef enum {
 } RhiIndexFormat;
 
 typedef enum {
-    RHI_BIND_BUFFER  = 1,
-    RHI_BIND_TEXTURE = 2,
-    RHI_BIND_SAMPLER = 3
+    RHI_BIND_BUFFER          = 1,
+    RHI_BIND_TEXTURE         = 2,
+    RHI_BIND_SAMPLER         = 3,
+    RHI_BIND_STORAGE_BUFFER  = 4,
+    RHI_BIND_STORAGE_TEXTURE = 5
 } RhiBindingKind;
 
 /* --- İkili Komut Akışı Biçimi (ARCHITECTURE.md §2) ---
@@ -151,27 +159,32 @@ typedef struct {
 _Static_assert(sizeof(RhiStreamHeader) == 16, "RhiStreamHeader 16 bayt olmali");
 
 typedef enum {
-    RHI_CMD_NOP               = 0,
-    RHI_CMD_CREATE_BUFFER     = 1,
-    RHI_CMD_CREATE_TEXTURE    = 2,
-    RHI_CMD_CREATE_SAMPLER    = 3,
-    RHI_CMD_CREATE_SHADER     = 4,
-    RHI_CMD_CREATE_PIPELINE   = 5,
-    RHI_CMD_CREATE_BIND_GROUP = 6,
-    RHI_CMD_DESTROY_RESOURCE  = 7,
-    RHI_CMD_WRITE_BUFFER      = 8,
-    RHI_CMD_WRITE_TEXTURE     = 9,
-    RHI_CMD_BEGIN_PASS        = 10,
-    RHI_CMD_SET_PIPELINE      = 11,
-    RHI_CMD_SET_BIND_GROUP    = 12,
-    RHI_CMD_SET_VERTEX_BUFFER = 13,
-    RHI_CMD_SET_INDEX_BUFFER  = 14,
-    RHI_CMD_DRAW              = 15,
-    RHI_CMD_DRAW_INDEXED      = 16,
-    RHI_CMD_SET_VIEWPORT      = 17,
-    RHI_CMD_END_PASS          = 18,
-    RHI_CMD_PRESENT           = 19,
-    RHI_CMD_COUNT             = 20
+    RHI_CMD_NOP                     = 0,
+    RHI_CMD_CREATE_BUFFER           = 1,
+    RHI_CMD_CREATE_TEXTURE          = 2,
+    RHI_CMD_CREATE_SAMPLER          = 3,
+    RHI_CMD_CREATE_SHADER           = 4,
+    RHI_CMD_CREATE_PIPELINE         = 5,
+    RHI_CMD_CREATE_BIND_GROUP       = 6,
+    RHI_CMD_DESTROY_RESOURCE        = 7,
+    RHI_CMD_WRITE_BUFFER            = 8,
+    RHI_CMD_WRITE_TEXTURE           = 9,
+    RHI_CMD_BEGIN_PASS              = 10,
+    RHI_CMD_SET_PIPELINE            = 11,
+    RHI_CMD_SET_BIND_GROUP          = 12,
+    RHI_CMD_SET_VERTEX_BUFFER       = 13,
+    RHI_CMD_SET_INDEX_BUFFER        = 14,
+    RHI_CMD_DRAW                    = 15,
+    RHI_CMD_DRAW_INDEXED            = 16,
+    RHI_CMD_SET_VIEWPORT            = 17,
+    RHI_CMD_END_PASS                = 18,
+    RHI_CMD_PRESENT                 = 19,
+    RHI_CMD_CREATE_COMPUTE_PIPELINE = 20,
+    RHI_CMD_BEGIN_COMPUTE_PASS      = 21,
+    RHI_CMD_SET_COMPUTE_PIPELINE    = 22,
+    RHI_CMD_DISPATCH                = 23,
+    RHI_CMD_END_COMPUTE_PASS        = 24,
+    RHI_CMD_COUNT                   = 25
 } RhiCmdOp;
 
 typedef struct {
@@ -366,25 +379,57 @@ typedef struct {
     RhiCmdHeader hdr; /* opcode=RHI_CMD_PRESENT, size=8 */
 } RhiCmdPresent;
 
-_Static_assert(sizeof(RhiCmdCreateBuffer)    == 20, "RhiCmdCreateBuffer");
-_Static_assert(sizeof(RhiCmdCreateTexture)   == 32, "RhiCmdCreateTexture");
-_Static_assert(sizeof(RhiCmdCreateSampler)   == 32, "RhiCmdCreateSampler");
-_Static_assert(sizeof(RhiCmdCreateShader)    == 16, "RhiCmdCreateShader");
-_Static_assert(sizeof(RhiCmdCreatePipeline)  == 96, "RhiCmdCreatePipeline");
-_Static_assert(sizeof(RhiCmdCreateBindGroup) == 24, "RhiCmdCreateBindGroup");
-_Static_assert(sizeof(RhiCmdDestroyResource) == 12, "RhiCmdDestroyResource");
-_Static_assert(sizeof(RhiCmdWriteBuffer)     == 20, "RhiCmdWriteBuffer");
-_Static_assert(sizeof(RhiCmdWriteTexture)    == 40, "RhiCmdWriteTexture");
-_Static_assert(sizeof(RhiCmdBeginPass)       == 40, "RhiCmdBeginPass");
-_Static_assert(sizeof(RhiCmdSetPipeline)     == 12, "RhiCmdSetPipeline");
-_Static_assert(sizeof(RhiCmdSetBindGroup)    == 16, "RhiCmdSetBindGroup");
-_Static_assert(sizeof(RhiCmdSetVertexBuffer) == 24, "RhiCmdSetVertexBuffer");
-_Static_assert(sizeof(RhiCmdSetIndexBuffer)  == 24, "RhiCmdSetIndexBuffer");
-_Static_assert(sizeof(RhiCmdDraw)            == 24, "RhiCmdDraw");
-_Static_assert(sizeof(RhiCmdDrawIndexed)     == 28, "RhiCmdDrawIndexed");
-_Static_assert(sizeof(RhiCmdSetViewport)     == 32, "RhiCmdSetViewport");
-_Static_assert(sizeof(RhiCmdEndPass)         == 8,  "RhiCmdEndPass");
-_Static_assert(sizeof(RhiCmdPresent)         == 8,  "RhiCmdPresent");
+typedef struct {
+    RhiCmdHeader hdr;          /* opcode=RHI_CMD_CREATE_COMPUTE_PIPELINE, size=32 */
+    u32          handle;
+    u32          shader;
+    char         entry[16];
+} RhiCmdCreateComputePipeline;
+
+typedef struct {
+    RhiCmdHeader hdr; /* opcode=RHI_CMD_BEGIN_COMPUTE_PASS, size=8 */
+} RhiCmdBeginComputePass;
+
+typedef struct {
+    RhiCmdHeader hdr;      /* opcode=RHI_CMD_SET_COMPUTE_PIPELINE, size=12 */
+    u32          pipeline;
+} RhiCmdSetComputePipeline;
+
+typedef struct {
+    RhiCmdHeader hdr; /* opcode=RHI_CMD_DISPATCH, size=20 */
+    u32          x;
+    u32          y;
+    u32          z;
+} RhiCmdDispatch;
+
+typedef struct {
+    RhiCmdHeader hdr; /* opcode=RHI_CMD_END_COMPUTE_PASS, size=8 */
+} RhiCmdEndComputePass;
+
+_Static_assert(sizeof(RhiCmdCreateBuffer)          == 20, "RhiCmdCreateBuffer");
+_Static_assert(sizeof(RhiCmdCreateTexture)         == 32, "RhiCmdCreateTexture");
+_Static_assert(sizeof(RhiCmdCreateSampler)         == 32, "RhiCmdCreateSampler");
+_Static_assert(sizeof(RhiCmdCreateShader)          == 16, "RhiCmdCreateShader");
+_Static_assert(sizeof(RhiCmdCreatePipeline)        == 96, "RhiCmdCreatePipeline");
+_Static_assert(sizeof(RhiCmdCreateBindGroup)       == 24, "RhiCmdCreateBindGroup");
+_Static_assert(sizeof(RhiCmdDestroyResource)       == 12, "RhiCmdDestroyResource");
+_Static_assert(sizeof(RhiCmdWriteBuffer)           == 20, "RhiCmdWriteBuffer");
+_Static_assert(sizeof(RhiCmdWriteTexture)          == 40, "RhiCmdWriteTexture");
+_Static_assert(sizeof(RhiCmdBeginPass)             == 40, "RhiCmdBeginPass");
+_Static_assert(sizeof(RhiCmdSetPipeline)           == 12, "RhiCmdSetPipeline");
+_Static_assert(sizeof(RhiCmdSetBindGroup)          == 16, "RhiCmdSetBindGroup");
+_Static_assert(sizeof(RhiCmdSetVertexBuffer)       == 24, "RhiCmdSetVertexBuffer");
+_Static_assert(sizeof(RhiCmdSetIndexBuffer)        == 24, "RhiCmdSetIndexBuffer");
+_Static_assert(sizeof(RhiCmdDraw)                  == 24, "RhiCmdDraw");
+_Static_assert(sizeof(RhiCmdDrawIndexed)           == 28, "RhiCmdDrawIndexed");
+_Static_assert(sizeof(RhiCmdSetViewport)           == 32, "RhiCmdSetViewport");
+_Static_assert(sizeof(RhiCmdEndPass)               == 8,  "RhiCmdEndPass");
+_Static_assert(sizeof(RhiCmdPresent)               == 8,  "RhiCmdPresent");
+_Static_assert(sizeof(RhiCmdCreateComputePipeline) == 32, "RhiCmdCreateComputePipeline");
+_Static_assert(sizeof(RhiCmdBeginComputePass)      == 8,  "RhiCmdBeginComputePass");
+_Static_assert(sizeof(RhiCmdSetComputePipeline)    == 12, "RhiCmdSetComputePipeline");
+_Static_assert(sizeof(RhiCmdDispatch)              == 20, "RhiCmdDispatch");
+_Static_assert(sizeof(RhiCmdEndComputePass)        == 8,  "RhiCmdEndComputePass");
 
 /* --- Hata Halkası (JS → C geri bildirim, paylaşımlı bellek) --- */
 
@@ -467,10 +512,16 @@ typedef struct {
     b32              depth_test;
     b32              depth_write;
     RhiCompareFunc   depth_compare;
+    u32              sample_count;    /* 0 veya 1 = 1x, 4 = 4x MSAA */
 } RhiPipelineDesc;
 
 typedef struct {
-    RhiPipeline  pipeline;
+    RhiShader   shader;
+    const char* entry; /* NULL ise "compute" */
+} RhiComputePipelineDesc;
+
+typedef struct {
+    RhiHandle    pipeline; /* RhiPipeline veya RhiComputePipeline */
     u32          group_index;
     RhiBindEntry entries[RHI_MAX_BINDINGS];
     u32          entry_count;
@@ -483,6 +534,7 @@ typedef struct {
     f32        clear_r, clear_g, clear_b, clear_a;
     b32        clear_depth;
     f32        clear_depth_val;
+    u32        sample_count;  /* 0 veya 1 = 1x, 4 = 4x MSAA */
 } RhiPassDesc;
 
 /* --- Kaynak Yuvası ve RHI Bağlamı --- */
@@ -508,6 +560,7 @@ typedef struct {
     u32              stream_used; /* Yazılan bayt sayısı */
     u32              cmd_count;   /* Akıştaki komut sayısı */
     b32              in_pass;     /* begin_pass..end_pass arasında TRUE */
+    b32              in_compute_pass; /* begin_compute_pass..end_compute_pass arasında TRUE */
     b32              overflow;    /* Akış kapasitesi aşıldıysa TRUE */
     u32              dropped_cmds;/* Kapasite aşımı veya geçersiz durum yüzünden reddedilen komutlar */
     RhiErrorRing     errors;      /* JS/C hata halkası */
@@ -528,20 +581,26 @@ const RhiResourceSlot* rhi_resource_slot(const Rhi* rhi, RhiHandle h);
 
 /* --- Kaynak Oluşturma ve Yok Etme --- */
 
-RhiBuffer    rhi_create_buffer(Rhi* rhi, u32 byte_size, u32 usage);
-RhiTexture   rhi_create_texture(Rhi* rhi, const RhiTextureDesc* desc);
-RhiSampler   rhi_create_sampler(Rhi* rhi, const RhiSamplerDesc* desc);
-RhiShader    rhi_create_shader(Rhi* rhi, const char* wgsl_code, u32 code_len);
-RhiPipeline  rhi_create_pipeline(Rhi* rhi, const RhiPipelineDesc* desc);
-RhiBindGroup rhi_create_bind_group(Rhi* rhi, const RhiBindGroupDesc* desc);
-b32          rhi_destroy_resource(Rhi* rhi, RhiHandle handle);
+RhiBuffer          rhi_create_buffer(Rhi* rhi, u32 byte_size, u32 usage);
+RhiTexture         rhi_create_texture(Rhi* rhi, const RhiTextureDesc* desc);
+RhiSampler         rhi_create_sampler(Rhi* rhi, const RhiSamplerDesc* desc);
+RhiShader          rhi_create_shader(Rhi* rhi, const char* wgsl_code, u32 code_len);
+RhiPipeline        rhi_create_pipeline(Rhi* rhi, const RhiPipelineDesc* desc);
+RhiComputePipeline rhi_create_compute_pipeline(Rhi* rhi, const RhiComputePipelineDesc* desc);
+RhiBindGroup       rhi_create_bind_group(Rhi* rhi, const RhiBindGroupDesc* desc);
+b32                rhi_destroy_resource(Rhi* rhi, RhiHandle handle);
 
-/* --- Veri Yükleme ve Çizim Komutları --- */
+/* --- Veri Yükleme ve Çizim / Compute Komutları --- */
 
 b32 rhi_write_buffer(Rhi* rhi, RhiBuffer dst, u32 dst_offset, const void* data, u32 data_len);
 b32 rhi_write_texture(Rhi* rhi, RhiTexture dst, u32 mip_level,
                       u32 x, u32 y, u32 width, u32 height,
                       u32 bytes_per_row, const void* data, u32 data_len);
+
+b32 rhi_begin_compute_pass(Rhi* rhi);
+b32 rhi_set_compute_pipeline(Rhi* rhi, RhiComputePipeline pipeline);
+b32 rhi_dispatch(Rhi* rhi, u32 x, u32 y, u32 z);
+b32 rhi_end_compute_pass(Rhi* rhi);
 
 b32 rhi_begin_pass(Rhi* rhi, const RhiPassDesc* desc);
 b32 rhi_set_pipeline(Rhi* rhi, RhiPipeline pipeline);
@@ -566,8 +625,16 @@ u32 rhi_poll_errors(Rhi* rhi);   /* Tüm bekleyen hataları LOG'a yazar, sayıs�
 
 b32           engine_gpu_available(void);
 void          engine_gpu_set_available(b32 available);
+void          engine_gpu_set_viewport_size(u32 width, u32 height);
+u32           engine_gpu_viewport_width(void);
+u32           engine_gpu_viewport_height(void);
+void          engine_gpu_set_frame_time_us(u32 us);
+u32           engine_gpu_frame_time_us(void);
+void          engine_gpu_set_has_timestamp(b32 has);
+b32           engine_gpu_has_timestamp(void);
 const u8*     engine_gpu_cmd_stream(void);
 u32           engine_gpu_cmd_bytes(void);
+void          engine_gpu_clear_cmds(void);
 RhiErrorRing* engine_gpu_error_ring(void);
 b32           engine_gpu_push_error(u32 kind, u32 handle, u32 line, u32 col,
                                     const char* msg, u32 msg_len);
