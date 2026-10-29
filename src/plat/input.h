@@ -6,6 +6,7 @@
 #define PLAT_INPUT_H
 
 #include "core/types.h"
+#include "plat/input_ring.h"
 
 #define INPUT_MAX_CHARS 32
 

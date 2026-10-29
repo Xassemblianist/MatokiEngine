@@ -20,7 +20,7 @@ let rafId = 0;
 
 function readCString(ptr, len) {
   const bytes = new Uint8Array(memory.buffer, ptr, len);
-  if (memory.buffer instanceof SharedArrayBuffer) {
+  if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer) {
     return decoder.decode(bytes.slice());
   }
   return decoder.decode(bytes);
@@ -68,8 +68,11 @@ function createTableForModule(mod) {
 
 async function fetchEngineModule(caps) {
   const urls = [caps.wasmUrl];
-  if (caps.wasmUrl !== "./engine.wasm") {
+  if (caps.wasmUrl !== "./engine.wasm" && !caps.wasmUrl.includes("engine_st.wasm")) {
     urls.push("./engine.wasm");
+  }
+  if (!urls.includes("./engine_st.wasm")) {
+    urls.push("./engine_st.wasm");
   }
   let lastErr = null;
   for (const url of urls) {
@@ -79,6 +82,7 @@ async function fetchEngineModule(caps) {
       const bytes = await resp.arrayBuffer();
       const mod = await WebAssembly.compile(bytes);
       caps.wasmUrl = url;
+      caps.isSt = url.includes("engine_st.wasm");
       return mod;
     } catch (err) {
       lastErr = err;
@@ -94,6 +98,19 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
   let inputU32 = null;
   let inputChars = null;
 
+  const INPUT_EVENT_NONE        = 0;
+  const INPUT_EVENT_KEY_DOWN    = 1;
+  const INPUT_EVENT_KEY_UP      = 2;
+  const INPUT_EVENT_MOUSE_MOVE  = 3;
+  const INPUT_EVENT_MOUSE_DOWN  = 4;
+  const INPUT_EVENT_MOUSE_UP    = 5;
+  const INPUT_EVENT_MOUSE_WHEEL = 6;
+  const INPUT_EVENT_CHAR        = 7;
+
+  const ringPtr = typeof exports.engine_input_ring === "function" ? exports.engine_input_ring() : 0;
+  let ringU32 = null;
+  let ringFrameCounter = 0;
+
   function refreshInputViews() {
     if (cachedBuffer === memory.buffer) return;
     cachedBuffer = memory.buffer;
@@ -101,9 +118,60 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     inputI32 = new Int32Array(cachedBuffer, inputPtr + 256, 6);
     inputU32 = new Uint32Array(cachedBuffer, inputPtr + 256, 6);
     inputChars = new Uint32Array(cachedBuffer, inputPtr + 280, 33);
+    if (ringPtr) {
+      ringU32 = new Uint32Array(cachedBuffer, ringPtr, 4);
+    }
   }
 
   refreshInputViews();
+
+  function pushRingEvent(type, ev = {}) {
+    if (!ringPtr) return;
+    refreshInputViews();
+    const isSAB = typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer;
+    const writePos = isSAB ? Atomics.load(ringU32, 0) : ringU32[0];
+    const readPos = isSAB ? Atomics.load(ringU32, 1) : ringU32[1];
+    const cap = ringU32[2] || 256;
+    if ((writePos - readPos) >= cap) {
+      if (isSAB) Atomics.add(ringU32, 3, 1);
+      else ringU32[3] = (ringU32[3] + 1) >>> 0;
+      return;
+    }
+    const idx = writePos & (cap - 1);
+    const evOffset = ringPtr + 16 + idx * 64;
+    const evU32 = new Uint32Array(memory.buffer, evOffset, 16);
+    const evI32 = new Int32Array(memory.buffer, evOffset, 16);
+    const evF64 = new Float64Array(memory.buffer, evOffset + 8, 1);
+
+    evU32[0] = type >>> 0;
+    evU32[1] = (ev.frame !== undefined ? ev.frame : ringFrameCounter) >>> 0;
+    evF64[0] = ev.time_ms !== undefined ? ev.time_ms : performance.now();
+    evI32[4] = (ev.mouse_x || 0) | 0;
+    evI32[5] = (ev.mouse_y || 0) | 0;
+    evI32[6] = (ev.mouse_dx || 0) | 0;
+    evI32[7] = (ev.mouse_dy || 0) | 0;
+    evU32[8] = (ev.key || 0) >>> 0;
+    evU32[9] = (ev.buttons || 0) >>> 0;
+    evI32[10] = (ev.wheel || 0) | 0;
+    evU32[11] = (ev.char_code || 0) >>> 0;
+    evU32[12] = (ev.modifiers || 0) >>> 0;
+
+    const nextWrite = (writePos + 1) >>> 0;
+    if (isSAB) {
+      Atomics.store(ringU32, 0, nextWrite);
+    } else {
+      ringU32[0] = nextWrite;
+    }
+  }
+
+  function getModifiers(e) {
+    let m = 0;
+    if (e.shiftKey) m |= 1;
+    if (e.ctrlKey)  m |= 2;
+    if (e.altKey)   m |= 4;
+    if (e.metaKey)  m |= 8;
+    return m;
+  }
 
   function pushCharCodepoint(cp) {
     const count = inputChars[32];
@@ -117,6 +185,15 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     refreshInputViews();
     const code = e.keyCode & 0xff;
     inputKeys[code] = 1;
+    const mods = getModifiers(e);
+
+    pushRingEvent(INPUT_EVENT_KEY_DOWN, {
+      key: code,
+      modifiers: mods,
+      mouse_x: inputI32[0],
+      mouse_y: inputI32[1],
+      buttons: inputU32[4],
+    });
 
     if (
       code === 8 ||
@@ -135,10 +212,16 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     if (!e.ctrlKey && !e.altKey && !e.metaKey) {
       if (e.key && e.key.length === 1) {
         const cp = e.key.codePointAt(0);
-        if (cp >= 32) pushCharCodepoint(cp);
+        if (cp >= 32) {
+          pushCharCodepoint(cp);
+          pushRingEvent(INPUT_EVENT_CHAR, { char_code: cp, key: code, modifiers: mods });
+        }
       } else if (e.key && [...e.key].length === 1) {
         const cp = e.key.codePointAt(0);
-        if (cp >= 32) pushCharCodepoint(cp);
+        if (cp >= 32) {
+          pushCharCodepoint(cp);
+          pushRingEvent(INPUT_EVENT_CHAR, { char_code: cp, key: code, modifiers: mods });
+        }
       }
     }
   });
@@ -147,6 +230,15 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     refreshInputViews();
     const code = e.keyCode & 0xff;
     inputKeys[code] = 0;
+    const mods = getModifiers(e);
+
+    pushRingEvent(INPUT_EVENT_KEY_UP, {
+      key: code,
+      modifiers: mods,
+      mouse_x: inputI32[0],
+      mouse_y: inputI32[1],
+      buttons: inputU32[4],
+    });
   });
 
   window.addEventListener("blur", () => {
@@ -185,8 +277,12 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     const prevY = inputI32[1];
     inputI32[0] = clampedX;
     inputI32[1] = clampedY;
-    inputI32[2] += clampedX - prevX;
-    inputI32[3] += clampedY - prevY;
+    const dx = clampedX - prevX;
+    const dy = clampedY - prevY;
+    inputI32[2] += dx;
+    inputI32[3] += dy;
+
+    return { clampedX, clampedY, dx, dy };
   }
 
   const wantsLock = () => !!(exports.engine_wants_pointer_lock && exports.engine_wants_pointer_lock());
@@ -197,18 +293,44 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
 
   window.addEventListener("mousemove", (e) => {
     refreshInputViews();
+    const mods = getModifiers(e);
     if (isLocked()) {
-      inputI32[2] += e.movementX | 0;
-      inputI32[3] += e.movementY | 0;
+      const dx = e.movementX | 0;
+      const dy = e.movementY | 0;
+      inputI32[2] += dx;
+      inputI32[3] += dy;
+      pushRingEvent(INPUT_EVENT_MOUSE_MOVE, {
+        mouse_x: inputI32[0],
+        mouse_y: inputI32[1],
+        mouse_dx: dx,
+        mouse_dy: dy,
+        buttons: inputU32[4],
+        modifiers: mods,
+      });
       return;
     }
-    updateMouseCoords(e);
+    const coords = updateMouseCoords(e);
+    pushRingEvent(INPUT_EVENT_MOUSE_MOVE, {
+      mouse_x: coords.clampedX,
+      mouse_y: coords.clampedY,
+      mouse_dx: coords.dx,
+      mouse_dy: coords.dy,
+      buttons: inputU32[4],
+      modifiers: mods,
+    });
   });
 
   window.addEventListener("mousedown", (e) => {
     refreshInputViews();
     if (!isLocked()) updateMouseCoords(e);
     inputU32[4] = e.buttons;
+    const mods = getModifiers(e);
+    pushRingEvent(INPUT_EVENT_MOUSE_DOWN, {
+      mouse_x: inputI32[0],
+      mouse_y: inputI32[1],
+      buttons: e.buttons,
+      modifiers: mods,
+    });
     if (e.target === canvas && !isLocked() && wantsLock() && canvas.requestPointerLock) {
       canvas.requestPointerLock();
     }
@@ -218,20 +340,40 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
     refreshInputViews();
     if (!isLocked()) updateMouseCoords(e);
     inputU32[4] = e.buttons;
+    const mods = getModifiers(e);
+    pushRingEvent(INPUT_EVENT_MOUSE_UP, {
+      mouse_x: inputI32[0],
+      mouse_y: inputI32[1],
+      buttons: e.buttons,
+      modifiers: mods,
+    });
   });
 
   window.addEventListener(
     "wheel",
     (e) => {
       refreshInputViews();
-      inputI32[5] += Math.sign(e.deltaY);
+      const delta = Math.sign(e.deltaY);
+      inputI32[5] += delta;
+      const mods = getModifiers(e);
+      pushRingEvent(INPUT_EVENT_MOUSE_WHEEL, {
+        mouse_x: inputI32[0],
+        mouse_y: inputI32[1],
+        wheel: delta,
+        buttons: inputU32[4],
+        modifiers: mods,
+      });
     },
     { passive: true }
   );
 
   window.addEventListener("contextmenu", (e) => e.preventDefault());
 
-  return { wantsLock, isLocked };
+  function onNextFrame() {
+    ringFrameCounter++;
+  }
+
+  return { wantsLock, isLocked, onNextFrame };
 }
 
 async function init() {
@@ -244,6 +386,7 @@ async function init() {
 
   const canWorkerRender =
     !forceMain &&
+    !caps.isSt &&
     caps.offscreenCanvas &&
     caps.sab &&
     canvas &&
@@ -286,12 +429,18 @@ async function init() {
       try {
         const dropMod = await import("./filedrop.js");
         dropMod.installFileDrop(exports, memory);
-      } catch (_e) {}
+      } catch (err) {
+        console.warn("[platform] worker render filedrop yüklenemedi:", err);
+      }
 
-      try {
-        const audioMod = await import("./audio.js");
-        audioMod.installAudio(exports, memory);
-      } catch (_e) {}
+      if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer) {
+        try {
+          const audioMod = await import("./audio.js");
+          audioMod.installAudio(exports, memory);
+        } catch (err) {
+          console.warn("[platform] worker render audio yüklenemedi:", err);
+        }
+      }
 
       lockHelpers = installInputListeners(exports, rw.fbW, rw.fbH, rw.inputPtr);
       return;
@@ -301,12 +450,15 @@ async function init() {
     }
   }
 
-  // 2) Yedek yol: Ana iş parçacığında render (OffscreenCanvas yoksa veya ?worker=0 ise)
+  // 2) Yedek yol: Ana iş parçacığında render (OffscreenCanvas yoksa, ST moduysa veya ?worker=0 ise)
   const ctx = canvas.getContext("2d", { alpha: false });
   table = createTableForModule(mod);
 
+  const isSt = Boolean(caps.isSt || !caps.sab);
+  const trySharedList = isSt ? [false] : (caps.sab ? [true, false] : [false]);
+
   let instance = null;
-  for (const tryShared of [false, true]) {
+  for (const tryShared of trySharedList) {
     try {
       memory = new WebAssembly.Memory({ initial: 4096, maximum: 16384, shared: tryShared });
       const env = {
@@ -341,17 +493,26 @@ async function init() {
   try {
     const dropMod = await import("./filedrop.js");
     dropMod.installFileDrop(exports, memory);
-  } catch (_e) {}
+  } catch (err) {
+    console.warn("[platform] filedrop yüklenemedi:", err);
+  }
+
+  if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer) {
+    try {
+      const audioMod = await import("./audio.js");
+      audioMod.installAudio(exports, memory);
+    } catch (err) {
+      console.warn("[platform] audio yüklenemedi:", err);
+    }
+  } else {
+    console.log("[platform] Tek iş parçacıklı kip veya SharedArrayBuffer yok: ses atlandı");
+  }
 
   try {
-    const audioMod = await import("./audio.js");
-    audioMod.installAudio(exports, memory);
-  } catch (_e) {}
-
-  try {
-    if (memory.buffer instanceof SharedArrayBuffer) {
-      const hc = navigator.hardwareConcurrency || 8;
-      const n = Math.min(Math.max(hc - 1, 7), 8);
+    if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer && !isSt) {
+      const THREAD_MAX_WORKERS = 8;
+      const hc = navigator.hardwareConcurrency || 4;
+      const n = Math.max(1, Math.min(hc - 1, THREAD_MAX_WORKERS));
       await startThreads(n, mod, memory, table, {
         instance,
         onLog(text, tid) {
@@ -362,7 +523,9 @@ async function init() {
         },
       });
     }
-  } catch (_e) {}
+  } catch (err) {
+    console.warn("[platform] Worker thread havuzu başlatılamadı:", err);
+  }
 
   applyCapsToEngine(exports, caps);
   exports.engine_init(Date.now() >>> 0);
@@ -383,7 +546,7 @@ async function init() {
   canvas.width = fbW;
   canvas.height = fbH;
 
-  const { wantsLock, isLocked } = installInputListeners(exports, fbW, fbH, inputPtr);
+  const { wantsLock, isLocked, onNextFrame } = installInputListeners(exports, fbW, fbH, inputPtr);
 
   let cachedBuffer = null;
   let isShared = false;
@@ -418,6 +581,7 @@ async function init() {
 
     try {
       if (isLocked() && !wantsLock()) document.exitPointerLock();
+      if (typeof onNextFrame === "function") onNextFrame();
       exports.engine_frame(now, dt);
     } catch (err) {
       if (running) {

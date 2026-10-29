@@ -53,6 +53,7 @@ games/        motorun üstündeki oyunlar (blokca/ = voxel, ileride)
 void  engine_init(u32 seed);
 void  engine_frame(f64 now_ms, f32 dt);
 u8*   engine_input_buf(void);     // InputState, JS yazar
+InputRing* engine_input_ring(void); // JS → C SPSC kare damgalı girdi olay halkası (src/plat/input_ring.h)
 u32*  engine_framebuffer(void);   // RGBA8, w*h u32
 u32   engine_fb_width(void);
 u32   engine_fb_height(void);
@@ -77,10 +78,10 @@ u32           engine_gpu_test_frame(f64 now_ms, f32 dt); // bağımsız WebGPU R
 void  engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u32 gpu_max_buf_mb);
 ```
 
-### Yükleyici seçim kuralı ve Worker'da render (D-109)
+### Yükleyici seçim kuralı ve Worker'da render (D-109, H10)
 - `web/caps.js` açılışta tarayıcı ve Wasm yeteneklerini `WebAssembly.validate` probları ve API denetimleriyle tespit eder.
-- **İkili seçimi**: `relaxedSimd` destekleniyorsa `engine_relaxed.wasm` (`-mrelaxed-simd`), aksi halde `engine.wasm` yüklenir (`?relaxed=0|1` ile zorlanabilir).
-- **Worker'da render**: `OffscreenCanvas` (`transferControlToOffscreen`) ve `SharedArrayBuffer` mevcutsa motor döngüsü (`engine_init`, `engine_frame`, `putImageData`) ve alt raster worker havuzu bir render worker'da (`tid=0`) çalışır; ana iş parçacığı yalnızca girdi (`InputState`), ses (`AudioWorklet`), sürükle-bırak ve DOM olaylarını köprüler. Desteklenmezse (veya `?worker=0` verilirse) ana iş parçacığı `requestAnimationFrame` döngüsüne düşülür.
+- **İkili seçimi**: SharedArrayBuffer / threads desteklenmiyorsa (veya `?st=1` / `?threads=0` verilmişse) tek iş parçacıklı yedek `engine_st.wasm` yüklenir (atomics ve shared-memory yok, iş kuyruğu seri çalışır). Çoklu iş parçacığı destekleniyorsa: `relaxedSimd` varsa `engine_relaxed.wasm` (`-mrelaxed-simd`), aksi halde `engine.wasm` yüklenir (`?relaxed=0|1` ile zorlanabilir).
+- **Worker'da render**: ST modunda olmayan sistemlerde `OffscreenCanvas` (`transferControlToOffscreen`) ve `SharedArrayBuffer` mevcutsa motor döngüsü (`engine_init`, `engine_frame`, `putImageData`) ve alt raster worker havuzu bir render worker'da (`tid=0`) çalışır; ana iş parçacığı yalnızca girdi (`InputState` ve `InputRing`), ses (`AudioWorklet`), sürükle-bırak ve DOM olaylarını köprüler. Desteklenmezse (veya `?worker=0` verilirse) ana iş parçacığı `requestAnimationFrame` döngüsüne düşülür.
 
 ### Imports (`src/plat/platform.h`, modül `env`)
 ```c
