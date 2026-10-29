@@ -22,6 +22,8 @@
 #include "font/atlas.h"
 #include "font/text.h"
 #include "font/matoki_sans_data.h"
+#include "gpu/rhi.h"
+#include "gpu/gpu_scene.h"
 
 #define KEY_SPACE 32
 #define KEY_LEFT  37
@@ -247,6 +249,8 @@ typedef struct {
     Arena*       frame;
     G3dMaterial  mat_lit, mat_emis;
     Vec3         eye;
+    b32          gpu_active;
+    b32          in_viewmodel;
 } Kuyu;
 
 static Kuyu g_k;
@@ -1543,6 +1547,13 @@ static void pick_lights(DungeonUniforms* u, Vec3 bmin, Vec3 bmax) {
 static void draw_lit_box(const Mesh* m, const Mat4* model, const Texture* tex, Vec4 color, Vec3 amb,
                          Vec3 bmin, Vec3 bmax, G3dCull cull) {
     if (!m) return;
+    if (g_k.gpu_active) {
+        u32 flags = g_k.in_viewmodel ? GPU_INST_VIEWMODEL : 0u;
+        f32 extra_amb = (amb.x > 0.5f) ? 1.0f : 0.0f;
+        gpu_scene_submit_draw(m, model, gpu_pack_rgba(color), tex, extra_amb, 0.85f,
+                              GPU_SHADE_DUNGEON, flags, FALSE);
+        return;
+    }
     DungeonUniforms* u = ARENA_PUSH_STRUCT(g_k.frame, DungeonUniforms);
     u->amb  = vec4(amb.x, amb.y, amb.z, 0.0f);
     u->base = color;
@@ -1569,6 +1580,12 @@ static void draw_held(const Mesh* m, const Mat4* model, Vec4 color) {
 }
 
 static void draw_emissive(const Mesh* m, const Mat4* model, Vec4 color) {
+    if (g_k.gpu_active) {
+        u32 flags = g_k.in_viewmodel ? GPU_INST_VIEWMODEL : 0u;
+        gpu_scene_submit_draw(m, model, gpu_pack_rgba(color), NULL, 0.0f, 1.0f,
+                              GPU_SHADE_UNLIT, flags, FALSE);
+        return;
+    }
     if (!g_k.mat_emis.shade_fn) return;
     UnlitUniforms* u = ARENA_PUSH_STRUCT(g_k.frame, UnlitUniforms);
     u->color = color;
@@ -1900,6 +1917,68 @@ static void render(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     Vec3 fwd = view_dir(yaw, pitch);
     g_k.eye = eye;
     collect_lights(eye, fwd);
+
+    if (engine_gpu_available()) {
+        u32 vp_w = engine_gpu_viewport_width();
+        u32 vp_h = engine_gpu_viewport_height();
+        f32 aspect = (vp_h > 0u) ? ((f32)vp_w / (f32)vp_h) : ((f32)INNER_W / (f32)INNER_H);
+        Camera vc = cam;
+        vc.yaw = g_k.yaw;
+        vc.pitch = g_k.pitch;
+
+        GpuSceneFrameDesc gdesc;
+        __builtin_memset(&gdesc, 0, sizeof(gdesc));
+        gdesc.view           = camera_view(&cam);
+        gdesc.proj           = camera_proj(&cam, aspect);
+        gdesc.view_proj      = mat4_mul(gdesc.proj, gdesc.view);
+        gdesc.vm_view_proj   = mat4_mul(camera_proj(&vc, aspect), camera_view(&vc));
+        gdesc.eye            = eye;
+        gdesc.cam_fwd        = fwd;
+        gdesc.near_z         = cam.near_z;
+        gdesc.far_z          = 64.0f;
+        gdesc.fov_y          = cam.fov_y;
+        gdesc.aspect         = aspect;
+        gdesc.sun_dir        = vec3(0.0f, 1.0f, 0.0f);
+        gdesc.sun_color      = vec3(0.0f, 0.0f, 0.0f);
+        gdesc.sky_color      = k_amb;
+        gdesc.ground_color   = k_amb;
+        gdesc.fog_color      = vec3(m_sqrt(k_fog_lin.x), m_sqrt(k_fog_lin.y), m_sqrt(k_fog_lin.z));
+        gdesc.fog_start      = 0.0f;
+        gdesc.fog_end        = 30.0f;
+        gdesc.clear_color    = gdesc.fog_color;
+        gdesc.shadows_on     = FALSE;
+        gdesc.pbr_on         = FALSE;
+        gdesc.mipmap_on      = TRUE;
+        gdesc.retro_on       = g_k.retro_on;
+        gdesc.snap_subpixel  = g_k.snap_on ? 12u : 0u;
+        gdesc.retro_scanline = g_k.retro_on ? 0.18f : 0.0f;
+        gdesc.time_sec       = g_k.anim_time;
+
+        if (gpu_scene_begin_frame(&gdesc)) {
+            for (u32 i = 0u; i < g_k.light_count; i++) {
+                const Light* l = &g_k.lights[i];
+                gpu_scene_add_point_light(l->pos, l->radius, l->col, 0.25f);
+            }
+            gpu_scene_add_point_light(vec3_add(eye, vec3_scale(fwd, 0.35f)), 6.0f,
+                                      vec3(0.28f, 0.20f, 0.14f), 0.35f);
+            g_k.gpu_active = TRUE;
+            g_k.in_viewmodel = FALSE;
+            draw_world();
+            if (g_k.state != KS_DEAD) {
+                g_k.in_viewmodel = TRUE;
+                draw_viewmodel(eye, view_dir(g_k.yaw, g_k.pitch));
+            }
+            g_k.gpu_active = FALSE;
+            g_k.in_viewmodel = FALSE;
+            gpu_scene_end_frame();
+        }
+        fb_clear(fb, 0u);
+        const GpuSceneStats* gs = gpu_scene_stats();
+        g_k.ms_draw = gs ? gs->cpu_submit_ms : 0.0f;
+        g_k.ms_present = (f32)engine_gpu_frame_time_us() * 0.001f;
+        if (gs) g_k.stats.tris_out = (u64)gs->visible_instances * 12ULL;
+        return;
+    }
 
     Framebuffer* low = &g_k.low;
     Vec3 fs = vec3(m_sqrt(k_fog_lin.x), m_sqrt(k_fog_lin.y), m_sqrt(k_fog_lin.z));

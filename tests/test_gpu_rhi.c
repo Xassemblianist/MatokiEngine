@@ -181,6 +181,9 @@ static b32 decode_and_verify_stream(const u8* buf, u32 len, DecodedStreamSummary
         case RHI_CMD_DISPATCH:
             if (size != 20u || rd_u32(p + 8) == 0u || rd_u32(p + 12) == 0u || rd_u32(p + 16) == 0u) return FALSE;
             break;
+        case RHI_CMD_DRAW_INDEXED_INDIRECT:
+            if (size != 20u || rd_u32(p + 8) == 0u || rd_u32(p + 16) == 0u) return FALSE;
+            break;
         default:
             return FALSE;
         }
@@ -675,6 +678,20 @@ TEST(gpu_rhi_compute_and_msaa) {
     CHECK(rhi_set_bind_group(&rhi, 0u, cbg));
     CHECK(rhi_dispatch(&rhi, 4u, 1u, 1u));
     CHECK(rhi_end_compute_pass(&rhi));
+
+    /* Dolaylı çizim (drawIndexedIndirect) ve sınır denetimleri */
+    RhiBuffer ind_buf = rhi_create_buffer(&rhi, 60u, RHI_BUF_STORAGE | RHI_BUF_INDIRECT | RHI_BUF_COPY_DST);
+    CHECK(ind_buf != RHI_INVALID_HANDLE);
+    CHECK(!rhi_draw_indexed_indirect(&rhi, ind_buf, 0u, 1u)); /* Pass dışında yasak */
+
+    RhiPassDesc pass = { .clear_color = TRUE, .clear_a = 1.0f, .sample_count = 4u };
+    CHECK(rhi_begin_pass(&rhi, &pass));
+    CHECK(!rhi_draw_indexed_indirect(&rhi, sbuf, 0u, 1u));     /* RHI_BUF_INDIRECT bayrağı yok */
+    CHECK(!rhi_draw_indexed_indirect(&rhi, ind_buf, 2u, 1u));  /* 4-bayt hizasız ofset */
+    CHECK(!rhi_draw_indexed_indirect(&rhi, ind_buf, 0u, 0u));  /* draw_count == 0 */
+    CHECK(!rhi_draw_indexed_indirect(&rhi, ind_buf, 0u, 4u));  /* 4 * 20 = 80 > 60 bayt sınır aşımı */
+    CHECK(rhi_draw_indexed_indirect(&rhi, ind_buf, 0u, 3u));   /* 3 * 20 = 60 <= 60 bayt geçerli */
+    CHECK(rhi_end_pass(&rhi));
     CHECK(rhi_present(&rhi));
 
     DecodedStreamSummary sum;
@@ -684,5 +701,6 @@ TEST(gpu_rhi_compute_and_msaa) {
     CHECK(sum.op_counts[RHI_CMD_SET_COMPUTE_PIPELINE]    == 1u);
     CHECK(sum.op_counts[RHI_CMD_DISPATCH]                == 1u);
     CHECK(sum.op_counts[RHI_CMD_END_COMPUTE_PASS]        == 1u);
+    CHECK(sum.op_counts[RHI_CMD_DRAW_INDEXED_INDIRECT]   == 1u);
 }
 

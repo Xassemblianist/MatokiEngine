@@ -624,6 +624,31 @@ b32 rhi_draw_indexed(Rhi* rhi, u32 index_count, u32 instance_count,
     return TRUE;
 }
 
+b32 rhi_draw_indexed_indirect(Rhi* rhi, RhiBuffer indirect_buffer, u32 indirect_offset, u32 draw_count) {
+    if (!rhi || !rhi->in_pass || draw_count == 0u || (indirect_offset & 3u) != 0u ||
+        !rhi_handle_valid(rhi, indirect_buffer, RHI_RES_BUFFER)) {
+        if (rhi) rhi->dropped_cmds++;
+        return FALSE;
+    }
+    const RhiResourceSlot* s = &rhi->slots[RHI_HANDLE_INDEX(indirect_buffer)];
+    if (!(s->usage & RHI_BUF_INDIRECT)) {
+        rhi->dropped_cmds++;
+        return FALSE;
+    }
+    u64 end_off = (u64)indirect_offset + (u64)draw_count * 20ull;
+    if (end_off > (u64)s->byte_size) {
+        rhi->dropped_cmds++;
+        return FALSE;
+    }
+    RhiCmdDrawIndexedIndirect* cmd = (RhiCmdDrawIndexedIndirect*)rhi_alloc_cmd(
+        rhi, RHI_CMD_DRAW_INDEXED_INDIRECT, (u32)sizeof(RhiCmdDrawIndexedIndirect));
+    if (!cmd) return FALSE;
+    cmd->indirect_buffer = indirect_buffer;
+    cmd->indirect_offset = indirect_offset;
+    cmd->draw_count      = draw_count;
+    return TRUE;
+}
+
 b32 rhi_end_pass(Rhi* rhi) {
     if (!rhi || !rhi->in_pass) {
         if (rhi) rhi->dropped_cmds++;

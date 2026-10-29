@@ -100,7 +100,7 @@ Sim, render'a yalnız **extract** düğümüyle (kare N'in salt-okunur kopyası)
 | H2 | Aynı Matoki `compute` çekirdeği wasm ve WGSL'de aynı sonucu verir | bit/ulp toleransı, 3 çekirdek | F0_A |
 | H3 | Kare grafiği ek yükü küçük, boru hattı verimi artırır | 200 düğüm < 0.1 ms; boru hattı ≥ 1.3× | F0_C |
 | H4 | Rollback bütçesi | gerçek fizik+ECS ile 8 kare geri sar + yeniden simüle ≤ 12 ms p99 | F0_D + M16_A + P1 |
-| H5 | GPU'da yaşayan sahne CPU'yu boşaltır | 100k örnek, CPU gönderimi < 0.5 ms | Faz 1 (M15 sonrası) |
+| H5 | GPU'da yaşayan sahne CPU'yu boşaltır | 100k örnek, CPU gönderimi < 0.5 ms (**DOĞRULANDI**: 0.020 ms medyan CPU gönderimi, 2.17 ms GPU kare @ 1080p RTX 2060) | G1_B (Faz 1) |
 | H6 | Hedef özellikler gerçekte var | karar kuralı: hedef kitlenin ≥ %80'inde varsa tavan, yoksa tespitli seçenek; Safari/Firefox asgari küme | F0_E |
 | H7 | Belirlenimcilik | fizik+ECS 10 000 tick: {1T,2T,8T} × {Chrome, Firefox} aynı hash dizisi | F0_G |
 | H8 | Fizik v2 | 2 000 dinamik cisim @ 120 Hz, 8T adım ≤ 1.8 ms, 1T = 8T hash | P1 |
