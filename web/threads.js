@@ -204,6 +204,15 @@ export async function startRenderWorker(offscreenCanvas, moduleOrBytes, memory, 
         if (typeof opts.onWantsPointerLock === "function") opts.onWantsPointerLock(Boolean(data.wants));
         return;
       }
+      if (data.type === "resolution_changed") {
+        readyInfo.fbW = data.fbW >>> 0;
+        readyInfo.fbH = data.fbH >>> 0;
+        readyInfo.fbPtr = data.fbPtr >>> 0;
+        if (typeof opts.onResolutionChanged === "function") {
+          opts.onResolutionChanged(data.mode, data.fbW, data.fbH);
+        }
+        return;
+      }
       if (data.type === "call_result") {
         const entry = pendingCalls.get(data.id);
         if (entry) {
@@ -235,6 +244,9 @@ export async function startRenderWorker(offscreenCanvas, moduleOrBytes, memory, 
         caps,
         seed,
         workerCount,
+        initialResMode: opts.initialResMode || 0,
+        screenW: opts.screenW || 1920,
+        screenH: opts.screenH || 1080,
       },
       [offscreenCanvas]
     );

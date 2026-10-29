@@ -126,6 +126,13 @@ async function handleInitRender(msg) {
 
     exports.engine_init((msg.seed || Date.now()) >>> 0);
 
+    if (typeof exports.engine_set_screen_size === "function" && msg.screenW && msg.screenH) {
+      exports.engine_set_screen_size(msg.screenW >>> 0, msg.screenH >>> 0);
+    }
+    if (typeof exports.engine_set_resolution_mode === "function" && msg.initialResMode) {
+      exports.engine_set_resolution_mode(msg.initialResMode >>> 0);
+    }
+
     const fbW = exports.engine_fb_width() >>> 0;
     const fbH = exports.engine_fb_height() >>> 0;
     const fbPtr = exports.engine_framebuffer() >>> 0;
@@ -152,7 +159,9 @@ async function handleInitRender(msg) {
     offscreenCanvas.height = fbH;
     const ctx = offscreenCanvas.getContext("2d", { alpha: false });
 
-    const fbByteLen = fbW * fbH * 4;
+    let curFbW = 0;
+    let curFbH = 0;
+    let curFbPtr = 0;
     let cachedBuffer = null;
     let isShared = false;
     let fbView = null;
@@ -160,17 +169,40 @@ async function handleInitRender(msg) {
     let imageData = null;
 
     function refreshFbViews() {
-      if (cachedBuffer === memory.buffer) return;
-      cachedBuffer = memory.buffer;
-      isShared = typeof SharedArrayBuffer !== "undefined" && cachedBuffer instanceof SharedArrayBuffer;
-      fbView = new Uint8ClampedArray(cachedBuffer, fbPtr, fbByteLen);
-      if (isShared) {
-        if (!localFbBuf || localFbBuf.length !== fbByteLen) {
+      const w = exports.engine_fb_width() >>> 0;
+      const h = exports.engine_fb_height() >>> 0;
+      const ptr = exports.engine_framebuffer() >>> 0;
+
+      if (w !== curFbW || h !== curFbH || ptr !== curFbPtr || cachedBuffer !== memory.buffer) {
+        curFbW = w;
+        curFbH = h;
+        curFbPtr = ptr;
+        cachedBuffer = memory.buffer;
+        isShared = typeof SharedArrayBuffer !== "undefined" && cachedBuffer instanceof SharedArrayBuffer;
+
+        offscreenCanvas.width = w;
+        offscreenCanvas.height = h;
+
+        const fbByteLen = w * h * 4;
+        fbView = new Uint8ClampedArray(cachedBuffer, ptr, fbByteLen);
+        if (isShared) {
           localFbBuf = new Uint8ClampedArray(fbByteLen);
-          imageData = new ImageData(localFbBuf, fbW, fbH);
+          imageData = new ImageData(localFbBuf, w, h);
+        } else {
+          imageData = new ImageData(fbView, w, h);
         }
-      } else {
-        imageData = new ImageData(fbView, fbW, fbH);
+
+        const mode = typeof exports.engine_get_resolution_mode === "function"
+          ? exports.engine_get_resolution_mode() >>> 0
+          : 0;
+
+        self.postMessage({
+          type: "resolution_changed",
+          mode,
+          fbW: w,
+          fbH: h,
+          fbPtr: ptr,
+        });
       }
     }
 
