@@ -1,5 +1,6 @@
 /* raster/raster.h — 24.8 sabit nokta kurulumlu, 64x64 karo binlemeli SIMD yazılım rasterizer'ı.
- * 8x8 bloklarda trivial-reject / trivial-accept uygular ve 2x2 quad'lar halinde ShadeFn çağırır.
+ * 8x8 bloklarda trivial-reject / trivial-accept uygular; paralel karo-şeridi binleme,
+ * gölge geçişleri için shadersız (depth-only) hızlı tarama yolu ve 2x2 quad ShadeFn çalıştırır.
  * 2D afin ve 3D perspektif-doğru (inv_w) varying interpolasyonunu, early-z derinlik testini
  * ve Matoki blend füzyonunu (ABI v1) destekler.
  */
@@ -68,7 +69,8 @@ typedef struct BinnedTri {
     f32* var_coeffs; /* [varying_count * 3] */
 } BinnedTri;
 
-typedef struct TileBinChunk TileBinChunk;
+typedef struct TileBinChunk    TileBinChunk;
+typedef struct RasterSpanChunk RasterSpanChunk;
 
 typedef struct {
     TileBinChunk* head;
@@ -89,6 +91,11 @@ typedef struct {
     u32      tiles_x;
     u32      tiles_y;
     TileBin* tiles;
+
+    RasterSpanChunk* bin_span_head;
+    RasterSpanChunk* bin_span_tail;
+    u32              bin_span_count;
+    u32              pending_bin_tris;
 
     u32     tri_buf_count;
     RawTri* tri_buf;
@@ -134,6 +141,7 @@ b32  raster_setup_tri(const RasterVert* v0, const RasterVert* v1, const RasterVe
                       const RasterShaderState* state, b32 cull_back, i32 fb_w, i32 fb_h,
                       BinnedTri* out, f32* vc);
 void raster_bin_tris(Rasterizer* r, BinnedTri* tris, u32 count, u32 submitted);
+void raster_flush_bins(Rasterizer* r);
 
 /* Paralel karo dağıtım modu: TRUE = dinamik (atomik sayaç, grain=1), FALSE = statik bölme */
 void raster_set_parallel_dynamic(b32 dynamic_sched);

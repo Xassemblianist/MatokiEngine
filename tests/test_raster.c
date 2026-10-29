@@ -9,14 +9,19 @@
 #include "core/fixed.h"
 #include "core/math.h"
 #include "core/rng.h"
+#include "plat/platform.h"
+#include "thread/thread.h"
+#include "thread/job.h"
 #include "raster/framebuffer.h"
 #include "raster/texture.h"
 #include "raster/ref_shaders.h"
 #include "raster/raster.h"
 #include "gfx2d/batch2d.h"
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-static u8 g_test_mem[MB(16)];
+static u8 g_test_mem[MB(32)];
 
 /* Yardımcı: tek kanal (R) +1 artıran test shader'ı (paylaşılan kenar sayımı için) */
 static void shade_inc_one(ShadeBatch* batch) {
@@ -542,8 +547,380 @@ TEST(raster_depth_and_fusion) {
     CHECK(fb.px[5 * 64 + 5] == 0u);
 }
 
+/* Genel quad/batch yolunu (emit_quad_scalar / emit_quad_general_simd) zorlayan,
+ * renk tamponuna dokunmayan boş füzyonlu shader (depth-only hızlı yol referansı için). */
+static void shade_noop_fused(ShadeBatch* batch) {
+    UNUSED(batch);
+}
+
+TEST(raster_depth_only_fast_path_bit_exact) {
+    Arena perm, frame_fast, frame_ref;
+    arena_init(&perm,       g_test_mem,           MB(8));
+    arena_init(&frame_fast, g_test_mem + MB(8),   MB(12));
+    arena_init(&frame_ref,  g_test_mem + MB(20),  MB(12));
+
+    const u32 W = 256u;
+    const u32 H = 256u;
+    Framebuffer fb_fast, fb_ref;
+    fb_init(&fb_fast, &perm, W, H);
+    fb_init_depth(&fb_fast, &perm);
+    fb_init(&fb_ref, &perm, W, H);
+    fb_init_depth(&fb_ref, &perm);
+
+    /* Küçük (<16x16), orta (kısmi 8x8 blok) ve büyük (8x8 trivial accept + karo sınırı)
+     * üçgenlerden oluşan 400 üçgenlik test kümesi */
+    enum { N_TRIS = 400 };
+    RasterVert* v0s = ARENA_PUSH_ARRAY(&perm, RasterVert, N_TRIS);
+    RasterVert* v1s = ARENA_PUSH_ARRAY(&perm, RasterVert, N_TRIS);
+    RasterVert* v2s = ARENA_PUSH_ARRAY(&perm, RasterVert, N_TRIS);
+
+    Rng rng;
+    rng_seed(&rng, 0xD3974011CAFE1234ULL);
+    for (u32 i = 0; i < N_TRIS; i++) {
+        f32 cx  = -8.0f + rng_f32(&rng) * (f32)(W + 16u);
+        f32 cy  = -8.0f + rng_f32(&rng) * (f32)(H + 16u);
+        f32 rad = (i % 5u == 0u) ? (32.0f + rng_f32(&rng) * 64.0f)
+                : (i % 2u == 0u) ? (4.0f  + rng_f32(&rng) * 9.0f)
+                                 : (10.0f + rng_f32(&rng) * 24.0f);
+        f32 a0 = rng_f32(&rng) * M_TAU;
+        f32 a1 = a0 + 0.6f + rng_f32(&rng) * 1.4f;
+        f32 a2 = a1 + 0.6f + rng_f32(&rng) * 1.4f;
+        f32 z0 = 0.05f + rng_f32(&rng) * 0.90f;
+        f32 z1 = 0.05f + rng_f32(&rng) * 0.90f;
+        f32 z2 = 0.05f + rng_f32(&rng) * 0.90f;
+
+        v0s[i] = (RasterVert){ cx + m_cos(a0) * rad, cy + m_sin(a0) * rad, z0, 1.0f, {0} };
+        v1s[i] = (RasterVert){ cx + m_cos(a1) * rad, cy + m_sin(a1) * rad, z1, 1.0f, {0} };
+        v2s[i] = (RasterVert){ cx + m_cos(a2) * rad, cy + m_sin(a2) * rad, z2, 1.0f, {0} };
+    }
+
+    DepthFunc funcs[4] = { DEPTH_LESS, DEPTH_GREATER, DEPTH_LEQUAL, DEPTH_GEQUAL };
+    f32 clear_zs[4]    = { 1.0f,       0.0f,          1.0f,         0.0f         };
+
+    for (u32 m = 0; m < 5u; m++) {
+        b32 do_test   = (m < 4u);
+        DepthFunc fn  = (m < 4u) ? funcs[m] : DEPTH_ALWAYS;
+        f32 clear_z   = (m < 4u) ? clear_zs[m] : 0.5f;
+
+        fb_clear_depth(&fb_fast, clear_z);
+        fb_clear_depth(&fb_ref,  clear_z);
+        arena_reset(&frame_fast);
+        arena_reset(&frame_ref);
+
+        Rasterizer r_fast, r_ref;
+        raster_begin(&r_fast, &fb_fast, &frame_fast);
+        raster_set_depth(&r_fast, do_test, TRUE, fn);
+        raster_set_shader(&r_fast, NULL, NULL, NULL, 0, BLEND_NONE);
+
+        raster_begin(&r_ref, &fb_ref, &frame_ref);
+        raster_set_depth(&r_ref, do_test, TRUE, fn);
+        raster_set_shader_ex(&r_ref, shade_noop_fused, NULL, NULL, 0, BLEND_NONE, TRUE);
+
+        for (u32 i = 0; i < N_TRIS; i++) {
+            raster_triangle(&r_fast, v0s[i], v1s[i], v2s[i]);
+            raster_triangle(&r_ref,  v0s[i], v1s[i], v2s[i]);
+        }
+        raster_flush(&r_fast);
+        raster_flush(&r_ref);
+
+        const u32* d_fast = (const u32*)fb_fast.depth;
+        const u32* d_ref  = (const u32*)fb_ref.depth;
+        u32 diffs = 0;
+        for (u32 i = 0; i < W * H; i++) {
+            if (d_fast[i] != d_ref[i]) {
+                diffs++;
+            }
+        }
+        CHECK(diffs == 0u);
+    }
+
+    /* depth_write = FALSE iken derinlik tamponu hiç değişmemeli */
+    fb_clear_depth(&fb_fast, 0.75f);
+    arena_reset(&frame_fast);
+    Rasterizer r_nowrite;
+    raster_begin(&r_nowrite, &fb_fast, &frame_fast);
+    raster_set_depth(&r_nowrite, TRUE, FALSE, DEPTH_LESS);
+    raster_set_shader(&r_nowrite, NULL, NULL, NULL, 0, BLEND_NONE);
+    for (u32 i = 0; i < 32u; i++) {
+        raster_triangle(&r_nowrite, v0s[i], v1s[i], v2s[i]);
+    }
+    raster_flush(&r_nowrite);
+    for (u32 i = 0; i < W * H; i++) {
+        CHECK(fb_fast.depth[i] == 0.75f);
+    }
+}
+
+TEST(raster_parallel_binning_bit_exact) {
+    job_system_init();
+
+    Arena perm, frame_1t, frame_mt;
+    arena_init(&perm,     g_test_mem,           MB(10));
+    arena_init(&frame_1t, g_test_mem + MB(10),  MB(11));
+    arena_init(&frame_mt, g_test_mem + MB(21),  MB(11));
+
+    /* 640x360 (10x6 karo, cols=2 -> 12 şerit) üzerinde hem çoklu raster_bin_tris dilimleri
+     * hem de anlık raster_triangle çağrılarıyla 1T ve 4T/8T paralel binlemeyi karşılaştır */
+    const u32 W = 640u;
+    const u32 H = 360u;
+    Framebuffer fb_1t, fb_mt;
+    fb_init(&fb_1t, &perm, W, H);
+    fb_init_depth(&fb_1t, &perm);
+    fb_init(&fb_mt, &perm, W, H);
+    fb_init_depth(&fb_mt, &perm);
+
+    enum { N_SPANS = 80, TRIS_PER_SPAN = 6, TOTAL = N_SPANS * TRIS_PER_SPAN };
+    BinnedTri* span_tris = ARENA_PUSH_ARRAY(&perm, BinnedTri, TOTAL);
+    f32*       span_vc   = ARENA_PUSH_ARRAY(&perm, f32, TOTAL * 4u * 3u);
+    u32*       span_cnt  = ARENA_PUSH_ARRAY(&perm, u32, N_SPANS);
+
+    RasterShaderState st_vcol = {
+        .shade_fn      = REF_SHADE_VCOLOR_FN,
+        .uniforms      = NULL,
+        .textures      = NULL,
+        .varying_count = 4u,
+        .blend         = BLEND_NONE,
+        .fused         = FALSE,
+        .depth_test    = TRUE,
+        .depth_write   = TRUE,
+        .depth_func    = DEPTH_GREATER,
+        .depth_late    = FALSE
+    };
+
+    Rng rng;
+    rng_seed(&rng, 0xB144146012345678ULL);
+    for (u32 s = 0; s < N_SPANS; s++) {
+        f32 cx  = 16.0f + rng_f32(&rng) * (f32)(W - 32u);
+        f32 cy  = 16.0f + rng_f32(&rng) * (f32)(H - 32u);
+        f32 rad = (s < 8u) ? (90.0f + rng_f32(&rng) * 60.0f) : (8.0f + rng_f32(&rng) * 18.0f);
+        u32 sc  = 0;
+        for (u32 t = 0; t < TRIS_PER_SPAN; t++) {
+            f32 a0 = (f32)t * (M_TAU / (f32)TRIS_PER_SPAN);
+            f32 a1 = a0 + 0.85f;
+            f32 a2 = a0 + 1.75f;
+            f32 z  = 0.1f + 0.8f * rng_f32(&rng);
+            RasterVert v0 = { cx + m_cos(a0) * rad * 0.2f, cy + m_sin(a0) * rad * 0.2f, z,         1.0f, {1.0f, 0.2f, 0.3f, 1.0f} };
+            RasterVert v1 = { cx + m_cos(a1) * rad,        cy + m_sin(a1) * rad,        z + 0.04f, 1.0f, {0.2f, 1.0f, 0.4f, 1.0f} };
+            RasterVert v2 = { cx + m_cos(a2) * rad,        cy + m_sin(a2) * rad,        z - 0.03f, 1.0f, {0.3f, 0.4f, 1.0f, 1.0f} };
+            u32 idx = s * TRIS_PER_SPAN + sc;
+            if (raster_setup_tri(&v0, &v1, &v2, &st_vcol, FALSE, (i32)W, (i32)H,
+                                 &span_tris[idx], &span_vc[idx * 12u])) {
+                sc++;
+            }
+        }
+        span_cnt[s] = sc;
+    }
+
+    Rasterizer r_1t, r_mt;
+    fb_clear(&fb_1t, FB_RGBA(10, 12, 18, 255));
+    fb_clear_depth(&fb_1t, 0.0f);
+    arena_reset(&frame_1t);
+
+    engine_set_worker_count(0u);
+    raster_begin(&r_1t, &fb_1t, &frame_1t);
+    for (u32 s = 0; s < N_SPANS; s++) {
+        raster_bin_tris(&r_1t, &span_tris[s * TRIS_PER_SPAN], span_cnt[s], TRIS_PER_SPAN);
+    }
+    raster_flush(&r_1t);
+
+    u32 worker_counts[2] = { 3u, 7u };
+    for (u32 wc = 0; wc < 2u; wc++) {
+        fb_clear(&fb_mt, FB_RGBA(10, 12, 18, 255));
+        fb_clear_depth(&fb_mt, 0.0f);
+        arena_reset(&frame_mt);
+
+        engine_set_worker_count(worker_counts[wc]);
+        raster_begin(&r_mt, &fb_mt, &frame_mt);
+        for (u32 s = 0; s < N_SPANS; s++) {
+            raster_bin_tris(&r_mt, &span_tris[s * TRIS_PER_SPAN], span_cnt[s], TRIS_PER_SPAN);
+        }
+        raster_flush(&r_mt);
+
+        CHECK(r_mt.stat_tris_in     == r_1t.stat_tris_in);
+        CHECK(r_mt.stat_tris_binned == r_1t.stat_tris_binned);
+        CHECK(r_mt.stat_quads       == r_1t.stat_quads);
+        CHECK(r_mt.stat_pixels      == r_1t.stat_pixels);
+
+        const u32* d1 = (const u32*)fb_1t.depth;
+        const u32* dm = (const u32*)fb_mt.depth;
+        u32 px_diffs = 0;
+        u32 z_diffs  = 0;
+        for (u32 i = 0; i < W * H; i++) {
+            if (fb_1t.px[i] != fb_mt.px[i]) px_diffs++;
+            if (d1[i] != dm[i]) z_diffs++;
+        }
+        CHECK(px_diffs == 0u);
+        CHECK(z_diffs  == 0u);
+    }
+    engine_set_worker_count(0u);
+}
+
 TEST(raster_wasm_simd_bit_exact) {
     /* Wasm SIMD yolunu Node.js altında çalıştırıp host skaler referansıyla bit-bit karşılaştırır */
     int rc = system("node tests/test_raster_wasm.mjs");
     CHECK(rc == 0);
+}
+
+TEST(raster_m14a_wasm_simd_and_bench) {
+    /* Wasm SIMD altında depth-only hızlı yolu (shade_fn==NULL) genel SIMD yoluyla (shade_noop_fused)
+     * ve paralel binlemeyi (4T) seri binlemeyle (1T) 512x512 6000 üçgenlik gölge geçişinde
+     * bit-bit karşılaştırır ve medyan süreleri ölçer. Geçici dosyalar yalnızca build/wasm/ altındadır. */
+    const char* c_path    = "build/wasm/m14a_simd_test.c";
+    const char* wasm_path = "build/wasm/m14a_simd_test.wasm";
+
+    FILE* fp = fopen(c_path, "wb");
+    CHECK(fp != NULL);
+    if (!fp) return;
+
+    const char* src =
+        "#include \"core/types.h\"\n"
+        "#include \"core/arena.h\"\n"
+        "#include \"core/math.h\"\n"
+        "#include \"core/rng.h\"\n"
+        "#include \"plat/platform.h\"\n"
+        "#include \"thread/thread.h\"\n"
+        "#include \"thread/job.h\"\n"
+        "#include \"raster/framebuffer.h\"\n"
+        "#include \"raster/raster.h\"\n"
+        "#define SW 512\n"
+        "#define SH 512\n"
+        "#define NITEMS 1000\n"
+        "#define TPI 6\n"
+        "#define NTRIS (NITEMS * TPI)\n"
+        "static u8 g_perm[MB(8)];\n"
+        "static u8 g_frm1[MB(16)];\n"
+        "static u8 g_frm2[MB(16)];\n"
+        "static Framebuffer g_fb_fast, g_fb_ref;\n"
+        "static Rasterizer g_r1, g_r2;\n"
+        "static BinnedTri g_tris_fast[NTRIS];\n"
+        "static BinnedTri g_tris_ref[NTRIS];\n"
+        "static u32 g_cnts[NITEMS];\n"
+        "static RasterShaderState g_st_fast, g_st_ref;\n"
+        "static void noop_fused(ShadeBatch* b) { UNUSED(b); }\n"
+        "static f64 g_med_bin = 0.0, g_med_fast = 0.0, g_med_ref = 0.0;\n"
+        "static f64 sort_med(f64* a, u32 n) {\n"
+        "    for (u32 i = 1; i < n; i++) { f64 v = a[i]; i32 j = (i32)i - 1;\n"
+        "        while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }\n"
+        "    return a[n / 2u];\n"
+        "}\n"
+        "EXPORT(m14a_run) u32 m14a_run(void) {\n"
+        "    job_system_init();\n"
+        "    Arena perm, f1, f2;\n"
+        "    arena_init(&perm, g_perm, sizeof(g_perm));\n"
+        "    arena_init(&f1, g_frm1, sizeof(g_frm1));\n"
+        "    arena_init(&f2, g_frm2, sizeof(g_frm2));\n"
+        "    fb_init(&g_fb_fast, &perm, SW, SH); fb_init_depth(&g_fb_fast, &perm);\n"
+        "    fb_init(&g_fb_ref,  &perm, SW, SH); fb_init_depth(&g_fb_ref,  &perm);\n"
+        "    g_st_fast = (RasterShaderState){ .shade_fn = NULL, .depth_test = TRUE, .depth_write = TRUE, .depth_func = DEPTH_LESS };\n"
+        "    g_st_ref  = (RasterShaderState){ .shade_fn = noop_fused, .fused = TRUE, .depth_test = TRUE, .depth_write = TRUE, .depth_func = DEPTH_LESS };\n"
+        "    Rng rng; rng_seed(&rng, 0xA5A5F0F012345678ULL);\n"
+        "    for (u32 it = 0; it < NITEMS; it++) {\n"
+        "        u32 gx = it % 32u, gy = it / 32u;\n"
+        "        f32 cx = 16.0f + (f32)gx * 15.0f + rng_f32(&rng) * 4.0f;\n"
+        "        f32 cy = 16.0f + (f32)gy * 15.0f + rng_f32(&rng) * 4.0f;\n"
+        "        f32 rad = (it < 12u) ? 95.0f : (8.0f + rng_f32(&rng) * 14.0f);\n"
+        "        u32 sc = 0;\n"
+        "        for (u32 t = 0; t < TPI; t++) {\n"
+        "            f32 a0 = (f32)t * (M_TAU / (f32)TPI), a1 = a0 + 0.9f, a2 = a0 + 1.8f;\n"
+        "            f32 zb = 0.15f + 0.7f * ((f32)((it * 7u + t) % 100u) / 100.0f);\n"
+        "            RasterVert v0 = { cx + m_cos(a0) * rad * 0.2f, cy + m_sin(a0) * rad * 0.2f, zb, 1.0f, {0} };\n"
+        "            RasterVert v1 = { cx + m_cos(a1) * rad, cy + m_sin(a1) * rad, zb + 0.03f, 1.0f, {0} };\n"
+        "            RasterVert v2 = { cx + m_cos(a2) * rad, cy + m_sin(a2) * rad, zb - 0.02f, 1.0f, {0} };\n"
+        "            if (raster_setup_tri(&v0, &v1, &v2, &g_st_fast, FALSE, SW, SH, &g_tris_fast[it * TPI + sc], NULL)) {\n"
+        "                g_tris_ref[it * TPI + sc] = g_tris_fast[it * TPI + sc];\n"
+        "                g_tris_ref[it * TPI + sc].state = &g_st_ref;\n"
+        "                sc++;\n"
+        "            }\n"
+        "        }\n"
+        "        g_cnts[it] = sc;\n"
+        "    }\n"
+        "    /* 1) 4T paralel binleme vs 1T seri binleme + fast vs ref bit-bit doğrulama */\n"
+        "    fb_clear_depth(&g_fb_fast, 1.0f); fb_clear_depth(&g_fb_ref, 1.0f);\n"
+        "    arena_reset(&f1); arena_reset(&f2);\n"
+        "    engine_set_worker_count(3u);\n"
+        "    raster_begin(&g_r1, &g_fb_fast, &f1);\n"
+        "    for (u32 it = 0; it < NITEMS; it++) raster_bin_tris(&g_r1, &g_tris_fast[it * TPI], g_cnts[it], TPI);\n"
+        "    raster_flush(&g_r1);\n"
+        "    engine_set_worker_count(0u);\n"
+        "    raster_begin(&g_r2, &g_fb_ref, &f2);\n"
+        "    for (u32 it = 0; it < NITEMS; it++) raster_bin_tris(&g_r2, &g_tris_ref[it * TPI], g_cnts[it], TPI);\n"
+        "    raster_flush(&g_r2);\n"
+        "    if (g_r1.stat_tris_binned != g_r2.stat_tris_binned) return 1000000u;\n"
+        "    const u32* d1 = (const u32*)g_fb_fast.depth;\n"
+        "    const u32* d2 = (const u32*)g_fb_ref.depth;\n"
+        "    u32 diffs = 0;\n"
+        "    for (u32 i = 0; i < SW * SH; i++) if (d1[i] != d2[i]) diffs++;\n"
+        "    if (diffs != 0u) return diffs;\n"
+        "    /* 2) Medyan süre ölçümü (15 tekrar, 3 ısınma) */\n"
+        "    f64 t_bin[15], t_fast[15], t_ref[15];\n"
+        "    for (u32 k = 0; k < 18u; k++) {\n"
+        "        arena_reset(&f1); fb_clear_depth(&g_fb_fast, 1.0f);\n"
+        "        raster_begin(&g_r1, &g_fb_fast, &f1);\n"
+        "        f64 t0 = plat_time_ms();\n"
+        "        for (u32 it = 0; it < NITEMS; it++) raster_bin_tris(&g_r1, &g_tris_fast[it * TPI], g_cnts[it], TPI);\n"
+        "        raster_flush_bins(&g_r1);\n"
+        "        f64 t1 = plat_time_ms();\n"
+        "        raster_flush(&g_r1);\n"
+        "        f64 t2 = plat_time_ms();\n"
+        "        arena_reset(&f2); fb_clear_depth(&g_fb_ref, 1.0f);\n"
+        "        raster_begin(&g_r2, &g_fb_ref, &f2);\n"
+        "        for (u32 it = 0; it < NITEMS; it++) raster_bin_tris(&g_r2, &g_tris_ref[it * TPI], g_cnts[it], TPI);\n"
+        "        raster_flush_bins(&g_r2);\n"
+        "        f64 t3 = plat_time_ms();\n"
+        "        raster_flush(&g_r2);\n"
+        "        f64 t4 = plat_time_ms();\n"
+        "        if (k >= 3u) {\n"
+        "            t_bin[k - 3u]  = t1 - t0;\n"
+        "            t_fast[k - 3u] = t2 - t1;\n"
+        "            t_ref[k - 3u]  = t4 - t3;\n"
+        "        }\n"
+        "    }\n"
+        "    g_med_bin  = sort_med(t_bin, 15u);\n"
+        "    g_med_fast = sort_med(t_fast, 15u);\n"
+        "    g_med_ref  = sort_med(t_ref, 15u);\n"
+        "    return 0u;\n"
+        "}\n"
+        "EXPORT(m14a_bin_ms)  f64 m14a_bin_ms(void)  { return g_med_bin; }\n"
+        "EXPORT(m14a_fast_ms) f64 m14a_fast_ms(void) { return g_med_fast; }\n"
+        "EXPORT(m14a_ref_ms)  f64 m14a_ref_ms(void)  { return g_med_ref; }\n";
+
+    fwrite(src, 1, strlen(src), fp);
+    fclose(fp);
+
+    int rc_compile = system(
+        "clang --target=wasm32 -std=c11 -O2 -ffreestanding -fno-builtin -nostdlib "
+        "-msimd128 -matomics -mbulk-memory -mnontrapping-fptoint -msign-ext -DPLAT_SHARED_MEMORY=1 -Isrc "
+        "-Wl,--no-entry -Wl,--export-dynamic -Wl,--import-memory -Wl,--shared-memory "
+        "-Wl,--max-memory=268435456 -Wl,--stack-first -z stack-size=1048576 "
+        "build/wasm/m14a_simd_test.c "
+        "build/wasm/src/core/arena.o build/wasm/src/core/math.o build/wasm/src/core/rng.o "
+        "build/wasm/src/core/log.o build/wasm/src/core/mem.o build/wasm/src/core/profiler.o "
+        "build/wasm/src/thread/thread.o build/wasm/src/thread/job.o "
+        "build/wasm/src/raster/framebuffer.o build/wasm/src/raster/ref_shaders.o "
+        "build/wasm/src/raster/raster.o build/wasm/src/raster/raster_simd_wasm.o "
+        "-o build/wasm/m14a_simd_test.wasm"
+    );
+    remove(c_path);
+    CHECK(rc_compile == 0);
+    if (rc_compile != 0) return;
+
+    int rc_node = system(
+        "node -e '"
+        "const fs = require(\"fs\");"
+        "const { performance } = require(\"perf_hooks\");"
+        "const bytes = fs.readFileSync(\"build/wasm/m14a_simd_test.wasm\");"
+        "const mod = new WebAssembly.Module(bytes);"
+        "const memory = new WebAssembly.Memory({ initial: 1024, maximum: 4096, shared: true });"
+        "const inst = new WebAssembly.Instance(mod, {"
+        "  env: { memory, plat_log: ()=>{}, plat_panic: ()=>{ throw new Error(\"panic\"); }, plat_time_ms: ()=>performance.now(), plat_jit_load: ()=>-1 }"
+        "});"
+        "const diffs = inst.exports.m14a_run() >>> 0;"
+        "if (diffs !== 0) { console.error(\"m14a wasm diffs:\", diffs); process.exit(1); }"
+        "const b = inst.exports.m14a_bin_ms();"
+        "const f = inst.exports.m14a_fast_ms();"
+        "const r = inst.exports.m14a_ref_ms();"
+        "console.log(`  [bench M14_A wasm SIMD] 512x512 6k ucgen golge: bin=${b.toFixed(3)} ms | scan(genel)=${r.toFixed(3)} ms -> scan(depth-only)=${f.toFixed(3)} ms (${(r/f).toFixed(2)}x, diff=0)`);"
+        "'"
+    );
+    remove(wasm_path);
+    CHECK(rc_node == 0);
 }

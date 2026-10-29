@@ -9,10 +9,12 @@
 #include "core/math.h"
 #include "core/log.h"
 #include "core/profiler.h"
+#include "thread/atomic.h"
 #include "thread/thread.h"
 #include "thread/job.h"
 
 #define TILE_CHUNK_CAP 64
+#define SPAN_CHUNK_CAP 128
 
 static b32                   g_raster_dynamic_sched = TRUE;
 static RasterWatEdgeBlockFn  g_wat_edge_fn          = NULL;
@@ -22,6 +24,17 @@ struct TileBinChunk {
     u32           count;
     TileBinChunk* next;
     BinnedTri*    tris[TILE_CHUNK_CAP];
+};
+
+typedef struct {
+    BinnedTri* tris;
+    u32        count;
+} RasterTriSpan;
+
+struct RasterSpanChunk {
+    u32              count;
+    RasterSpanChunk* next;
+    RasterTriSpan    spans[SPAN_CHUNK_CAP];
 };
 
 static RasterShaderState* ensure_pinned_state(Rasterizer* r) {
@@ -35,7 +48,7 @@ static RasterShaderState* ensure_pinned_state(Rasterizer* r) {
 static inline void tile_bin_push(Arena* frame, TileBin* bin, BinnedTri* tri) {
     TileBinChunk* tail = bin->tail;
     if (tail == NULL || tail->count >= TILE_CHUNK_CAP) {
-        TileBinChunk* chunk = ARENA_PUSH_STRUCT(frame, TileBinChunk);
+        TileBinChunk* chunk = ARENA_PUSH_ARRAY_RAW(frame, TileBinChunk, 1u);
         chunk->count = 0;
         chunk->next  = NULL;
         if (tail != NULL) {
@@ -151,13 +164,13 @@ static inline b32 setup_tri_body(const RasterVert* pv0, const RasterVert* pv1, c
     f32 iw1 = (v1.inv_w == 0.0f) ? 1.0f : v1.inv_w;
     f32 iw2 = (v2.inv_w == 0.0f) ? 1.0f : v2.inv_w;
     b32 is_affine = (iw0 == 1.0f && iw1 == 1.0f && iw2 == 1.0f);
-    tri->inv_w0    = iw0;
-    tri->inv_w1    = iw1;
-    tri->inv_w2    = iw2;
-    tri->is_affine = is_affine;
+    tri->inv_w0     = iw0;
+    tri->inv_w1     = iw1;
+    tri->inv_w2     = iw2;
+    tri->is_affine  = is_affine;
+    tri->var_coeffs = vc;
 
     if (vcount > 0) {
-        tri->var_coeffs = vc;
         if (is_affine) {
             for (u32 k = 0; k < vcount; k++) {
                 f32 f0 = v0.var[k];
@@ -187,43 +200,170 @@ b32 raster_setup_tri(const RasterVert* v0, const RasterVert* v1, const RasterVer
     return setup_tri_body(v0, v1, v2, state, cull_back, fb_w, fb_h, out, vc);
 }
 
-/* Kurulmuş üçgenleri gönderim sırasıyla karolara dağıtır (yalnız ana iş parçacığı) */
-static void bin_tris(Rasterizer* r, BinnedTri* tri_pool, u32 setup_count) {
-    PROF_BEGIN("bin");
-    u32 tiles_x = r->tiles_x;
-    for (u32 i = 0; i < setup_count; i++) {
-        BinnedTri* tri = &tri_pool[i];
-        u32 tx0 = (u32)tri->min_x >> 6;
-        u32 tx1 = (u32)tri->max_x >> 6;
-        u32 ty0 = (u32)tri->min_y >> 6;
-        u32 ty1 = (u32)tri->max_y >> 6;
-
-        /* Hızlı yol: tek 64x64 karo içine düşen küçük üçgenler */
-        if (((tx0 ^ tx1) | (ty0 ^ ty1)) == 0u) {
-            tile_bin_push(r->frame, &r->tiles[ty0 * tiles_x + tx0], tri);
-            r->stat_tris_binned++;
+/* Kurulmuş üçgen dilimini gönderim sırasıyla bin kuyruğuna ekler (ana iş parçacığı) */
+static void raster_enqueue_span(Rasterizer* r, BinnedTri* tris, u32 count) {
+    if (count == 0u) return;
+    RasterSpanChunk* tail = r->bin_span_tail;
+    if (tail == NULL || tail->count >= SPAN_CHUNK_CAP) {
+        RasterSpanChunk* chunk = ARENA_PUSH_ARRAY_RAW(r->frame, RasterSpanChunk, 1u);
+        chunk->count = 0u;
+        chunk->next  = NULL;
+        if (tail != NULL) {
+            tail->next = chunk;
         } else {
-            const i32 ts = RASTER_TILE_SIZE - 1;
-            i32 max_t0 = (tri->a0 > 0 ? ts * tri->a0 : 0) + (tri->b0 > 0 ? ts * tri->b0 : 0);
-            i32 max_t1 = (tri->a1 > 0 ? ts * tri->a1 : 0) + (tri->b1 > 0 ? ts * tri->b1 : 0);
-            i32 max_t2 = (tri->a2 > 0 ? ts * tri->a2 : 0) + (tri->b2 > 0 ? ts * tri->b2 : 0);
+            r->bin_span_head = chunk;
+        }
+        r->bin_span_tail = chunk;
+        tail = chunk;
+    }
+    tail->spans[tail->count].tris  = tris;
+    tail->spans[tail->count].count = count;
+    tail->count++;
+    r->bin_span_count++;
+    r->pending_bin_tris += count;
+}
 
-            for (u32 ty = ty0; ty <= ty1; ty++) {
-                i32 py = (i32)(ty << 6);
-                for (u32 tx = tx0; tx <= tx1; tx++) {
-                    i32 px = (i32)(tx << 6);
-                    i32 e0 = tri->a0 * px + tri->b0 * py + tri->c0 + max_t0;
-                    i32 e1 = tri->a1 * px + tri->b1 * py + tri->c1 + max_t1;
-                    i32 e2 = tri->a2 * px + tri->b2 * py + tri->c2 + max_t2;
-                    if ((e0 | e1 | e2) < 0) continue;
+/* Seri karo binleme: tek iş parçacığında veya küçük üçgen sayılarında doğrudan çalışır */
+static void bin_spans_serial(Rasterizer* r) {
+    u32 tiles_x = r->tiles_x;
+    u64 binned  = 0;
+    for (RasterSpanChunk* sc = r->bin_span_head; sc != NULL; sc = sc->next) {
+        u32 sc_count = sc->count;
+        for (u32 s = 0; s < sc_count; s++) {
+            BinnedTri* tri_pool = sc->spans[s].tris;
+            u32 setup_count     = sc->spans[s].count;
+            for (u32 i = 0; i < setup_count; i++) {
+                BinnedTri* tri = &tri_pool[i];
+                u32 tx0 = (u32)tri->min_x >> 6;
+                u32 tx1 = (u32)tri->max_x >> 6;
+                u32 ty0 = (u32)tri->min_y >> 6;
+                u32 ty1 = (u32)tri->max_y >> 6;
 
-                    tile_bin_push(r->frame, &r->tiles[ty * tiles_x + tx], tri);
-                    r->stat_tris_binned++;
+                /* Hızlı yol: tek 64x64 karo içine düşen küçük üçgenler */
+                if (((tx0 ^ tx1) | (ty0 ^ ty1)) == 0u) {
+                    tile_bin_push(r->frame, &r->tiles[ty0 * tiles_x + tx0], tri);
+                    binned++;
+                } else {
+                    const i32 ts = RASTER_TILE_SIZE - 1;
+                    i32 max_t0 = (tri->a0 > 0 ? ts * tri->a0 : 0) + (tri->b0 > 0 ? ts * tri->b0 : 0);
+                    i32 max_t1 = (tri->a1 > 0 ? ts * tri->a1 : 0) + (tri->b1 > 0 ? ts * tri->b1 : 0);
+                    i32 max_t2 = (tri->a2 > 0 ? ts * tri->a2 : 0) + (tri->b2 > 0 ? ts * tri->b2 : 0);
+
+                    for (u32 ty = ty0; ty <= ty1; ty++) {
+                        i32 py = (i32)(ty << 6);
+                        for (u32 tx = tx0; tx <= tx1; tx++) {
+                            i32 px = (i32)(tx << 6);
+                            i32 e0 = tri->a0 * px + tri->b0 * py + tri->c0 + max_t0;
+                            i32 e1 = tri->a1 * px + tri->b1 * py + tri->c1 + max_t1;
+                            i32 e2 = tri->a2 * px + tri->b2 * py + tri->c2 + max_t2;
+                            if ((e0 | e1 | e2) < 0) continue;
+
+                            tile_bin_push(r->frame, &r->tiles[ty * tiles_x + tx], tri);
+                            binned++;
+                        }
+                    }
                 }
             }
         }
     }
-    PROF_END();
+    r->stat_tris_binned += binned;
+}
+
+typedef struct {
+    Rasterizer*   r;
+    TileBinChunk* chunk_pool;
+    u32           chunk_cap;
+    _Alignas(4) u32 chunk_used;
+    u32           cols;
+    u64*          band_binned;
+} BinParallelCtx;
+
+static inline void tile_bin_push_atomic(BinParallelCtx* ctx, TileBin* bin, BinnedTri* tri) {
+    TileBinChunk* tail = bin->tail;
+    if (tail == NULL || tail->count >= TILE_CHUNK_CAP) {
+        u32 idx = atomic_add_u32(&ctx->chunk_used, 1u);
+        ASSERT(idx < ctx->chunk_cap);
+        TileBinChunk* chunk = &ctx->chunk_pool[idx];
+        chunk->count = 0u;
+        chunk->next  = NULL;
+        if (tail != NULL) {
+            tail->next = chunk;
+        } else {
+            bin->head = chunk;
+        }
+        bin->tail = chunk;
+        tail = chunk;
+    }
+    tail->tris[tail->count++] = tri;
+}
+
+/* Her görev kendi ayrık karo şeridini (satır + sütun aralığı) işler; tüm üçgen dilimlerini
+ * gönderim sırasıyla taradığı için her karodaki üçgen sırası seri yolla bit-bit aynıdır. */
+static void bin_band_worker_fn(u32 start, u32 end, void* arg) {
+    BinParallelCtx* ctx = (BinParallelCtx*)arg;
+    Rasterizer* r       = ctx->r;
+    u32 tiles_x         = r->tiles_x;
+    u32 cols            = ctx->cols;
+    u32 mid_tx          = tiles_x >> 1;
+
+    for (u32 b = start; b < end; b++) {
+        u32 ty       = (cols == 2u) ? (b >> 1) : b;
+        u32 col      = (cols == 2u) ? (b & 1u) : 0u;
+        u32 band_tx0 = (cols == 1u) ? 0u : ((col == 0u) ? 0u : mid_tx);
+        u32 band_tx1 = (cols == 1u) ? (tiles_x - 1u)
+                                    : ((col == 0u) ? (mid_tx - 1u) : (tiles_x - 1u));
+
+        i32 band_py0 = (i32)(ty << 6);
+        i32 band_py1 = band_py0 + RASTER_TILE_SIZE - 1;
+        i32 band_px0 = (i32)(band_tx0 << 6);
+        i32 band_px1 = (i32)((band_tx1 << 6) + RASTER_TILE_SIZE - 1);
+
+        TileBin* row_tiles = &r->tiles[ty * tiles_x];
+        u64 binned = 0;
+
+        for (RasterSpanChunk* sc = r->bin_span_head; sc != NULL; sc = sc->next) {
+            u32 sc_count = sc->count;
+            for (u32 s = 0; s < sc_count; s++) {
+                BinnedTri* tri_pool = sc->spans[s].tris;
+                u32 setup_count     = sc->spans[s].count;
+                for (u32 i = 0; i < setup_count; i++) {
+                    BinnedTri* tri = &tri_pool[i];
+                    if ((i32)tri->max_y < band_py0 || (i32)tri->min_y > band_py1) continue;
+                    if ((i32)tri->max_x < band_px0 || (i32)tri->min_x > band_px1) continue;
+
+                    u32 tx0 = (u32)tri->min_x >> 6;
+                    u32 tx1 = (u32)tri->max_x >> 6;
+                    u32 ty0 = (u32)tri->min_y >> 6;
+                    u32 ty1 = (u32)tri->max_y >> 6;
+
+                    if (((tx0 ^ tx1) | (ty0 ^ ty1)) == 0u) {
+                        tile_bin_push_atomic(ctx, &row_tiles[tx0], tri);
+                        binned++;
+                    } else {
+                        const i32 ts = RASTER_TILE_SIZE - 1;
+                        i32 max_t0 = (tri->a0 > 0 ? ts * tri->a0 : 0) + (tri->b0 > 0 ? ts * tri->b0 : 0);
+                        i32 max_t1 = (tri->a1 > 0 ? ts * tri->a1 : 0) + (tri->b1 > 0 ? ts * tri->b1 : 0);
+                        i32 max_t2 = (tri->a2 > 0 ? ts * tri->a2 : 0) + (tri->b2 > 0 ? ts * tri->b2 : 0);
+
+                        u32 cx0 = (tx0 > band_tx0) ? tx0 : band_tx0;
+                        u32 cx1 = (tx1 < band_tx1) ? tx1 : band_tx1;
+                        for (u32 tx = cx0; tx <= cx1; tx++) {
+                            i32 px = (i32)(tx << 6);
+                            i32 e0 = tri->a0 * px + tri->b0 * band_py0 + tri->c0 + max_t0;
+                            i32 e1 = tri->a1 * px + tri->b1 * band_py0 + tri->c1 + max_t1;
+                            i32 e2 = tri->a2 * px + tri->b2 * band_py0 + tri->c2 + max_t2;
+                            if ((e0 | e1 | e2) < 0) continue;
+
+                            tile_bin_push_atomic(ctx, &row_tiles[tx], tri);
+                            binned++;
+                        }
+                    }
+                }
+            }
+        }
+
+        ctx->band_binned[b] = binned;
+    }
 }
 
 static void raster_process_tri_buf(Rasterizer* r) {
@@ -238,8 +378,8 @@ static void raster_process_tri_buf(Rasterizer* r) {
 
     PROF_BEGIN("setup");
     /* Üçgen başına ayrı arena_push/memset çağrısını önlemek için blok halinde ayır */
-    BinnedTri* tri_pool = ARENA_PUSH_ARRAY(r->frame, BinnedTri, count);
-    f32* vc_pool = (vcount > 0) ? ARENA_PUSH_ARRAY(r->frame, f32, count * vcount * 3u) : NULL;
+    BinnedTri* tri_pool = ARENA_PUSH_ARRAY_RAW(r->frame, BinnedTri, count);
+    f32* vc_pool = (vcount > 0) ? ARENA_PUSH_ARRAY_RAW(r->frame, f32, count * vcount * 3u) : NULL;
     u32 setup_count = 0;
 
     for (u32 i = 0; i < count; i++) {
@@ -251,13 +391,65 @@ static void raster_process_tri_buf(Rasterizer* r) {
     }
     PROF_END();
 
-    bin_tris(r, tri_pool, setup_count);
+    raster_enqueue_span(r, tri_pool, setup_count);
+}
+
+void raster_flush_bins(Rasterizer* r) {
+    raster_process_tri_buf(r);
+    if (r->pending_bin_tris == 0u) return;
+
+    PROF_BEGIN("bin");
+    u32 nthreads = thread_count();
+    u32 tiles_x  = r->tiles_x;
+    u32 tiles_y  = r->tiles_y;
+    u32 cols     = (tiles_y < 8u && tiles_x >= 4u) ? 2u : 1u;
+    u32 nbands   = tiles_y * cols;
+
+    if (nthreads <= 1u || nbands <= 1u || r->pending_bin_tris < 32u) {
+        bin_spans_serial(r);
+    } else {
+        u64* band_binned = ARENA_PUSH_ARRAY(r->frame, u64, nbands);
+        usize align      = _Alignof(TileBinChunk);
+        usize base_off   = (r->frame->used + (align - 1u)) & ~(align - 1u);
+        usize avail      = (base_off <= r->frame->cap) ? (r->frame->cap - base_off) : 0u;
+        u32 max_chunks   = (u32)(avail / sizeof(TileBinChunk));
+
+        if (max_chunks < nbands) {
+            bin_spans_serial(r);
+        } else {
+            BinParallelCtx bctx;
+            bctx.r           = r;
+            bctx.chunk_pool  = (TileBinChunk*)(r->frame->base + base_off);
+            bctx.chunk_cap   = max_chunks;
+            atomic_store_relaxed_u32(&bctx.chunk_used, 0u);
+            bctx.cols        = cols;
+            bctx.band_binned = band_binned;
+
+            job_parallel_for(nbands, 1u, bin_band_worker_fn, &bctx);
+
+            u32 used_chunks = atomic_load_relaxed_u32(&bctx.chunk_used);
+            ASSERT(used_chunks <= max_chunks);
+            r->frame->used = base_off + (usize)used_chunks * sizeof(TileBinChunk);
+
+            u64 total_binned = 0;
+            for (u32 b = 0; b < nbands; b++) {
+                total_binned += band_binned[b];
+            }
+            r->stat_tris_binned += total_binned;
+        }
+    }
+
+    r->bin_span_head    = NULL;
+    r->bin_span_tail    = NULL;
+    r->bin_span_count   = 0u;
+    r->pending_bin_tris = 0u;
+    PROF_END();
 }
 
 void raster_bin_tris(Rasterizer* r, BinnedTri* tris, u32 count, u32 submitted) {
     raster_process_tri_buf(r);   /* sıra korunur: önce bekleyen anlık üçgenler */
     r->stat_tris_in += submitted;
-    bin_tris(r, tris, count);
+    raster_enqueue_span(r, tris, count);
 }
 
 const RasterShaderState* raster_pin_state(Rasterizer* r) {
@@ -614,9 +806,244 @@ static inline void emit_quad_scalar(Rasterizer* r, const BinnedTri* tri,
     }
 }
 
+static inline __attribute__((always_inline)) void emit_quad_depth_scalar(
+    f32* drow0, f32* drow1, u32 qx, u32 mask,
+    f32 x0, f32 z0, f32 gx, f32 gy, f32 dy_z,
+    b32 do_test, DepthFunc dfunc) {
+    f32 dx   = ((f32)qx + 0.5f) - x0;
+    f32 zb   = z0 + dx * gx + dy_z;
+    f32 z0_l = zb;
+    f32 z1_l = zb + gx;
+    f32 z2_l = zb + gy;
+    f32 z3_l = zb + gx + gy;
+    f32* d0  = drow0 + qx;
+    f32* d1  = drow1 + qx;
+
+    if (!do_test) {
+        if (mask == 0xFu) {
+            d0[0] = z0_l;
+            d0[1] = z1_l;
+            d1[0] = z2_l;
+            d1[1] = z3_l;
+        } else {
+            if (mask & 1u) d0[0] = z0_l;
+            if (mask & 2u) d0[1] = z1_l;
+            if (mask & 4u) d1[0] = z2_l;
+            if (mask & 8u) d1[1] = z3_l;
+        }
+    } else if (mask == 0xFu) {
+        f32 o0 = d0[0], o1 = d0[1], o2 = d1[0], o3 = d1[1];
+        d0[0] = depth_cmp_scalar(dfunc, z0_l, o0) ? z0_l : o0;
+        d0[1] = depth_cmp_scalar(dfunc, z1_l, o1) ? z1_l : o1;
+        d1[0] = depth_cmp_scalar(dfunc, z2_l, o2) ? z2_l : o2;
+        d1[1] = depth_cmp_scalar(dfunc, z3_l, o3) ? z3_l : o3;
+    } else {
+        if (mask & 1u) { f32 o0 = d0[0]; d0[0] = depth_cmp_scalar(dfunc, z0_l, o0) ? z0_l : o0; }
+        if (mask & 2u) { f32 o1 = d0[1]; d0[1] = depth_cmp_scalar(dfunc, z1_l, o1) ? z1_l : o1; }
+        if (mask & 4u) { f32 o2 = d1[0]; d1[0] = depth_cmp_scalar(dfunc, z2_l, o2) ? z2_l : o2; }
+        if (mask & 8u) { f32 o3 = d1[1]; d1[1] = depth_cmp_scalar(dfunc, z3_l, o3) ? z3_l : o3; }
+    }
+}
+
+static inline __attribute__((always_inline)) void scan_depth_only_scalar_impl(
+    Rasterizer* r, const BinnedTri* tri,
+    i32 tile_x0, i32 tile_y0, i32 tile_x1, i32 tile_y1,
+    b32 do_test, DepthFunc dfunc) {
+    i32 min_x = MAX((i32)tri->min_x, tile_x0);
+    i32 max_x = MIN((i32)tri->max_x, tile_x1);
+    i32 min_y = MAX((i32)tri->min_y, tile_y0);
+    i32 max_y = MIN((i32)tri->max_y, tile_y1);
+    if (min_x > max_x || min_y > max_y) return;
+
+    i32 a0 = tri->a0, b0 = tri->b0, c0 = tri->c0;
+    i32 a1 = tri->a1, b1 = tri->b1, c1 = tri->c1;
+    i32 a2 = tri->a2, b2 = tri->b2, c2 = tri->c2;
+
+    f32 x0 = tri->x0, y0 = tri->y0;
+    f32 z0 = tri->z0, gx = tri->dz_dx, gy = tri->dz_dy;
+    f32* depth = r->fb->depth;
+    u32  fb_w  = r->fb->w;
+
+    i32 qx_min = min_x & ~1;
+    i32 qy_min = min_y & ~1;
+
+    if (max_x - qx_min < 16 && max_y - qy_min < 16) {
+        i32 qrow_e0 = a0 * qx_min + b0 * qy_min + c0;
+        i32 qrow_e1 = a1 * qx_min + b1 * qy_min + c1;
+        i32 qrow_e2 = a2 * qx_min + b2 * qy_min + c2;
+
+        for (i32 qy = qy_min; qy <= max_y; qy += 2) {
+            i32 qe0   = qrow_e0;
+            i32 qe1   = qrow_e1;
+            i32 qe2   = qrow_e2;
+            f32 dy_z  = (((f32)qy + 0.5f) - y0) * gy;
+            f32* drow0 = depth + (u32)qy * fb_w;
+            f32* drow1 = drow0 + fb_w;
+
+            for (i32 qx = qx_min; qx <= max_x; qx += 2) {
+                u32 m0 = (u32)((qe0 | qe1 | qe2) >= 0);
+                u32 m1 = (u32)(((qe0 + a0) | (qe1 + a1) | (qe2 + a2)) >= 0);
+                u32 m2 = (u32)(((qe0 + b0) | (qe1 + b1) | (qe2 + b2)) >= 0);
+                u32 m3 = (u32)(((qe0 + a0 + b0) | (qe1 + a1 + b1) | (qe2 + a2 + b2)) >= 0);
+                u32 mask = m0 | (m1 << 1) | (m2 << 2) | (m3 << 3);
+
+                if (qx + 1 > tile_x1) mask &= ~0xAu;
+                if (qy + 1 > tile_y1) mask &= ~0xCu;
+
+                if (mask != 0) {
+                    emit_quad_depth_scalar(drow0, drow1, (u32)qx, mask,
+                                           x0, z0, gx, gy, dy_z, do_test, dfunc);
+                }
+
+                qe0 += 2 * a0;
+                qe1 += 2 * a1;
+                qe2 += 2 * a2;
+            }
+            qrow_e0 += 2 * b0;
+            qrow_e1 += 2 * b1;
+            qrow_e2 += 2 * b2;
+        }
+    } else {
+        i32 max_off0 = (a0 > 0 ? 7 * a0 : 0) + (b0 > 0 ? 7 * b0 : 0);
+        i32 max_off1 = (a1 > 0 ? 7 * a1 : 0) + (b1 > 0 ? 7 * b1 : 0);
+        i32 max_off2 = (a2 > 0 ? 7 * a2 : 0) + (b2 > 0 ? 7 * b2 : 0);
+        i32 min_off0 = (a0 < 0 ? 7 * a0 : 0) + (b0 < 0 ? 7 * b0 : 0);
+        i32 min_off1 = (a1 < 0 ? 7 * a1 : 0) + (b1 < 0 ? 7 * b1 : 0);
+        i32 min_off2 = (a2 < 0 ? 7 * a2 : 0) + (b2 < 0 ? 7 * b2 : 0);
+
+        i32 bx0 = min_x & ~7;
+        i32 by0 = min_y & ~7;
+
+        i32 row_e0 = a0 * bx0 + b0 * by0 + c0;
+        i32 row_e1 = a1 * bx0 + b1 * by0 + c1;
+        i32 row_e2 = a2 * bx0 + b2 * by0 + c2;
+
+        for (i32 by = by0; by <= max_y; by += 8) {
+            i32 blk_e0 = row_e0;
+            i32 blk_e1 = row_e1;
+            i32 blk_e2 = row_e2;
+
+            for (i32 bx = bx0; bx <= max_x; bx += 8) {
+                if (((blk_e0 + max_off0) | (blk_e1 + max_off1) | (blk_e2 + max_off2)) >= 0) {
+                    if (bx + 7 <= tile_x1 && by + 7 <= tile_y1 &&
+                        ((blk_e0 + min_off0) | (blk_e1 + min_off1) | (blk_e2 + min_off2)) >= 0) {
+                        /* 8x8 Trivial Accept: blok başına x-tabanlarını bir kez hesapla */
+                        f32 zx0 = z0 + (((f32)bx + 0.5f) - x0) * gx;
+                        f32 zx1 = z0 + (((f32)bx + 2.5f) - x0) * gx;
+                        f32 zx2 = z0 + (((f32)bx + 4.5f) - x0) * gx;
+                        f32 zx3 = z0 + (((f32)bx + 6.5f) - x0) * gx;
+
+                        for (i32 qy = by; qy < by + 8; qy += 2) {
+                            f32 dy_z = (((f32)qy + 0.5f) - y0) * gy;
+                            f32 zb0  = zx0 + dy_z;
+                            f32 zb1  = zx1 + dy_z;
+                            f32 zb2  = zx2 + dy_z;
+                            f32 zb3  = zx3 + dy_z;
+                            f32 r0[8] = {
+                                zb0, zb0 + gx,
+                                zb1, zb1 + gx,
+                                zb2, zb2 + gx,
+                                zb3, zb3 + gx
+                            };
+                            f32 r1[8] = {
+                                zb0 + gy, r0[1] + gy,
+                                zb1 + gy, r0[3] + gy,
+                                zb2 + gy, r0[5] + gy,
+                                zb3 + gy, r0[7] + gy
+                            };
+                            f32* d0 = depth + (u32)qy * fb_w + (u32)bx;
+                            f32* d1 = d0 + fb_w;
+                            if (!do_test) {
+                                for (u32 k = 0; k < 8u; k++) d0[k] = r0[k];
+                                for (u32 k = 0; k < 8u; k++) d1[k] = r1[k];
+                            } else {
+                                for (u32 k = 0; k < 8u; k++) {
+                                    f32 o0 = d0[k];
+                                    d0[k] = depth_cmp_scalar(dfunc, r0[k], o0) ? r0[k] : o0;
+                                }
+                                for (u32 k = 0; k < 8u; k++) {
+                                    f32 o1 = d1[k];
+                                    d1[k] = depth_cmp_scalar(dfunc, r1[k], o1) ? r1[k] : o1;
+                                }
+                            }
+                        }
+                    } else {
+                        i32 qx0 = MAX(bx, qx_min);
+                        i32 qy0 = MAX(by, qy_min);
+                        i32 qx1 = MIN(bx + 6, max_x);
+                        i32 qy1 = MIN(by + 6, max_y);
+
+                        i32 qrow_e0 = blk_e0 + a0 * (qx0 - bx) + b0 * (qy0 - by);
+                        i32 qrow_e1 = blk_e1 + a1 * (qx0 - bx) + b1 * (qy0 - by);
+                        i32 qrow_e2 = blk_e2 + a2 * (qx0 - bx) + b2 * (qy0 - by);
+
+                        for (i32 qy = qy0; qy <= qy1; qy += 2) {
+                            i32 qe0    = qrow_e0;
+                            i32 qe1    = qrow_e1;
+                            i32 qe2    = qrow_e2;
+                            f32 dy_z   = (((f32)qy + 0.5f) - y0) * gy;
+                            f32* drow0 = depth + (u32)qy * fb_w;
+                            f32* drow1 = drow0 + fb_w;
+
+                            for (i32 qx = qx0; qx <= qx1; qx += 2) {
+                                u32 m0 = (u32)((qe0 | qe1 | qe2) >= 0);
+                                u32 m1 = (u32)(((qe0 + a0) | (qe1 + a1) | (qe2 + a2)) >= 0);
+                                u32 m2 = (u32)(((qe0 + b0) | (qe1 + b1) | (qe2 + b2)) >= 0);
+                                u32 m3 = (u32)(((qe0 + a0 + b0) | (qe1 + a1 + b1) | (qe2 + a2 + b2)) >= 0);
+                                u32 mask = m0 | (m1 << 1) | (m2 << 2) | (m3 << 3);
+
+                                if (qx + 1 > tile_x1) mask &= ~0xAu;
+                                if (qy + 1 > tile_y1) mask &= ~0xCu;
+
+                                if (mask != 0) {
+                                    emit_quad_depth_scalar(drow0, drow1, (u32)qx, mask,
+                                                           x0, z0, gx, gy, dy_z, do_test, dfunc);
+                                }
+
+                                qe0 += 2 * a0;
+                                qe1 += 2 * a1;
+                                qe2 += 2 * a2;
+                            }
+                            qrow_e0 += 2 * b0;
+                            qrow_e1 += 2 * b1;
+                            qrow_e2 += 2 * b2;
+                        }
+                    }
+                }
+                blk_e0 += 8 * a0;
+                blk_e1 += 8 * a1;
+                blk_e2 += 8 * a2;
+            }
+            row_e0 += 8 * b0;
+            row_e1 += 8 * b1;
+            row_e2 += 8 * b2;
+        }
+    }
+}
+
+static void raster_scan_depth_only_scalar(Rasterizer* r, const BinnedTri* tri,
+                                          const RasterShaderState* state,
+                                          i32 tile_x0, i32 tile_y0, i32 tile_x1, i32 tile_y1) {
+    if (r->fb->depth == NULL || !state->depth_write) return;
+    if (!state->depth_test || state->depth_func == DEPTH_ALWAYS) {
+        scan_depth_only_scalar_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, FALSE, DEPTH_ALWAYS);
+    } else if (state->depth_func == DEPTH_LESS) {
+        scan_depth_only_scalar_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, DEPTH_LESS);
+    } else if (state->depth_func == DEPTH_GREATER) {
+        scan_depth_only_scalar_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, DEPTH_GREATER);
+    } else if (state->depth_func != DEPTH_NEVER) {
+        scan_depth_only_scalar_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, state->depth_func);
+    }
+}
+
 void raster_kern_tri_scan(Rasterizer* r, const BinnedTri* tri,
                           const RasterShaderState* state, i32 tile_x0, i32 tile_y0,
                           i32 tile_x1, i32 tile_y1) {
+    if (state->shade_fn == NULL) {
+        raster_scan_depth_only_scalar(r, tri, state, tile_x0, tile_y0, tile_x1, tile_y1);
+        return;
+    }
+
     i32 min_x = MAX((i32)tri->min_x, tile_x0);
     i32 max_x = MIN((i32)tri->max_x, tile_x1);
     i32 min_y = MAX((i32)tri->min_y, tile_y0);
@@ -749,6 +1176,10 @@ void raster_begin(Rasterizer* r, Framebuffer* fb, Arena* frame) {
     r->frame            = frame;
     r->cull_back        = FALSE;
     r->pinned_state     = NULL;
+    r->bin_span_head    = NULL;
+    r->bin_span_tail    = NULL;
+    r->bin_span_count   = 0;
+    r->pending_bin_tris = 0;
     r->tri_buf_count    = 0;
     r->batch_count      = 0;
     r->stat_tris_in     = 0;
@@ -925,7 +1356,7 @@ static void raster_tile_worker_fn(u32 start, u32 end, void* arg) {
 static _Alignas(16) Rasterizer g_thread_rasters[THREAD_MAX_COUNT];
 
 void raster_flush(Rasterizer* r) {
-    raster_process_tri_buf(r);
+    raster_flush_bins(r);
 
     u32 tiles_x     = r->tiles_x;
     u32 tiles_y     = r->tiles_y;
@@ -985,6 +1416,10 @@ void raster_flush(Rasterizer* r) {
             thread_r[t].tiles_x          = tiles_x;
             thread_r[t].tiles_y          = tiles_y;
             thread_r[t].tiles            = r->tiles;
+            thread_r[t].bin_span_head    = NULL;
+            thread_r[t].bin_span_tail    = NULL;
+            thread_r[t].bin_span_count   = 0;
+            thread_r[t].pending_bin_tris = 0;
             thread_r[t].tri_buf_count    = 0;
             thread_r[t].tri_buf          = NULL;
             thread_r[t].batch_count      = 0;
