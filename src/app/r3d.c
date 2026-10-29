@@ -70,6 +70,11 @@ typedef struct {
     _Alignas(16) Vec4 fog;
 } Unlit3dUniforms;
 
+/* particle3d.mtk (fog@0) */
+typedef struct {
+    _Alignas(16) Vec4 fog;
+} Particle3dUniforms;
+
 /* `prefix` ile başlayan gömülü shader kaynağından " @mipmap" niteliğini çıkarıp ayrı varyant derler */
 static void compile_nomip_variant(ManagedShader* out, const char* prefix, const char* name, ShadeFn ref,
                                   Arena* scratch) {
@@ -167,6 +172,17 @@ void r3d_draw_emissive(R3dPass* p, const Mesh* mesh, const Mat4* model, Vec4 col
     g3d_draw(p->ctx, mesh, model, &m);
 }
 
+void r3d_draw_particles(R3dPass* p, const Mesh* mesh) {
+    if (p->shadow_pass || p->particles.shade_fn == NULL) return;
+    if (!mesh || mesh->vertex_count == 0u || mesh->index_count == 0u) return;
+    G3dMaterial m = p->particles;
+    Particle3dUniforms* u = ARENA_PUSH_STRUCT(p->frame, Particle3dUniforms);
+    u->fog = vec4(p->dl.sky_srgb.x, p->dl.sky_srgb.y, p->dl.sky_srgb.z, p->fog_density);
+    m.uniforms = u;
+    Mat4 model = mat4_identity();
+    g3d_draw(p->ctx, mesh, &model, &m);
+}
+
 /* Ertelenmiş + paralel 3D ön uç (D-105); ölçüm için kapatılabilir */
 #define R3D_MAX_DRAWS 1024u
 static b32 g_r3d_parallel = TRUE;
@@ -261,10 +277,28 @@ void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, c
         em.depth_write = TRUE;
     }
 
+    G3dMaterial pm;
+    __builtin_memset(&pm, 0, sizeof(pm));
+    const ManagedShader* psh = shaders_find(sm, "particle3d.mtk");
+    if (psh) {
+        b32 pfused = FALSE;
+        pm.shade_fn    = shaders_get_fn(psh, f->use_jit, BLEND_ALPHA, &pfused);
+        pm.fused       = pfused;
+        pm.blend       = BLEND_ALPHA;
+        pm.attrs[0]    = G3D_ATTR_UV;
+        pm.attrs[1]    = G3D_ATTR_COLOR;
+        pm.attrs[2]    = G3D_ATTR_VIEW_DEPTH;
+        pm.attr_count  = 3;
+        pm.cull        = G3D_CULL_BACK;
+        pm.depth_test  = TRUE;
+        pm.depth_write = FALSE;
+    }
+
     pass.ctx         = &ctx;
     pass.shadow_pass = FALSE;
     pass.mat         = mat;
     pass.emissive    = em;
+    pass.particles   = pm;
     scene(&pass, user);
     g3d_flush(&ctx);
 

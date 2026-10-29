@@ -17,6 +17,10 @@
 #include "gfx3d/camera.h"
 #include "gfx3d/pipeline.h"
 #include "gfx3d/shadow.h"
+#include "gfx3d/billboard.h"
+#include "gfx3d/particles.h"
+#include "audio/audio.h"
+#include "audio/synth.h"
 #include "app/r3d.h"
 #include "core/profiler.h"
 #include "ui/font.h"
@@ -28,25 +32,51 @@
 #define KEY_N 78
 #define KEY_K 75
 #define KEY_O 79
+#define KEY_P 80
 #define GRID_X 40
 #define GRID_Z 25
-#define SHADOW_SIZE 1024u
-#define DAY_SECONDS 90.0f
+#define SHADOW_SIZE  1024u
+#define DAY_SECONDS  90.0f
+#define PARTICLE_CAP 4096u
+#define FIRE_RATE    90.0f
+#define SMOKE_RATE   55.0f
 
-static Mesh*    g_cube;
-static Mesh*    g_ground;
-static Mesh*    g_sphere;
-static Texture  g_tex[3];      /* 0: zemin damalı (mip zincirli), 1: küp, 2: beyaz */
-static Texture  g_tex_ground_nomip;   /* aynı pikseller, MIPMAP bayrağı yok (C referans yolu için) */
-static R3dRenderer g_r3d;
-static b32      g_mipmap_on;
-static b32      g_pbr_on;
-static b32      g_day_paused;
-static f32      g_tod;                /* gün saati [0,1): 0.25 öğle, 0.75 gece yarısı */
-static u8       g_prev_m, g_prev_p, g_prev_t;
-static Camera   g_cam;
-static G3dStats g_last_stats;
-static G3dStats g_shadow_stats;
+static Mesh*          g_cube;
+static Mesh*          g_ground;
+static Mesh*          g_sphere;
+static Texture        g_tex[3];      /* 0: zemin damalı (mip zincirli), 1: küp, 2: beyaz */
+static Texture        g_tex_ground_nomip;   /* aynı pikseller, MIPMAP bayrağı yok (C referans yolu için) */
+static R3dRenderer    g_r3d;
+static b32            g_mipmap_on;
+static b32            g_pbr_on;
+static b32            g_day_paused;
+static f32            g_tod;                /* gün saati [0,1): 0.25 öğle, 0.75 gece yarısı */
+static u8             g_prev_m, g_prev_p, g_prev_t;
+static Camera         g_cam;
+static G3dStats       g_last_stats;
+static G3dStats       g_shadow_stats;
+static ParticleSystem g_particles;
+static BillboardBatch g_billboards;
+static f32            g_fire_acc;
+static f32            g_smoke_acc;
+static f32            g_part_update_ms;
+static f32            g_part_mesh_ms;
+static u8             g_prev_burst;
+static b32            g_fx_enabled;
+
+/* Patlama ses efektleri: TPT SVF alçak geçiren filtre (kesim frekansı kaymalı) */
+static const SynthSfx k_sfx_burst_boom = {
+    WAVE_NOISE, 650.0f, 95.0f, 0.0f,
+    0.003f, 0.18f, 0.35f, 0.08f, 0.42f, 0.40f,
+    0.0f, 0.0f,
+    2800.0f, 180.0f, 0.45f
+};
+static const SynthSfx k_sfx_burst_spark = {
+    WAVE_SAW, 520.0f, 110.0f, 0.0f,
+    0.002f, 0.12f, 0.25f, 0.04f, 0.25f, 0.22f,
+    6.0f, 0.35f,
+    3600.0f, 320.0f, 0.60f
+};
 
 /* Yüklenen model (sürükle-bırak) */
 typedef struct {
@@ -79,6 +109,112 @@ static ModelAnim g_anim;
 static u8        g_prev_k, g_prev_o;
 static u8       g_prev_c;
 
+static ParticleEmitter make_fire_emitter(void) {
+    ParticleEmitter em = particles_default_emitter();
+    em.shape       = EMIT_SHAPE_SPHERE;
+    em.pos         = vec3(-3.2f, 0.25f, 1.5f);
+    em.radius      = 0.35f;
+    em.vel_min     = vec3(-0.45f, 1.4f, -0.45f);
+    em.vel_max     = vec3(0.45f, 3.0f, 0.45f);
+    em.speed_min   = 0.1f;
+    em.speed_max   = 0.5f;
+    em.life_min    = 0.45f;
+    em.life_max    = 1.1f;
+    em.gravity     = vec3(0.0f, 0.8f, 0.0f);
+    em.drag        = 0.6f;
+    em.size_start  = 0.55f;
+    em.size_end    = 0.12f;
+    em.color_start = vec4(1.0f, 0.85f, 0.25f, 0.90f);
+    em.color_end   = vec4(0.95f, 0.18f, 0.02f, 0.0f);
+    em.rot_min     = 0.0f;
+    em.rot_max     = M_TAU;
+    em.rot_vel_min = -2.0f;
+    em.rot_vel_max = 2.0f;
+    return em;
+}
+
+static ParticleEmitter make_smoke_emitter(void) {
+    ParticleEmitter em = particles_default_emitter();
+    em.shape       = EMIT_SHAPE_SPHERE;
+    em.pos         = vec3(-3.2f, 1.15f, 1.5f);
+    em.radius      = 0.45f;
+    em.vel_min     = vec3(-0.6f, 1.2f, -0.6f);
+    em.vel_max     = vec3(0.6f, 2.3f, 0.6f);
+    em.speed_min   = 0.05f;
+    em.speed_max   = 0.25f;
+    em.life_min    = 1.4f;
+    em.life_max    = 2.8f;
+    em.gravity     = vec3(0.25f, 0.35f, -0.1f);
+    em.drag        = 0.4f;
+    em.size_start  = 0.45f;
+    em.size_end    = 1.35f;
+    em.color_start = vec4(0.28f, 0.26f, 0.25f, 0.52f);
+    em.color_end   = vec4(0.55f, 0.58f, 0.62f, 0.0f);
+    em.rot_min     = 0.0f;
+    em.rot_max     = M_TAU;
+    em.rot_vel_min = -1.0f;
+    em.rot_vel_max = 1.0f;
+    return em;
+}
+
+static void emit_continuous_fx(f32 dt) {
+    if (!(dt > 0.0f)) return;
+    if (dt > 0.1f) dt = 0.1f;
+    g_fire_acc  += dt * FIRE_RATE;
+    g_smoke_acc += dt * SMOKE_RATE;
+    u32 n_fire  = (u32)g_fire_acc;
+    u32 n_smoke = (u32)g_smoke_acc;
+    if (n_fire > 0u) {
+        g_fire_acc -= (f32)n_fire;
+        ParticleEmitter ef = make_fire_emitter();
+        particles_emit_burst(&g_particles, &ef, n_fire);
+    }
+    if (n_smoke > 0u) {
+        g_smoke_acc -= (f32)n_smoke;
+        ParticleEmitter es = make_smoke_emitter();
+        particles_emit_burst(&g_particles, &es, n_smoke);
+    }
+}
+
+static void trigger_spark_burst(void) {
+    ParticleEmitter sp = particles_default_emitter();
+    sp.shape       = EMIT_SHAPE_SPHERE;
+    sp.pos         = vec3(-3.2f, 1.2f, 1.5f);
+    sp.radius      = 0.25f;
+    sp.vel_min     = vec3(-2.5f, 2.0f, -2.5f);
+    sp.vel_max     = vec3(2.5f, 7.5f, 2.5f);
+    sp.speed_min   = 3.0f;
+    sp.speed_max   = 8.5f;
+    sp.life_min    = 0.6f;
+    sp.life_max    = 1.6f;
+    sp.gravity     = vec3(0.0f, -9.8f, 0.0f);
+    sp.drag        = 0.8f;
+    sp.size_start  = 0.28f;
+    sp.size_end    = 0.04f;
+    sp.color_start = vec4(1.0f, 0.96f, 0.55f, 1.0f);
+    sp.color_end   = vec4(1.0f, 0.30f, 0.05f, 0.0f);
+    sp.rot_min     = 0.0f;
+    sp.rot_max     = M_TAU;
+    sp.rot_vel_min = -4.0f;
+    sp.rot_vel_max = 4.0f;
+    particles_emit_burst(&g_particles, &sp, 240u);
+
+    ParticleEmitter sm = make_smoke_emitter();
+    sm.pos         = vec3(-3.2f, 1.2f, 1.5f);
+    sm.speed_min   = 1.0f;
+    sm.speed_max   = 3.2f;
+    sm.size_start  = 0.55f;
+    sm.size_end    = 1.60f;
+    sm.color_start = vec4(0.85f, 0.50f, 0.20f, 0.65f);
+    sm.color_end   = vec4(0.35f, 0.35f, 0.38f, 0.0f);
+    particles_emit_burst(&g_particles, &sm, 40u);
+
+    Synth* s = audio_synth();
+    synth_set_reverb(s, 0.22f, 0.65f, 0.40f);
+    synth_play(s, &k_sfx_burst_boom);
+    synth_play(s, &k_sfx_burst_spark);
+}
+
 void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
     if (fb->depth == NULL) fb_init_depth(fb, perm);
 
@@ -96,7 +232,7 @@ void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
     g_pbr_on    = TRUE;
     g_day_paused = FALSE;
     g_tod       = 0.13f;     /* sabah */
-    g_prev_m = g_prev_p = g_prev_t = 0;
+    g_prev_m = g_prev_p = g_prev_t = g_prev_burst = 0;
     r3d_init(&g_r3d, perm, scratch, SHADOW_SIZE);
     tex_init(&g_tex[1], perm, 32, 32, TEX_FLAG_BILINEAR);
     tex_gen_gradient(&g_tex[1], FB_RGBA(255, 220, 90, 255), FB_RGBA(255, 120, 60, 255),
@@ -108,6 +244,20 @@ void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
     g_cam.pos   = vec3(0.0f, 3.0f, 14.0f);
     g_cam.pitch = -0.18f;
     g_prev_c    = 0;
+
+    particles_init(&g_particles, perm, PARTICLE_CAP, 0x5CE3D001ULL);
+    billboard_init(&g_billboards, perm, PARTICLE_CAP);
+    g_fire_acc       = 0.0f;
+    g_smoke_acc      = 0.0f;
+    g_part_update_ms = 0.0f;
+    g_part_mesh_ms   = 0.0f;
+    g_fx_enabled     = TRUE;
+    /* İlk karede ateş ve duman bulutu hazır görünsün (1.5 s ön ısıtma) */
+    for (u32 i = 0; i < 30u; i++) {
+        emit_continuous_fx(0.05f);
+        particles_update(&g_particles, 0.05f);
+    }
+    particles_build_billboards(&g_particles, &g_billboards, camera_view(&g_cam), TRUE);
 }
 
 static Vec4 hue_color(f32 h) {
@@ -151,6 +301,11 @@ static void draw_scene(R3dPass* p, void* user) {
 
     m = mat4_identity();
     r3d_draw_receiver(p, g_ground, &m, g_mipmap_on ? &g_tex[0] : &g_tex_ground_nomip, vec4(1, 1, 1, 1), 0.0f, 0.85f);
+
+    /* Alfa harmanlı parçacıklar en son çizilir; billboard mesh'i g3d_flush'a kadar sabit kalır */
+    if (g_fx_enabled) {
+        r3d_draw_particles(p, g_billboards.mesh);
+    }
 }
 
 /* Animasyonlu çizimleri bu karenin pozuyla günceller: klip yalnız 0. iskelete uygulanır (kanallar glTF
@@ -219,6 +374,25 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     if (key_pressed(in, KEY_O, &g_prev_o)) g_anim.paused = !g_anim.paused;
     animate_model(frame, dt);
 
+    if (key_pressed(in, KEY_P, &g_prev_burst)) {
+        trigger_spark_burst();
+    }
+    if (g_fx_enabled) {
+        PROF_BEGIN("particles");
+        f64 t0 = plat_time_ms();
+        emit_continuous_fx(dt);
+        particles_update(&g_particles, dt);
+        f64 t1 = plat_time_ms();
+        particles_build_billboards(&g_particles, &g_billboards, camera_view(&g_cam), TRUE);
+        f64 t2 = plat_time_ms();
+        g_part_update_ms = (f32)(t1 - t0);
+        g_part_mesh_ms   = (f32)(t2 - t1);
+        PROF_END();
+    } else {
+        g_part_update_ms = 0.0f;
+        g_part_mesh_ms   = 0.0f;
+    }
+
     /* Gölge: kameranın önündeki 36 birimlik küre */
     Vec3 eye = camera_eye(&g_cam);
     Vec3 fwd = camera_forward(&g_cam);
@@ -238,13 +412,27 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
 }
 
 void scene3d_bench_set(b32 pbr, f32 tod) {
-    g_pbr_on = pbr;
-    if (tod >= 0.0f) { g_tod = tod; g_day_paused = TRUE; }
+    g_pbr_on = (pbr & 1) != 0;
+    if (pbr & 2) trigger_spark_burst();
+    if (tod <= -10.0f) {
+        g_fx_enabled = FALSE;
+    } else {
+        g_fx_enabled = TRUE;
+        if (tod >= 0.0f) { g_tod = tod; g_day_paused = TRUE; }
+    }
 }
 
 void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
     char line[160];
     const G3dStats* s = &g_last_stats;
+    i32 y = (i32)fb->h - 22;
+    ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 36, FB_RGBA(15, 18, 26, 190));
+    fmt_format(line, sizeof(line),
+               "[P] Patlama | Parcacik %u/%u | sim+mesh %.3f ms (sim %.3f + mesh %.3f)",
+               g_particles.count, g_particles.capacity,
+               (f64)(g_part_update_ms + g_part_mesh_ms),
+               (f64)g_part_update_ms, (f64)g_part_mesh_ms);
+    ui_draw_text(ui, 4, y - 11, line, FB_RGBA(255, 205, 130, 255), 1);
     fmt_format(line, sizeof(line),
                "Nesne %llu (culled %llu) | Ucgen %llu -> ciz %llu, kirp %llu, arka %llu, red %llu | golge %llu",
                (unsigned long long)s->draws, (unsigned long long)s->draws_culled,
@@ -252,8 +440,6 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
                (unsigned long long)s->tris_clipped, (unsigned long long)s->tris_backface,
                (unsigned long long)s->tris_rejected,
                (unsigned long long)(g_pbr_on ? g_shadow_stats.tris_out : 0));
-    i32 y = (i32)fb->h - 22;
-    ui_draw_rect(ui, 0, y - 2, (i32)fb->w, 24, FB_RGBA(15, 18, 26, 190));
     ui_draw_text(ui, 4, y, line, FB_RGBA(225, 235, 248, 255), 1);
     u32 hh = (u32)(g_tod * 24.0f + 6.0f) % 24u;   /* tod 0 = 06:00 gün doğumu */
     f32 hf = g_tod * 24.0f;
@@ -267,8 +453,8 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
         fmt_format(line, sizeof(line), "[K] klip %u/%u %s  [O] %s  t=%.2f s  poz+skin %.3f ms",
                    g_anim.clip + 1u, g_anim.clip_count, g_anim.clips[g_anim.clip].name,
                    g_anim.paused ? "durdu" : "oynuyor", (f64)g_anim.time, (f64)g_anim.ms);
-        ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 12, FB_RGBA(15, 18, 26, 190));
-        ui_draw_text(ui, 4, y - 12, line, FB_RGBA(180, 255, 180, 255), 1);
+        ui_draw_rect(ui, 0, y - 26, (i32)fb->w, 12, FB_RGBA(15, 18, 26, 190));
+        ui_draw_text(ui, 4, y - 24, line, FB_RGBA(180, 255, 180, 255), 1);
     }
     const char* hint = g_model_info[0] ? g_model_info : ".glb / .gltf / .obj dosyasini pencereye surukle-birak";
     i32 hw = font_measure_width(hint, 1);

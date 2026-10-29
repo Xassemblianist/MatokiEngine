@@ -1,6 +1,6 @@
 /* app/r3d.h — Uygulama düzeyi 3D çizim katmanı: gün ışığı modeli, güneş gölge geçişi + ana geçiş
- * (pbr3d.mtk veya lit3d.mtk) ve kendinden ışıklı nesneler (unlit3d.mtk). Sahne bir çizim fonksiyonu verir;
- * r3d_render onu iki kez çağırır (gölge geçişi, ana geçiş). Demo sahnesi (scene3d) ve oyunlar paylaşır.
+ * (pbr3d.mtk veya lit3d.mtk), kendinden ışıklı nesneler (unlit3d.mtk) ve alfa harmanlı parçacıklar
+ * (particle3d.mtk). Sahne bir çizim fonksiyonu verir; r3d_render onu iki kez çağırır (gölge + ana geçiş).
  */
 #ifndef APP_R3D_H
 #define APP_R3D_H
@@ -36,6 +36,7 @@ typedef struct {
     Arena*         frame;
     G3dMaterial    mat;          /* geçişin temel materyali */
     G3dMaterial    emissive;     /* unlit3d materyali (ana geçişte) */
+    G3dMaterial    particles;    /* particle3d materyali (ana geçişte, alfa harmanlı) */
     b32            shadow_pass;
     b32            pbr;
     DayLight       dl;
@@ -74,5 +75,7 @@ void r3d_draw_receiver(R3dPass* p, const Mesh* mesh, const Mat4* model, const Te
                        f32 metal, f32 rough);
 /* Kendinden ışıklı nesne: gölge düşürmez, ışıktan etkilenmez */
 void r3d_draw_emissive(R3dPass* p, const Mesh* mesh, const Mat4* model, Vec4 color);
+/* Alfa harmanlı parçacık / billboard ağı: gölge düşürmez, derinlik testi yapar ama derinlik yazmaz */
+void r3d_draw_particles(R3dPass* p, const Mesh* mesh);
 
 #endif

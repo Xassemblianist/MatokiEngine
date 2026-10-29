@@ -295,16 +295,37 @@ void ref_shade_dungeon3d(ShadeBatch* batch) {
     }
 }
 
+/* particle3d.mtk C referansı. Uniform: fog@0 (vec4). Varying: uv(2) v_color(4) depth(1). */
+static void ref_shade_particle3d(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    for (u32 i = 0; i < n; i++) {
+        f32 dx = v[0u * n + i] * 2.0f - 1.0f;
+        f32 dy = v[1u * n + i] * 2.0f - 1.0f;
+        f32 t = m_clamp(1.0f - (dx * dx + dy * dy), 0.0f, 1.0f);
+        f32 w = t * t;
+        f32 f = m_clamp(v[6u * n + i] * u[3] * 0.6f, 0.0f, 1.0f);
+        for (u32 k = 0; k < 3; k++) {
+            f32 c = v[(2u + k) * n + i];
+            o[k * n + i] = c + (u[k] - c) * f;
+        }
+        o[3u * n + i] = v[5u * n + i] * w;
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
-    if (str_eq_name(name, "sprite.mtk"))  return REF_SHADE_SPRITE_FN;
-    if (str_eq_name(name, "solid.mtk"))   return REF_SHADE_SOLID_FN;
-    if (str_eq_name(name, "vcolor.mtk"))  return REF_SHADE_VCOLOR_FN;
-    if (str_eq_name(name, "plasma.mtk"))  return ref_shade_plasma;
-    if (str_eq_name(name, "branchy.mtk")) return ref_shade_branchy;
-    if (str_eq_name(name, "lit3d.mtk"))   return ref_shade_lit3d;
-    if (str_eq_name(name, "pbr3d.mtk"))   return ref_shade_pbr3d;
-    if (str_eq_name(name, "unlit3d.mtk")) return ref_shade_unlit3d;
-    if (str_eq_name(name, "dungeon3d.mtk")) return ref_shade_dungeon3d;
+    if (str_eq_name(name, "sprite.mtk"))     return REF_SHADE_SPRITE_FN;
+    if (str_eq_name(name, "solid.mtk"))      return REF_SHADE_SOLID_FN;
+    if (str_eq_name(name, "vcolor.mtk"))     return REF_SHADE_VCOLOR_FN;
+    if (str_eq_name(name, "plasma.mtk"))     return ref_shade_plasma;
+    if (str_eq_name(name, "branchy.mtk"))    return ref_shade_branchy;
+    if (str_eq_name(name, "lit3d.mtk"))      return ref_shade_lit3d;
+    if (str_eq_name(name, "pbr3d.mtk"))      return ref_shade_pbr3d;
+    if (str_eq_name(name, "unlit3d.mtk"))    return ref_shade_unlit3d;
+    if (str_eq_name(name, "dungeon3d.mtk"))  return ref_shade_dungeon3d;
+    if (str_eq_name(name, "particle3d.mtk")) return ref_shade_particle3d;
     return REF_SHADE_SOLID_FN;
 }
 
