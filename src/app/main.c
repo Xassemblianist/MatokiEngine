@@ -1065,6 +1065,7 @@ EXPORT(engine_set_caps) void engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u
         SIMD_RELAXED ? "engine_relaxed.wasm" : "engine.wasm",
         (g_caps_mask & CAP_WORKER_RENDER) ? "worker" : "main",
         g_caps_gpu_max_tex2d, g_caps_gpu_max_buf_mb);
+}
 
 /* F0_B (ARCH_V2 H1): Çalışma anı özelleştirme (arketip başına JIT ECS döngüsü) benchmark dışa aktarımları */
 static void ensure_spec_arena(void) {
