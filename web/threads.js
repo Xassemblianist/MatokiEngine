@@ -143,3 +143,181 @@ export async function startThreads(n, moduleOrBytes, memory, table, opts = {}) {
     count: workerCount,
   };
 }
+
+// OffscreenCanvas ile motor döngüsünü ayrı bir worker'da (tid=0) başlatır (D-109).
+// Ana iş parçacığı yalnız girdi / ses / dosya bırakma / DOM köprüsü olarak kalır.
+export async function startRenderWorker(offscreenCanvas, moduleOrBytes, memory, caps, opts = {}) {
+  const wasmModule =
+    moduleOrBytes instanceof WebAssembly.Module
+      ? moduleOrBytes
+      : await WebAssembly.compile(moduleOrBytes);
+
+  const hc = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
+  const workerCount =
+    typeof opts.workerCount === "number"
+      ? opts.workerCount
+      : Math.min(Math.max(hc - 1, 7), 8);
+  const seed = typeof opts.seed === "number" ? opts.seed >>> 0 : Date.now() >>> 0;
+
+  const worker = new Worker(new URL("./worker.js", import.meta.url), {
+    type: "module",
+    name: "matoki-render",
+  });
+
+  let nextCallId = 1;
+  const pendingCalls = new Map();
+
+  function callAsync(fn, ...args) {
+    const id = nextCallId++;
+    return new Promise((resolve, reject) => {
+      pendingCalls.set(id, { resolve, reject });
+      worker.postMessage({ type: "call", id, fn, args });
+    });
+  }
+
+  const readyInfo = await new Promise((resolve, reject) => {
+    const onMessage = (e) => {
+      const data = e.data;
+      if (!data || typeof data !== "object") return;
+
+      if (data.type === "render_ready") {
+        resolve(data);
+        return;
+      }
+      if (data.type === "error" && data.threadId === 0) {
+        reject(new Error(data.message || "Render worker başlatılamadı"));
+        return;
+      }
+      if (data.type === "log") {
+        if (typeof opts.onLog === "function") opts.onLog(data.text, data.threadId);
+        return;
+      }
+      if (data.type === "panic") {
+        if (typeof opts.onPanic === "function") opts.onPanic(data.text, data.threadId);
+        return;
+      }
+      if (data.type === "download") {
+        if (typeof opts.onDownload === "function") opts.onDownload(data.filename, data.bytes);
+        return;
+      }
+      if (data.type === "wants_pointer_lock") {
+        if (typeof opts.onWantsPointerLock === "function") opts.onWantsPointerLock(Boolean(data.wants));
+        return;
+      }
+      if (data.type === "call_result") {
+        const entry = pendingCalls.get(data.id);
+        if (entry) {
+          pendingCalls.delete(data.id);
+          entry.resolve(data.result);
+        }
+        return;
+      }
+      if (data.type === "call_error") {
+        const entry = pendingCalls.get(data.id);
+        if (entry) {
+          pendingCalls.delete(data.id);
+          entry.reject(new Error(data.message || "Worker çağrı hatası"));
+        }
+      }
+    };
+
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", (err) => {
+      reject(new Error(`Render worker hatası: ${err.message || err}`));
+    });
+
+    worker.postMessage(
+      {
+        type: "init_render",
+        canvas: offscreenCanvas,
+        module: wasmModule,
+        memory,
+        caps,
+        seed,
+        workerCount,
+      },
+      [offscreenCanvas]
+    );
+  });
+
+  let wantsLockState = Boolean(readyInfo.wantsPointerLock);
+  let dropCursor = readyInfo.assetBasePtr >>> 0;
+  let dropFiles = [];
+
+  const baseExports = {
+    engine_fb_width: () => readyInfo.fbW >>> 0,
+    engine_fb_height: () => readyInfo.fbH >>> 0,
+    engine_framebuffer: () => readyInfo.fbPtr >>> 0,
+    engine_input_buf: () => readyInfo.inputPtr >>> 0,
+    engine_wants_pointer_lock: () => (wantsLockState ? 1 : 0),
+    engine_set_pointer_lock(locked) {
+      worker.postMessage({ type: "set_pointer_lock", locked: locked ? 1 : 0 });
+    },
+    engine_audio_init(sampleRate) {
+      const ptr = readyInfo.audioRingPtr >>> 0;
+      if (ptr > 0 && memory.buffer instanceof SharedArrayBuffer) {
+        const hdr = new Uint32Array(memory.buffer, ptr, 8);
+        Atomics.store(hdr, 0, 0);
+        Atomics.store(hdr, 1, 0);
+        Atomics.store(hdr, 3, sampleRate >>> 0);
+        Atomics.store(hdr, 4, 0);
+      }
+      worker.postMessage({ type: "audio_init", sampleRate: sampleRate >>> 0 });
+      return ptr;
+    },
+    engine_file_begin() {
+      dropCursor = readyInfo.assetBasePtr >>> 0;
+      dropFiles = [];
+    },
+    engine_file_alloc(len) {
+      const aligned = (dropCursor + 15) & ~15;
+      dropCursor = (aligned + (len >>> 0) + 1 + 15) & ~15;
+      return aligned >>> 0;
+    },
+    engine_file_add(np, nlen, dp, dlen) {
+      const name = new Uint8Array(memory.buffer, np >>> 0, nlen >>> 0).slice();
+      const data = new Uint8Array(memory.buffer, dp >>> 0, dlen >>> 0).slice();
+      dropFiles.push({ name, data });
+    },
+    engine_file_end() {
+      const files = dropFiles;
+      dropFiles = [];
+      worker.postMessage({ type: "file_drop", files });
+      return 1;
+    },
+    engine_set_caps(mask, maxTex2D, maxBufMB) {
+      worker.postMessage({
+        type: "call",
+        fn: "engine_set_caps",
+        args: [mask >>> 0, (maxTex2D || 0) >>> 0, (maxBufMB || 0) >>> 0],
+      });
+    },
+  };
+
+  const exportsProxy = new Proxy(baseExports, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === "string" && prop.startsWith("engine_")) {
+        return (...args) => {
+          worker.postMessage({ type: "call", fn: prop, args });
+          return 0;
+        };
+      }
+      return undefined;
+    },
+  });
+
+  return {
+    worker,
+    fbW: readyInfo.fbW >>> 0,
+    fbH: readyInfo.fbH >>> 0,
+    fbPtr: readyInfo.fbPtr >>> 0,
+    inputPtr: readyInfo.inputPtr >>> 0,
+    audioRingPtr: readyInfo.audioRingPtr >>> 0,
+    setWantsLock(val) {
+      wantsLockState = Boolean(val);
+    },
+    callAsync,
+    exports: exportsProxy,
+  };
+}
