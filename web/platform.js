@@ -249,8 +249,10 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
   });
 
   function updateMouseCoords(e) {
+    const curW = (typeof exports.engine_fb_width === "function" ? exports.engine_fb_width() : canvas.width) || 640;
+    const curH = (typeof exports.engine_fb_height === "function" ? exports.engine_fb_height() : canvas.height) || 360;
     const rect = canvas.getBoundingClientRect();
-    const aspectCanvas = fbW / fbH;
+    const aspectCanvas = curW / curH;
     const aspectRect = rect.width / rect.height;
     let renderW = rect.width;
     let renderH = rect.height;
@@ -267,11 +269,11 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
 
     const relX = e.clientX - rect.left - offsetX;
     const relY = e.clientY - rect.top - offsetY;
-    const mx = Math.floor((relX * fbW) / renderW);
-    const my = Math.floor((relY * fbH) / renderH);
+    const mx = Math.floor((relX * curW) / renderW);
+    const my = Math.floor((relY * curH) / renderH);
 
-    const clampedX = Math.max(0, Math.min(fbW - 1, mx));
-    const clampedY = Math.max(0, Math.min(fbH - 1, my));
+    const clampedX = Math.max(0, Math.min(curW - 1, mx));
+    const clampedY = Math.max(0, Math.min(curH - 1, my));
 
     const prevX = inputI32[0];
     const prevY = inputI32[1];
@@ -376,7 +378,35 @@ function installInputListeners(exports, fbW, fbH, inputPtr) {
   return { wantsLock, isLocked, onNextFrame };
 }
 
+function readSavedResolutionMode() {
+  try {
+    const s = localStorage.getItem("matoki_res_mode");
+    if (s !== null) {
+      const n = parseInt(s, 10);
+      if (n >= 0 && n <= 4) return n;
+    }
+  } catch (err) {
+    console.warn("[platform] localStorage okunamadı:", err);
+  }
+  return 0;
+}
+
+function saveResolutionMode(mode) {
+  try {
+    localStorage.setItem("matoki_res_mode", String(mode));
+  } catch (err) {}
+}
+
+function getScreenResolution() {
+  const dpr = window.devicePixelRatio || 1;
+  const sw = Math.max(320, Math.round((window.innerWidth || 1920) * dpr) & ~1);
+  const sh = Math.max(180, Math.round((window.innerHeight || 1080) * dpr) & ~1);
+  return { sw, sh };
+}
+
 async function init() {
+  const initialResMode = readSavedResolutionMode();
+  const screenRes = getScreenResolution();
   const caps = await detectCaps();
   const mod = await fetchEngineModule(caps);
 
@@ -401,6 +431,9 @@ async function init() {
 
       let lockHelpers = null;
       const rw = await startRenderWorker(offscreen, mod, memory, caps, {
+        initialResMode,
+        screenW: screenRes.sw,
+        screenH: screenRes.sh,
         onLog(_text, _tid) {},
         onPanic(text, tid) {
           showPanic(tid > 0 ? `[Worker ${tid}] ${text}` : text);
@@ -414,6 +447,9 @@ async function init() {
             document.exitPointerLock();
           }
         },
+        onResolutionChanged(mode) {
+          saveResolutionMode(mode);
+        },
       });
 
       const exports = rw.exports;
@@ -424,7 +460,21 @@ async function init() {
         workerRender: true,
         renderWorker: rw.worker,
         callAsync: rw.callAsync,
+        cycleResolution: async () => rw.callAsync("engine_cycle_resolution"),
+        setResolutionMode: async (m) => rw.callAsync("engine_set_resolution_mode", m),
+        setResolution: async (w, h) => rw.callAsync("engine_set_resolution", w, h),
       };
+
+      window.addEventListener("resize", () => {
+        const s = getScreenResolution();
+        if (rw && rw.worker) {
+          rw.worker.postMessage({
+            type: "call",
+            fn: "engine_set_screen_size",
+            args: [s.sw >>> 0, s.sh >>> 0],
+          });
+        }
+      });
 
       try {
         const dropMod = await import("./filedrop.js");
@@ -530,24 +580,44 @@ async function init() {
   applyCapsToEngine(exports, caps);
   exports.engine_init(Date.now() >>> 0);
 
+  if (typeof exports.engine_set_screen_size === "function") {
+    exports.engine_set_screen_size(screenRes.sw, screenRes.sh);
+  }
+  if (initialResMode !== 0 && typeof exports.engine_set_resolution_mode === "function") {
+    exports.engine_set_resolution_mode(initialResMode);
+  }
+
+  window.addEventListener("resize", () => {
+    const s = getScreenResolution();
+    if (typeof exports.engine_set_screen_size === "function") {
+      exports.engine_set_screen_size(s.sw, s.sh);
+    }
+  });
+
   globalThis.matoki = {
     exports,
     memory,
     caps,
     workerRender: false,
     callAsync: async (fn, ...args) => (typeof exports[fn] === "function" ? exports[fn](...args) : undefined),
+    cycleResolution: () => (typeof exports.engine_cycle_resolution === "function" ? exports.engine_cycle_resolution() : undefined),
+    setResolutionMode: (m) => (typeof exports.engine_set_resolution_mode === "function" ? exports.engine_set_resolution_mode(m) : undefined),
+    setResolution: (w, h) => (typeof exports.engine_set_resolution === "function" ? exports.engine_set_resolution(w, h) : undefined),
   };
 
-  const fbW = exports.engine_fb_width();
-  const fbH = exports.engine_fb_height();
-  const fbPtr = exports.engine_framebuffer();
+  const initialW = exports.engine_fb_width();
+  const initialH = exports.engine_fb_height();
   const inputPtr = exports.engine_input_buf();
 
-  canvas.width = fbW;
-  canvas.height = fbH;
+  canvas.width = initialW;
+  canvas.height = initialH;
 
-  const { wantsLock, isLocked, onNextFrame } = installInputListeners(exports, fbW, fbH, inputPtr);
+  const { wantsLock, isLocked, onNextFrame } = installInputListeners(exports, initialW, initialH, inputPtr);
 
+  let curFbW = 0;
+  let curFbH = 0;
+  let curFbPtr = 0;
+  let curResMode = initialResMode;
   let cachedBuffer = null;
   let isShared = false;
   let fbView = null;
@@ -555,18 +625,36 @@ async function init() {
   let imageData = null;
 
   function refreshFbViews() {
-    if (cachedBuffer === memory.buffer) return;
-    cachedBuffer = memory.buffer;
-    isShared = typeof SharedArrayBuffer !== "undefined" && cachedBuffer instanceof SharedArrayBuffer;
-    const fbByteLen = fbW * fbH * 4;
-    fbView = new Uint8ClampedArray(cachedBuffer, fbPtr, fbByteLen);
-    if (isShared) {
-      if (!localFbBuf || localFbBuf.length !== fbByteLen) {
+    const fbW = typeof exports.engine_fb_width === "function" ? exports.engine_fb_width() : canvas.width;
+    const fbH = typeof exports.engine_fb_height === "function" ? exports.engine_fb_height() : canvas.height;
+    const fbPtr = typeof exports.engine_framebuffer === "function" ? exports.engine_framebuffer() : 0;
+
+    if (fbW !== curFbW || fbH !== curFbH || fbPtr !== curFbPtr || cachedBuffer !== memory.buffer) {
+      curFbW = fbW;
+      curFbH = fbH;
+      curFbPtr = fbPtr;
+      cachedBuffer = memory.buffer;
+      isShared = typeof SharedArrayBuffer !== "undefined" && cachedBuffer instanceof SharedArrayBuffer;
+
+      canvas.width = fbW;
+      canvas.height = fbH;
+
+      const fbByteLen = fbW * fbH * 4;
+      fbView = new Uint8ClampedArray(cachedBuffer, fbPtr, fbByteLen);
+      if (isShared) {
         localFbBuf = new Uint8ClampedArray(fbByteLen);
         imageData = new ImageData(localFbBuf, fbW, fbH);
+      } else {
+        imageData = new ImageData(fbView, fbW, fbH);
       }
-    } else {
-      imageData = new ImageData(fbView, fbW, fbH);
+
+      if (typeof exports.engine_get_resolution_mode === "function") {
+        const mode = exports.engine_get_resolution_mode();
+        if (mode !== curResMode) {
+          curResMode = mode;
+          saveResolutionMode(mode);
+        }
+      }
     }
   }
 

@@ -54,6 +54,7 @@
 #define KEY_T     84
 #define KEY_F1    112
 #define KEY_F12   123
+#define KEY_R     82
 
 typedef enum {
     SCENE_SPRITES = 0,
@@ -78,7 +79,28 @@ typedef struct {
 
 extern u8 __heap_base;
 
+typedef enum {
+    RES_640x360   = 0,
+    RES_960x540   = 1,
+    RES_1280x720  = 2,
+    RES_1920x1080 = 3,
+    RES_SCREEN    = 4,
+    RES_MODE_COUNT = 5
+} ResolutionPreset;
+
+static const u32 k_res_presets[4][2] = {
+    { 640,  360 },
+    { 960,  540 },
+    { 1280, 720 },
+    { 1920, 1080 }
+};
+
+static u32           g_res_mode = RES_640x360;
+static u32           g_screen_w = 1920;
+static u32           g_screen_h = 1080;
+
 static Arena         g_perm_arena;
+static Arena         g_fb_arena;       /* Dinamik olarak yeniden boyutlanan framebuffer ve derinlik tamponu */
 static Arena         g_frame_arena;
 static Arena         g_asset_arena;    /* sürükle-bırak dosyaları + yüklenen model (her grupta sıfırlanır) */
 static Framebuffer   g_fb;
@@ -157,6 +179,104 @@ static b32 str_eq(const char* a, const char* b) {
     if (!a || !b) return FALSE;
     while (*a && *a == *b) { a++; b++; }
     return *a == *b;
+}
+
+EXPORT(engine_set_resolution) void engine_set_resolution(u32 w, u32 h) {
+    if (w < 320) w = 320;
+    if (h < 180) h = 180;
+    w &= ~1u;
+    h &= ~1u;
+
+    usize need = (usize)w * (usize)h * sizeof(u32) + (usize)w * (usize)h * sizeof(f32) + 32;
+    if (need > g_fb_arena.cap) {
+        LOG("Cozunurluk cok buyuk (%ux%u, %zu B > %zu B)", w, h, need, g_fb_arena.cap);
+        return;
+    }
+
+    if (g_fb.w == w && g_fb.h == h && g_fb.px != NULL && g_fb.depth != NULL) {
+        return;
+    }
+
+    arena_reset(&g_fb_arena);
+    fb_init(&g_fb, &g_fb_arena, w, h);
+    fb_init_depth(&g_fb, &g_fb_arena);
+
+    g_ui.fb = &g_fb;
+    prof_reset();
+
+    LOG("Cozunurluk degistirildi: %ux%u (tampon: %.2f MB)",
+        w, h, (f64)need / (1024.0 * 1024.0));
+}
+
+EXPORT(engine_set_screen_size) void engine_set_screen_size(u32 sw, u32 sh) {
+    if (sw >= 320 && sh >= 180) {
+        g_screen_w = sw & ~1u;
+        g_screen_h = sh & ~1u;
+        if (g_res_mode == RES_SCREEN) {
+            engine_set_resolution(g_screen_w, g_screen_h);
+        }
+    }
+}
+
+EXPORT(engine_set_resolution_mode) void engine_set_resolution_mode(u32 mode) {
+    if (mode >= RES_MODE_COUNT) mode = 0;
+    g_res_mode = mode;
+    u32 w = FB_DEFAULT_W;
+    u32 h = FB_DEFAULT_H;
+    if (mode < 4) {
+        w = k_res_presets[mode][0];
+        h = k_res_presets[mode][1];
+    } else {
+        w = g_screen_w;
+        h = g_screen_h;
+    }
+    engine_set_resolution(w, h);
+}
+
+EXPORT(engine_cycle_resolution) u32 engine_cycle_resolution(void) {
+    u32 next = (g_res_mode + 1u) % RES_MODE_COUNT;
+    engine_set_resolution_mode(next);
+    return next;
+}
+
+EXPORT(engine_get_resolution_mode) u32 engine_get_resolution_mode(void) {
+    return g_res_mode;
+}
+
+EXPORT(engine_get_screen_w) u32 engine_get_screen_w(void) {
+    return g_screen_w;
+}
+
+EXPORT(engine_get_screen_h) u32 engine_get_screen_h(void) {
+    return g_screen_h;
+}
+
+EXPORT(engine_bench_resolution_leak) i32 engine_bench_resolution_leak(u32 iterations) {
+    u32 saved_mode = g_res_mode;
+    u32 saved_w = g_fb.w;
+    u32 saved_h = g_fb.h;
+    usize perm_used_before = g_perm_arena.used;
+
+    engine_set_resolution_mode(RES_640x360);
+    usize fb_used_initial = g_fb_arena.used;
+
+    for (u32 i = 0; i < iterations; i++) {
+        engine_cycle_resolution();
+    }
+
+    engine_set_resolution_mode(RES_640x360);
+    usize fb_used_final = g_fb_arena.used;
+    usize perm_used_after = g_perm_arena.used;
+
+    if (saved_mode != RES_640x360) {
+        engine_set_resolution_mode(saved_mode);
+    } else {
+        engine_set_resolution(saved_w, saved_h);
+    }
+
+    if (fb_used_final != fb_used_initial) return -1;
+    if (perm_used_after != perm_used_before) return -2;
+    return 0;
 }
 
 EXPORT(engine_set_wat_raster_mode) void engine_set_wat_raster_mode(u32 mode) {
@@ -284,11 +404,14 @@ static u8* build_auto_uniforms(const MtkLayout* layout, Arena* arena, f32 time_s
 
 EXPORT(engine_init) void engine_init(u32 seed) {
     u8* heap = &__heap_base;
-    arena_init(&g_perm_arena, heap, MB(64));
-    arena_init(&g_frame_arena, heap + MB(64), MB(128));
-    arena_init(&g_asset_arena, heap + MB(192), MB(48));
+    arena_init(&g_perm_arena,  heap,            MB(40));
+    arena_init(&g_fb_arena,    heap + MB(40),   MB(64));
+    arena_init(&g_frame_arena, heap + MB(104),  MB(104));
+    arena_init(&g_asset_arena, heap + MB(208),  MB(44));
 
-    fb_init(&g_fb, &g_perm_arena, FB_DEFAULT_W, FB_DEFAULT_H);
+    arena_reset(&g_fb_arena);
+    fb_init(&g_fb, &g_fb_arena, FB_DEFAULT_W, FB_DEFAULT_H);
+    fb_init_depth(&g_fb, &g_fb_arena);
     __builtin_memset(&g_input, 0, sizeof(g_input));
     __builtin_memset(g_prev_keys, 0, sizeof(g_prev_keys));
     __builtin_memset(g_mode_ms, 0, sizeof(g_mode_ms));
@@ -447,8 +570,8 @@ static void render_scene_branchy(f32 time_sec) {
 }
 
 static void render_scene_editor(f32 time_sec, f32 step_dt) {
-    /* Bölünmüş ekran: sol yarı (0..336) kod editörü, sağ yarı (340..636) canlı shader önizlemesi */
-    i32 split_x = 336;
+    /* Bölünmüş ekran: sol yarı kod editörü, sağ yarı canlı shader önizlemesi */
+    i32 split_x = (i32)g_fb.w > 640 ? (i32)g_fb.w / 2 : 336;
     i32 prev_x0 = split_x + 4;
     i32 prev_y0 = 22;
     i32 prev_w  = (i32)g_fb.w - prev_x0 - 4;
@@ -512,7 +635,8 @@ static void draw_top_bar(void) {
 
     char info[96];
     fmt_format(info, sizeof(info),
-               "%uT %s %.1f/%.1fms",
+               "%ux%u | %uT %s %.1f/%.1fms",
+               g_fb.w, g_fb.h,
                thread_count(), g_use_jit ? "JIT" : "REF",
                (f64)jit_ms, (f64)ref_ms);
     i32 iw = font_measure_width(info, 1);
@@ -530,7 +654,8 @@ static void draw_debug_overlay(void) {
 
     f32 fps = (g_cur_frame_ms > 0.05f) ? (1000.0f / g_cur_frame_ms) : 0.0f;
     char line[96];
-    fmt_format(line, sizeof(line), "FPS: %.1f (%.2f ms) | %uT | Mod: %s | Blend: %s",
+    fmt_format(line, sizeof(line), "%ux%u | FPS: %.1f (%.2f ms) | %uT | Mod: %s | Blend: %s",
+               g_fb.w, g_fb.h,
                (f64)fps, (f64)g_cur_frame_ms, thread_count(),
                g_use_jit ? "Matoki JIT" : "C Referans",
                blend_mode_name(g_blend_mode));
@@ -619,9 +744,14 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
         g_show_debug = !g_show_debug;
     }
 
-    /* Editör odakta değilken tek tuş kısayolları (T, J, B, P, 1..9) */
+    /* Editör odakta değilken tek tuş kısayolları (T, J, B, P, R, 1..9) */
     b32 editor_typing = (g_scene == SCENE_EDITOR && g_editor.focused);
     if (!editor_typing) {
+        if (key_pressed(KEY_R)) {
+            engine_cycle_resolution();
+            prof_reset();
+            LOG("Cozunurluk modu: %u (%ux%u)", g_res_mode, g_fb.w, g_fb.h);
+        }
         if (key_pressed(KEY_T)) {
             u32 cur_t = thread_count();
             u32 next_t = (cur_t < 2u) ? 2u : (cur_t < 4u) ? 4u : (cur_t < 8u) ? 8u : 1u;
@@ -1071,7 +1201,7 @@ EXPORT(engine_set_caps) void engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u
 static void ensure_spec_arena(void) {
     if (g_frame_arena.base == NULL) {
         u8* heap = &__heap_base;
-        arena_init(&g_frame_arena, heap + MB(64), MB(128));
+        arena_init(&g_frame_arena, heap + MB(104), MB(104));
     }
 }
 

@@ -924,3 +924,68 @@ TEST(raster_m14a_wasm_simd_and_bench) {
     remove(wasm_path);
     CHECK(rc_node == 0);
 }
+
+TEST(raster_resolution_resize_50x_no_leak) {
+    static u8 fb_buf[MB(32)];
+    static u8 frame_buf[MB(16)];
+    Arena fb_arena;
+    Arena frame_arena;
+    arena_init(&fb_arena, fb_buf, sizeof(fb_buf));
+    arena_init(&frame_arena, frame_buf, sizeof(frame_buf));
+
+    Framebuffer fb;
+    Rasterizer r;
+
+    const u32 test_resolutions[4][2] = {
+        { 640,  360 },
+        { 960,  540 },
+        { 1280, 720 },
+        { 1920, 1080 }
+    };
+
+    /* İlk 640x360 durumundaki bellek kullanımını al */
+    arena_reset(&fb_arena);
+    fb_init(&fb, &fb_arena, 640, 360);
+    fb_init_depth(&fb, &fb_arena);
+    usize initial_fb_used = fb_arena.used;
+    CHECK(initial_fb_used == (usize)(640 * 360 * 4 + 640 * 360 * 4));
+
+    /* 50 kez çözünürlük değiştir ve her seferinde rasterizer ile kare çiz */
+    for (u32 iter = 0; iter < 50; iter++) {
+        u32 mode = iter % 4;
+        u32 w = test_resolutions[mode][0];
+        u32 h = test_resolutions[mode][1];
+
+        arena_reset(&fb_arena);
+        fb_init(&fb, &fb_arena, w, h);
+        fb_init_depth(&fb, &fb_arena);
+
+        CHECK(fb.w == w);
+        CHECK(fb.h == h);
+        CHECK(fb.px != NULL);
+        CHECK(fb.depth != NULL);
+        CHECK(fb_arena.used == (usize)w * (usize)h * 8);
+
+        arena_reset(&frame_arena);
+        fb_clear(&fb, FB_RGBA(20, 30, 40, 255));
+        fb_clear_depth(&fb, 1.0f);
+
+        raster_begin(&r, &fb, &frame_arena);
+        RasterVert v0 = { 10.0f, 10.0f, 0.5f, 1.0f, {0} };
+        RasterVert v1 = { (f32)w - 10.0f, 20.0f, 0.5f, 1.0f, {0} };
+        RasterVert v2 = { (f32)w * 0.5f, (f32)h - 10.0f, 0.5f, 1.0f, {0} };
+        raster_triangle(&r, v0, v1, v2);
+        raster_flush(&r);
+
+        CHECK(r.tiles_x == (w + RASTER_TILE_SIZE - 1u) / RASTER_TILE_SIZE);
+        CHECK(r.tiles_y == (h + RASTER_TILE_SIZE - 1u) / RASTER_TILE_SIZE);
+    }
+
+    /* 50 döngü sonra 640x360'a dön ve ilk kullanımla karşılaştır */
+    arena_reset(&fb_arena);
+    fb_init(&fb, &fb_arena, 640, 360);
+    fb_init_depth(&fb, &fb_arena);
+    usize final_fb_used = fb_arena.used;
+
+    CHECK(final_fb_used == initial_fb_used);
+}
