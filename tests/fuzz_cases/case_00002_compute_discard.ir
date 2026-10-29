@@ -1,0 +1,6 @@
+// Matoki Fuzz Regression Case: case_00002_compute_discard
+// Sebep: ir.c ir_verify failed to reject IR_DISCARD in compute shaders
+// Tür: compute
+
+%0 = const.i32.u 1
+discard.u %0

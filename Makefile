@@ -64,7 +64,7 @@ TOOL_SRC     := $(sort $(wildcard tools/host/tool_*.c))
 TOOL_BINS    := $(TOOL_SRC:tools/host/tool_%.c=build/host/%)
 HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o
 
-.PHONY: all host test serve clean check status detcheck gpucheck
+.PHONY: all host test serve clean check status detcheck gpucheck fuzz
 .SECONDARY:
 
 all: web/engine.wasm web/engine_relaxed.wasm web/engine_st.wasm
@@ -164,6 +164,10 @@ gpucheck: all build/host/test_runner
 	trap "kill $$srv_pid 2>/dev/null || true" EXIT INT TERM; \
 	sleep 0.4; \
 	node tools/host/webgpu_check.mjs http://127.0.0.1:$(GPUCHECK_PORT)/gpu_test.html DEFAULT $(GPUCHECK_FLAGS)
+
+FUZZ_N ?= 100000
+fuzz: host
+	FUZZ_N=$(or $(N),$(FUZZ_N)) ./build/host/test_runner matoki_fuzz
 
 status:
 	@for f in $(sort $(wildcard tasks/*.md)); do \
