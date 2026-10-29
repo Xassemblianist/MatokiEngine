@@ -1,7 +1,8 @@
 #!/bin/bash
 # Özerk kuyruk: items2.txt satırları "görev model [bağımlılık,...]". Bağımlılıklar main'de DONE olunca başlar.
 # Her ajan kendi worktree'sinde çalışır ve merge.sh ile kendisi main'e alır + yayınlar. Aynı anda en çok MAX ajan.
-MAX=${MAX:-5}  # agy hub süreci de sayılır → 4 ajan; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
+# agy hub süreci de sayılır: MAX=5 → 4 ajan
+MAX=${MAX:-5}; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
 done_in_main() { grep -q '^Durum: DONE' "$MAIN/tasks/$1.md" 2>/dev/null; }
 while read -r t m d; do
   [ -z "$t" ] || [[ $t == \#* ]] && continue
