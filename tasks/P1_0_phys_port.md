@@ -1,6 +1,6 @@
 # P1_0 — SamurayBalgami/Matoki fiziğini taşı (src/phys2)
 
-Durum: IN_PROGRESS (agy)
+Durum: DONE (Sonnet + Flash raporu; yönetici kapattı)
 
 ## Amaç
 Arkadaşın motorundaki fizik (`/home/ostriquetrum/matoki-wt/review/SamurayBalgami-Matoki/src/phys/*`, ~6.6k satır;
