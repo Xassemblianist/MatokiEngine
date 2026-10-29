@@ -417,6 +417,19 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   memset etmez (alt arenanın kendi ayırmaları zaten sıfırlanır).
 - Gölge haritası kodlaması 16384 piksellik işlere bölündü.
 
+## N. GPU arka ucu (M15)
+
+### D-108 — WebGPU ikinci arka uç (Ö-5 kabul), RHI komut akışı
+**KABUL** · 2026-10-29, kullanıcı kararı ("çığır açıcı WebGPU + WebAssembly motoru")
+- Motor mantığı C/wasm'da kalır. GPU erişimi **RHI** (`src/gpu/`) üzerinden: C tarafı kaynak (buffer, doku,
+  sampler, pipeline, bind group) tutamaçları ve kare başına **komut akışı** (paylaşımlı bellekte düz, sürümlü ikili
+  biçim) üretir; `web/gpu.js` bu akışı kare başına bir kez WebGPU çağrılarına çevirir. JS'te karar/mantık yok
+  (AGENTS.md JS kuralları); akış biçimi ARCHITECTURE §2'de tanımlanır.
+- Shader'lar tek kaynak: aynı `.mtk` → wasm (CPU JIT) ve **WGSL** (Matoki IR'ından ikinci codegen).
+- Arka uç seçimi cihaza göre: WebGPU varsa GPU, yoksa CPU rasterizer. CPU yolu deterministik referans ve yedek
+  olarak kalır; GPU çıktısı CPU çıktısıyla tolerans içinde karşılaştırılarak test edilir.
+- `gfx3d` arka uçtan bağımsız kalır (mesh + materyal + çizim listesi); WebGPU arka ucu ikinci tüketicidir.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
@@ -424,7 +437,7 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
 - **Ö-2** `simd_clamp01` → `pmin(1, pmax(0, x))`; `simd_pack_rgba8` → `shl 8/16/24 + or` (clang kalıbı, %25–30). — M5_3
 - **Ö-3** `asm/*.wat` → `src/bench/asm_sources.c` otomatik gömme Makefile kuralı. — M5_3
 - **Ö-4** D-027 nöbetçi kimliklerin kaldırılması.
-- **Ö-5 GPU (WebGPU) ikinci arka uç** — 2026-10-27, kullanıcı isteği.
+- **Ö-5 GPU (WebGPU) ikinci arka uç** — 2026-10-27, kullanıcı isteği. → **D-108 ile KABUL edildi (2026-10-29).**
   (a) Matoki IR'ından **WGSL** üreten ikinci codegen (aynı `.mtk` hem CPU hem GPU'da);
   (b) `gfx3d` arka uçtan bağımsız kalır: mesh/materyal/çizim listesi üretir, CPU rasterizer bunun
   bir tüketicisidir, WebGPU arka ucu ikinci tüketici olur;
