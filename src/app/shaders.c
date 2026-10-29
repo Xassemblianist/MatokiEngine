@@ -722,7 +722,11 @@ void shaders_init(ShaderManager* sm, Arena* scratch) {
     __builtin_memset(sm, 0, sizeof(*sm));
 
     u32 count = g_embedded_shader_count;
-    if (count > APP_MAX_SHADERS) count = APP_MAX_SHADERS;
+    if (count > APP_MAX_SHADERS) {
+        LOG("HATA: %u gömülü shader var, APP_MAX_SHADERS = %u; fazlası yüklenmiyor",
+            g_embedded_shader_count, (u32)APP_MAX_SHADERS);
+        count = APP_MAX_SHADERS;
+    }
 
     for (u32 i = 0; i < count; i++) {
         const EmbeddedFile* ef = &g_embedded_shaders[i];

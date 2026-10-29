@@ -12,7 +12,8 @@
 #include "raster/shade_abi.h"
 #include "matoki/matoki.h"
 
-#define APP_MAX_SHADERS 16
+/* shaders/ ve shaders/compute/ altındaki tüm gömülü .mtk dosyalarına yetmeli (tests/test_app_shaders.c) */
+#define APP_MAX_SHADERS 32
 
 typedef struct {
     char      name[32];
