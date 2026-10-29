@@ -4,6 +4,14 @@
  */
 #include "sim/sim.h"
 #include "core/log.h"
+#include "core/math.h"
+#include "core/rng.h"
+#include "gfx3d/mesh.h"
+#include "phys/shapes.h"
+#include "phys/collide.h"
+#include "phys/bvh.h"
+#include "scene/transform.h"
+#include "thread/thread.h"
 
 #define HASH_PRIME1 0x9E3779B185EBCA87ULL
 #define HASH_PRIME2 0xC2B2AE3D27D4EB4FULL
@@ -581,4 +589,403 @@ b32 sim_replay_run(Sim* sim, const SimReplay* rep, u64* out_hashes, u32 max_hash
 
     sim->replay_rec = prev_rec;
     return TRUE;
+}
+
+/* ============================================================================
+ * Belirlenimcilik Doğrulama Sahnesi (F0_G, D-112)
+ * 10.000 tick 3D fizik + ECS simülasyon sahnesi
+ * ============================================================================ */
+
+#define DET_SCENE_MAX_PLAYERS  2u
+#define DET_SCENE_CRATE_COUNT  6u
+#define DET_SCENE_MAX_PROJ     8u
+#define DET_SCENE_MAX_ENTITIES 64u
+#define DET_SCENE_MAX_BODIES   32u
+#define DET_SCENE_MAX_STATICS  16u
+
+typedef struct {
+    u32 body_idx;
+    u32 player_id;
+    i32 hp;
+    u32 cooldown;
+    u32 score;
+} DetCompFighter;
+
+typedef struct {
+    EcsEntity owner;
+    u32       slot;
+    u32       ttl;
+} DetCompRocket;
+
+typedef struct {
+    f32 angle;
+    f32 speed;
+} DetCompOrbiter;
+
+typedef struct {
+    const Mesh* arena_mesh;
+    const Bvh*  arena_bvh;
+} DetSceneAssets;
+
+typedef struct {
+    u32       tick;
+    Rng       rng;
+    PhysWorld phys;
+    EcsWorld  ecs;
+
+    EcsCompId cid_fighter;
+    EcsCompId cid_rocket;
+    EcsCompId cid_orbiter;
+
+    EcsEntity player_ent[DET_SCENE_MAX_PLAYERS];
+    EcsEntity orbiter_ent[DET_SCENE_MAX_PLAYERS];
+    EcsEntity crate_ent[DET_SCENE_CRATE_COUNT];
+    u32       crate_body[DET_SCENE_CRATE_COUNT];
+
+    u32       proj_body[DET_SCENE_MAX_PROJ];
+    EcsEntity proj_ent[DET_SCENE_MAX_PROJ];
+} DetSceneState;
+
+static u64 det_scene_hash(const void* state, u32 state_size, void* user) {
+    UNUSED(state_size);
+    UNUSED(user);
+    const DetSceneState* s = (const DetSceneState*)state;
+    u64 h = sim_hash_init();
+    h = sim_hash_u32(h, s->tick);
+    h = sim_hash_update(h, &s->rng, sizeof(Rng));
+    h = sim_hash_phys(h, &s->phys);
+    h = sim_hash_ecs(h, &s->ecs);
+    h = sim_hash_update(h, s->player_ent,  sizeof(s->player_ent));
+    h = sim_hash_update(h, s->orbiter_ent, sizeof(s->orbiter_ent));
+    h = sim_hash_update(h, s->crate_ent,   sizeof(s->crate_ent));
+    h = sim_hash_update(h, s->crate_body,  sizeof(s->crate_body));
+    h = sim_hash_update(h, s->proj_body,   sizeof(s->proj_body));
+    h = sim_hash_update(h, s->proj_ent,    sizeof(s->proj_ent));
+    return sim_hash_final(h);
+}
+
+static void det_scene_setup(Sim* sim, const DetSceneAssets* assets, u32 seed) {
+    sim_reset(sim);
+    Arena* sa = sim_state_arena(sim);
+
+    DetSceneState* s = ARENA_PUSH_STRUCT(sa, DetSceneState);
+    s->tick = 0u;
+    rng_seed(&s->rng, seed);
+
+    phys_world_init(&s->phys, sa, DET_SCENE_MAX_BODIES, DET_SCENE_MAX_STATICS, 2u);
+    s->phys.fixed_dt = sim->fixed_dt;
+
+    phys_world_add_static(&s->phys, shape_from_plane(plane_make(vec3(0.0f, 1.0f, 0.0f), 0.0f)), 0.2f, 0.7f);
+    phys_world_add_static(&s->phys, shape_from_aabb(aabb_make(vec3(-12.0f, 0.0f, -12.0f), vec3(12.0f, 4.0f, -11.0f))), 0.3f, 0.5f);
+    phys_world_add_static(&s->phys, shape_from_aabb(aabb_make(vec3(-12.0f, 0.0f,  11.0f), vec3(12.0f, 4.0f,  12.0f))), 0.3f, 0.5f);
+    phys_world_add_static(&s->phys, shape_from_aabb(aabb_make(vec3(-12.0f, 0.0f, -12.0f), vec3(-11.0f, 4.0f, 12.0f))), 0.3f, 0.5f);
+    phys_world_add_static(&s->phys, shape_from_aabb(aabb_make(vec3( 11.0f, 0.0f, -12.0f), vec3( 12.0f, 4.0f, 12.0f))), 0.3f, 0.5f);
+    phys_world_add_static(&s->phys, shape_from_sphere(sphere_make(vec3(0.0f, 0.5f, 0.0f), 1.2f)), 0.4f, 0.6f);
+
+    if (assets && assets->arena_mesh && assets->arena_bvh) {
+        phys_world_add_mesh(&s->phys, assets->arena_mesh, assets->arena_bvh, 0.2f, 0.6f);
+    }
+
+    ecs_world_init(&s->ecs, sa, DET_SCENE_MAX_ENTITIES);
+    transform_register(&s->ecs);
+    s->cid_fighter = ecs_register(&s->ecs, "Fighter", sizeof(DetCompFighter), _Alignof(DetCompFighter), NULL);
+    s->cid_rocket  = ecs_register(&s->ecs, "Rocket",  sizeof(DetCompRocket),  _Alignof(DetCompRocket),  NULL);
+    s->cid_orbiter = ecs_register(&s->ecs, "Orbiter", sizeof(DetCompOrbiter), _Alignof(DetCompOrbiter), NULL);
+
+    EcsCompId cid_tr = transform_comp_id(&s->ecs);
+
+    for (u32 p = 0u; p < DET_SCENE_MAX_PLAYERS; p++) {
+        f32 px = (p == 0u) ? -4.0f : 4.0f;
+        f32 pz = (p == 0u) ? -2.0f : 2.0f;
+        u32 bidx = phys_world_add_capsule(&s->phys,
+                                          vec3(px, 0.5f, pz),
+                                          vec3(px, 1.3f, pz),
+                                          0.4f, 1.0f, 0.1f, 0.8f);
+
+        EcsEntity pe = ecs_spawn(&s->ecs);
+        s->player_ent[p] = pe;
+        Transform tr = transform_trs(vec3(px, 0.9f, pz), quat_identity(), vec3(1.0f, 1.0f, 1.0f));
+        ecs_set(&s->ecs, pe, cid_tr, &tr);
+
+        DetCompFighter cf = { bidx, p, 100, 0u, 0u };
+        ecs_set(&s->ecs, pe, s->cid_fighter, &cf);
+
+        EcsEntity oe = ecs_spawn(&s->ecs);
+        s->orbiter_ent[p] = oe;
+        Transform otr = transform_trs(vec3(0.8f, 0.5f, 0.0f), quat_identity(), vec3(0.3f, 0.3f, 0.3f));
+        ecs_set(&s->ecs, oe, cid_tr, &otr);
+        DetCompOrbiter co = { (f32)p * M_PI, 2.5f + (f32)p * 0.5f };
+        ecs_set(&s->ecs, oe, s->cid_orbiter, &co);
+        transform_set_parent(&s->ecs, oe, pe);
+    }
+
+    for (u32 i = 0u; i < DET_SCENE_CRATE_COUNT; i++) {
+        f32 angle = (f32)i * (M_TAU / (f32)DET_SCENE_CRATE_COUNT);
+        Vec3 pos = vec3(m_cos(angle) * 3.0f, 1.5f + (f32)i * 0.25f, m_sin(angle) * 3.0f);
+        u32 bidx = phys_world_add_sphere(&s->phys, pos, 0.45f, 0.8f, 0.45f, 0.5f);
+        s->crate_body[i] = bidx;
+
+        EcsEntity ce = ecs_spawn(&s->ecs);
+        s->crate_ent[i] = ce;
+        Transform ctr = transform_trs(pos, quat_identity(), vec3(0.9f, 0.9f, 0.9f));
+        ecs_set(&s->ecs, ce, cid_tr, &ctr);
+    }
+
+    for (u32 i = 0u; i < DET_SCENE_MAX_PROJ; i++) {
+        Vec3 park = vec3((f32)i * 2.0f - 8.0f, -50.0f, 0.0f);
+        u32 bidx = phys_world_add_sphere(&s->phys, park, 0.25f, 0.0f, 0.6f, 0.2f);
+        s->proj_body[i] = bidx;
+        s->proj_ent[i]  = ECS_NULL;
+    }
+
+    transform_update(&s->ecs);
+}
+
+static void det_scene_step(void* state, const SimInput* inputs, u32 player_count, f32 dt, void* user) {
+    UNUSED(user);
+    DetSceneState* s = (DetSceneState*)state;
+    EcsCompId cid_tr = transform_comp_id(&s->ecs);
+
+    /* 1) Oyuncu girdilerini fizik gövdelerine ve silahlara uygula */
+    EcsQuery qf = ecs_query(&s->ecs, (1u << s->cid_fighter) | (1u << cid_tr));
+    while (ecs_query_next(&qf)) {
+        DetCompFighter* cf = (DetCompFighter*)ecs_query_get(&qf, s->cid_fighter);
+        const SimInput* in = &inputs[cf->player_id % player_count];
+        PhysBody* b = &s->phys.bodies[cf->body_idx];
+
+        f32 mx = (f32)in->move_x * (1.0f / 32767.0f);
+        f32 mz = (f32)in->move_y * (1.0f / 32767.0f);
+        f32 spd = (in->buttons & SIM_BTN_SPRINT) ? 9.0f : 6.0f;
+
+        b->vel.x = b->vel.x * 0.75f + mx * spd * 0.25f;
+        b->vel.z = b->vel.z * 0.75f + mz * spd * 0.25f;
+
+        if ((in->buttons & SIM_BTN_JUMP) && b->on_ground) {
+            b->vel.y = 5.5f;
+            b->on_ground = FALSE;
+        }
+
+        if (cf->cooldown > 0u) cf->cooldown--;
+        if ((in->buttons & SIM_BTN_FIRE) && cf->cooldown == 0u) {
+            for (u32 slot = 0u; slot < DET_SCENE_MAX_PROJ; slot++) {
+                if (s->proj_ent[slot] == ECS_NULL || !ecs_alive(&s->ecs, s->proj_ent[slot])) {
+                    EcsEntity re = ecs_spawn(&s->ecs);
+                    s->proj_ent[slot] = re;
+
+                    Vec3 dir = vec3(mx, 0.15f, mz);
+                    if (vec3_dot(dir, dir) < 1e-4f) {
+                        dir = (cf->player_id == 0u) ? vec3(1.0f, 0.1f, 0.0f) : vec3(-1.0f, 0.1f, 0.0f);
+                    }
+                    dir = vec3_norm(dir);
+
+                    PhysBody* pb = &s->phys.bodies[s->proj_body[slot]];
+                    pb->pos      = vec3_add(b->pos, vec3_scale(dir, 0.9f));
+                    pb->vel      = vec3_scale(dir, 14.0f);
+                    pb->inv_mass = 2.0f;
+
+                    Transform rtr = transform_trs(pb->pos, quat_identity(), vec3(0.25f, 0.25f, 0.25f));
+                    ecs_set(&s->ecs, re, cid_tr, &rtr);
+                    DetCompRocket cr = { qf.entity, slot, 24u };
+                    ecs_set(&s->ecs, re, s->cid_rocket, &cr);
+
+                    cf->cooldown = 8u;
+                    cf->score += 1u;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* 2) 3D fizik adımı */
+    phys_world_step(&s->phys);
+
+    /* 3) Fizik -> Transform */
+    for (u32 p = 0u; p < DET_SCENE_MAX_PLAYERS; p++) {
+        EcsEntity pe = s->player_ent[p];
+        DetCompFighter* cf = (DetCompFighter*)ecs_get(&s->ecs, pe, s->cid_fighter);
+        Transform* tr   = (Transform*)ecs_get(&s->ecs, pe, cid_tr);
+        if (cf && tr) {
+            tr->pos = s->phys.bodies[cf->body_idx].pos;
+            f32 yaw = (f32)inputs[p % player_count].look_dx * 0.01f;
+            tr->rot = quat_from_axis_angle(vec3(0.0f, 1.0f, 0.0f), yaw);
+        }
+    }
+
+    for (u32 i = 0u; i < DET_SCENE_CRATE_COUNT; i++) {
+        Transform* ctr = (Transform*)ecs_get(&s->ecs, s->crate_ent[i], cid_tr);
+        if (ctr) {
+            ctr->pos = s->phys.bodies[s->crate_body[i]].pos;
+        }
+    }
+
+    /* 4) Mermiler */
+    EcsQuery qr = ecs_query(&s->ecs, (1u << s->cid_rocket) | (1u << cid_tr));
+    while (ecs_query_next(&qr)) {
+        DetCompRocket* cr = (DetCompRocket*)ecs_query_get(&qr, s->cid_rocket);
+        Transform*  tr = (Transform*)ecs_query_get(&qr, cid_tr);
+        PhysBody*   pb = &s->phys.bodies[s->proj_body[cr->slot]];
+        tr->pos = pb->pos;
+
+        if (cr->ttl <= 1u) {
+            pb->inv_mass = 0.0f;
+            pb->vel      = vec3(0.0f, 0.0f, 0.0f);
+            pb->pos      = vec3((f32)cr->slot * 2.0f - 8.0f, -50.0f, 0.0f);
+            s->proj_ent[cr->slot] = ECS_NULL;
+            ecs_destroy(&s->ecs, qr.entity);
+        } else {
+            cr->ttl--;
+        }
+    }
+
+    /* 5) Uydular */
+    EcsQuery qo = ecs_query(&s->ecs, (1u << s->cid_orbiter) | (1u << cid_tr));
+    while (ecs_query_next(&qo)) {
+        DetCompOrbiter* co = (DetCompOrbiter*)ecs_query_get(&qo, s->cid_orbiter);
+        Transform*   tr = (Transform*)ecs_query_get(&qo, cid_tr);
+        co->angle += co->speed * dt;
+        if (co->angle > M_TAU) co->angle -= M_TAU;
+        tr->pos = vec3(m_cos(co->angle) * 0.8f, 0.5f, m_sin(co->angle) * 0.8f);
+    }
+
+    transform_update(&s->ecs);
+    s->tick++;
+}
+
+static SimInput det_make_input(u32 player, u32 frame) {
+    Rng r;
+    u32 epoch = frame / 3u;
+    rng_seed_seq(&r, (u64)epoch * 1315423911ULL + (u64)player * 97ULL, player + 1u);
+
+    SimInput in = sim_input_zero();
+    u32 bits = rng_u32(&r);
+    if ((bits & 3u) == 0u)      in.move_x =  24000;
+    else if ((bits & 3u) == 1u) in.move_x = -24000;
+    else                        in.move_x = (i16)((i32)(bits & 0xFFu) * 64 - 8192);
+
+    if (((bits >> 2u) & 3u) == 0u)      in.move_y =  24000;
+    else if (((bits >> 2u) & 3u) == 1u) in.move_y = -24000;
+    else                                in.move_y = (i16)((i32)((bits >> 8u) & 0xFFu) * 64 - 8192);
+
+    in.look_dx = (i16)((i32)((bits >> 16u) & 0x3Fu) - 32);
+    in.look_dy = 0;
+
+    if ((frame + player * 5u) % 11u == 0u) in.buttons |= SIM_BTN_JUMP;
+    if ((frame + player * 3u) % 7u  == 0u) in.buttons |= SIM_BTN_FIRE;
+    if ((bits >> 24u) & 1u)                in.buttons |= SIM_BTN_SPRINT;
+    in.aux = epoch;
+    return in;
+}
+
+static inline u64 det_fnv1a_combine(u64 h, u64 v) {
+    for (u32 b = 0u; b < 8u; b++) {
+        h ^= (v >> (b * 8u)) & 0xFFu;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static b32 det_check_no_nan(const DetSceneState* s) {
+    for (u32 i = 0u; i < s->phys.body_count; i++) {
+        Vec3 p = s->phys.bodies[i].pos;
+        Vec3 v = s->phys.bodies[i].vel;
+        if (p.x != p.x || p.y != p.y || p.z != p.z) return FALSE;
+        if (v.x != v.x || v.y != v.y || v.z != v.z) return FALSE;
+    }
+    EcsCompId cid_tr = transform_comp_id(&s->ecs);
+    const EcsStore* ts = &s->ecs.stores[cid_tr];
+    for (u32 i = 0u; i < ts->count; i++) {
+        const Transform* tr = (const Transform*)(ts->data + (usize)i * (usize)ts->stride);
+        for (u32 m = 0u; m < 16u; m++) {
+            if (tr->world.m[m] != tr->world.m[m]) return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static _Alignas(16) u8  g_sim_det_mem[MB(8)];
+static _Alignas(16) u64 g_sim_det_hashes[10000];
+static SimDetResult     g_sim_det_result;
+
+SimDetResult sim_det_run(u32 total_ticks, u32 seed, u64* out_hashes, u32 max_hashes) {
+    SimDetResult res;
+    __builtin_memset(&res, 0, sizeof(res));
+    res.total_ticks = total_ticks;
+
+    Arena a;
+    arena_init(&a, g_sim_det_mem, sizeof(g_sim_det_mem));
+
+    Mesh* ramp = mesh_cube(&a, 1.2f);
+    for (u32 i = 0u; i < ramp->vertex_count; i++) {
+        ramp->px[i] -= 2.5f;
+        ramp->py[i] -= 0.7f;
+    }
+    mesh_compute_bounds(ramp);
+    Bvh* ramp_bvh = bvh_build(&a, ramp);
+    DetSceneAssets assets = { ramp, ramp_bvh };
+
+    SimConfig cfg;
+    __builtin_memset(&cfg, 0, sizeof(cfg));
+    cfg.state_size   = KB(64);
+    cfg.player_count = DET_SCENE_MAX_PLAYERS;
+    cfg.snapshot_cap = 16u;
+    cfg.fixed_dt     = SIM_DEFAULT_DT;
+    cfg.step_fn      = det_scene_step;
+    cfg.hash_fn      = det_scene_hash;
+    cfg.user         = &assets;
+
+    Sim sim;
+    sim_init(&sim, &a, &cfg);
+    det_scene_setup(&sim, &assets, seed);
+
+    res.initial_hash = sim_state_hash(&sim);
+    u64 comb = SIM_HASH_SEED;
+
+    u32 cp_idx = 0u;
+    for (u32 f = 0u; f < total_ticks; f++) {
+        sim_submit_input(&sim, 0u, f, det_make_input(0u, f));
+        sim_submit_input(&sim, 1u, f, det_make_input(1u, f));
+        sim_step(&sim);
+        u64 h = sim_state_hash(&sim);
+        if (out_hashes && f < max_hashes) {
+            out_hashes[f] = h;
+        }
+        comb = det_fnv1a_combine(comb, h);
+
+        if ((f + 1u) % 1000u == 0u && cp_idx < 10u) {
+            res.checkpoint_hashes[cp_idx++] = h;
+        }
+    }
+
+    res.final_hash = sim_state_hash(&sim);
+    res.combined_hash = comb;
+    const DetSceneState* st = (const DetSceneState*)sim_state_const(&sim);
+    res.has_nan = !det_check_no_nan(st);
+
+    return res;
+}
+
+EXPORT(engine_sim_det_run)
+u32 engine_sim_det_run(u32 total_ticks, u32 seed, u32 num_threads) {
+    if (total_ticks == 0u) total_ticks = SIM_DET_DEFAULT_TICKS;
+    if (total_ticks > 10000u) total_ticks = 10000u;
+    if (seed == 0u) seed = SIM_DET_DEFAULT_SEED;
+
+    if (num_threads > 0u) {
+        engine_set_worker_count(num_threads - 1u);
+    }
+
+    g_sim_det_result = sim_det_run(total_ticks, seed, g_sim_det_hashes, 10000u);
+    return g_sim_det_result.has_nan ? 1u : 0u;
+}
+
+EXPORT(engine_sim_det_get_result)
+void engine_sim_det_get_result(SimDetResult* out_result) {
+    if (out_result) {
+        __builtin_memcpy(out_result, &g_sim_det_result, sizeof(SimDetResult));
+    }
+}
+
+EXPORT(engine_sim_det_get_hashes)
+u64* engine_sim_det_get_hashes(void) {
+    return g_sim_det_hashes;
 }
