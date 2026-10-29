@@ -1,0 +1,109 @@
+/* cloud_noise.mtk — 3B Periyodik Perlin-Worley + Worley bulut gürültüsü compute çekirdeği.
+ * 32x32x32 (veya u_noise_dim.x^3) voksel ızgarasında R = Perlin-Worley taban kümülüs profili,
+ * G/B/A = artan frekanslı 3B Worley erozyon kanallarını [0, 1]^4 aralığında üretir.
+ */
+
+uniform u_noise_dim: vec4; /* x = n (32), y = inv_n (1/32), z = seed_ofs, w = 0 */
+
+buffer out_noise: buffer<vec4>;
+
+fn hash1(x: u32, y: u32, z: u32, mask: u32, seed: u32) -> f32 {
+    let ux: u32 = x & mask;
+    let uy: u32 = y & mask;
+    let uz: u32 = z & mask;
+    var h: u32  = ux * 374761393 + uy * 668265263 + uz * 2147483647 + seed * 1664525;
+    h = (h ^ (h >> 13)) * 1274126177;
+    h = h ^ (h >> 16);
+    return f32(h & 1023) * 0.0009775171;
+}
+
+fn hash3(x: u32, y: u32, z: u32, mask: u32, seed: u32) -> vec3 {
+    let ux: u32 = x & mask;
+    let uy: u32 = y & mask;
+    let uz: u32 = z & mask;
+    var h: u32  = ux * 374761393 + uy * 668265263 + uz * 2147483647 + seed * 1664525;
+    h = (h ^ (h >> 13)) * 1274126177;
+    h = h ^ (h >> 16);
+    let rx: f32 = f32(h & 1023) * 0.0009775171;
+    let ry: f32 = f32((h >> 10) & 1023) * 0.0009775171;
+    let rz: f32 = f32((h >> 20) & 1023) * 0.0009775171;
+    return vec3(rx, ry, rz);
+}
+
+/* 8 komşu hücreli (kaydırılmış 2x2x2 kafes) periyodik 3B Hücresel Worley gürültüsü */
+fn worley3(uvw: vec3, freq: f32, mask: u32, seed: u32) -> f32 {
+    let p: vec3  = uvw * freq;
+    let ps: vec3 = p - vec3(0.5);
+    let bx: i32  = i32(floor(ps.x));
+    let by: i32  = i32(floor(ps.y));
+    let bz: i32  = i32(floor(ps.z));
+
+    var min_d2: f32 = 4.0;
+    for c in 0..8 {
+        let cx: i32 = bx + (c & 1);
+        let cy: i32 = by + ((c >> 1) & 1);
+        let cz: i32 = bz + ((c >> 2) & 1);
+        let rnd: vec3  = hash3(u32(cx + 64), u32(cy + 64), u32(cz + 64), mask, seed);
+        let feat: vec3 = vec3(f32(cx), f32(cy), f32(cz)) + vec3(0.15) + rnd * 0.70;
+        let diff: vec3 = feat - p;
+        min_d2 = min(min_d2, dot(diff, diff));
+    }
+    return clamp(1.0 - sqrt(min_d2), 0.0, 1.0);
+}
+
+/* Periyodik 3B değer/gradyan yumuşak gürültüsü */
+fn smooth_noise3(uvw: vec3, freq: f32, mask: u32, seed: u32) -> f32 {
+    let p: vec3  = uvw * freq;
+    let ip: vec3 = floor(p);
+    let f: vec3  = p - ip;
+    let u: vec3  = f * f * (vec3(3.0) - f * 2.0);
+
+    let ix: u32 = u32(i32(ip.x) + 64);
+    let iy: u32 = u32(i32(ip.y) + 64);
+    let iz: u32 = u32(i32(ip.z) + 64);
+
+    let n000: f32 = hash1(ix,     iy,     iz,     mask, seed);
+    let n100: f32 = hash1(ix + 1, iy,     iz,     mask, seed);
+    let n010: f32 = hash1(ix,     iy + 1, iz,     mask, seed);
+    let n110: f32 = hash1(ix + 1, iy + 1, iz,     mask, seed);
+    let n001: f32 = hash1(ix,     iy,     iz + 1, mask, seed);
+    let n101: f32 = hash1(ix + 1, iy,     iz + 1, mask, seed);
+    let n011: f32 = hash1(ix,     iy + 1, iz + 1, mask, seed);
+    let n111: f32 = hash1(ix + 1, iy + 1, iz + 1, mask, seed);
+
+    let nx00: f32 = mix(n000, n100, u.x);
+    let nx10: f32 = mix(n010, n110, u.x);
+    let nx01: f32 = mix(n001, n101, u.x);
+    let nx11: f32 = mix(n011, n111, u.x);
+    return mix(mix(nx00, nx10, u.y), mix(nx01, nx11, u.y), u.z);
+}
+
+fn compute() {
+    let gid: u32 = global_id;
+    let n: u32   = u32(u_noise_dim.x);
+    let nn: u32  = n * n;
+    if gid >= nn * n {
+        return;
+    }
+
+    let z: u32   = u32(floor((f32(gid) + 0.5) / f32(nn)));
+    let rem: u32 = gid - z * nn;
+    let y: u32   = u32(floor((f32(rem) + 0.5) / u_noise_dim.x));
+    let x: u32   = rem - y * n;
+
+    let uvw: vec3 = (vec3(f32(x), f32(y), f32(z)) + vec3(0.5)) * u_noise_dim.y;
+
+    let p0: f32 = smooth_noise3(uvw, 4.0, 3, 11);
+    let p1: f32 = smooth_noise3(uvw, 8.0, 7, 23);
+    let p_fbm: f32 = clamp(p0 * 0.65 + p1 * 0.35, 0.0, 1.0);
+
+    let w0: f32 = worley3(uvw, 4.0,  3,  101);
+    let w1: f32 = worley3(uvw, 8.0,  7,  211);
+    let w2: f32 = worley3(uvw, 16.0, 15, 307);
+    let w_fbm: f32 = clamp(w0 * 0.625 + w1 * 0.25 + w2 * 0.125, 0.0, 1.0);
+
+    let lo: f32 = 1.0 - w_fbm;
+    let pw: f32 = clamp((p_fbm - lo) / max(1.0 - lo, 0.001), 0.0, 1.0);
+
+    out_noise[gid] = vec4(pw, w_fbm, clamp(w1 * 0.65 + w2 * 0.35, 0.0, 1.0), w2);
+}

@@ -27,11 +27,13 @@ void scene_ocean_draw_hud(UiContext* ui, const Framebuffer* fb);
 void scene_ocean_set_hud(b32 show);
 
 /* Test/ölçüm: [0]=fft_ms, [1]=mesh_ms, [2]=shade_ms, [3]=hs, [4]=theory_hs,
- * [5]=wind_speed, [6]=choppy, [7]=time_scale, [8]=boat_y, [9]=boat_pitch, [10]=boat_roll, [11]=tris */
+ * [5]=wind_speed, [6]=choppy, [7]=time_scale, [8]=boat_y, [9]=boat_pitch, [10]=boat_roll, [11]=tris,
+ * [12]=sky_gpu_ms, [13]=sun_elev, [14]=cloud_coverage, [15]=star_intensity */
 const f32* scene_ocean_debug(void);
 
 /* Test/komut: cmd=0 sıfırla, cmd=1 (t, wind, choppy) sabit zamana kur, cmd=2 (yaw, pitch, dist) kamera,
- * cmd=3 (sun_elev, time_scale, wireframe) görünüm ayarları */
+ * cmd=3 (sun_elev, time_scale, wireframe) görünüm ayarları,
+ * cmd=4 (preset: 0=öğle, 1=gün batımı, 2=gece; b=azim; c=bulut örtüsü) atmosfer/bulut önayarları */
 void scene_ocean_debug_cmd(u32 cmd, f32 a, f32 b, f32 c);
 
 #endif

@@ -25,6 +25,13 @@ typedef struct {
     Mat4           boat_model;
     Vec3           sun_dir;
     Vec3           sun_col;
+    Vec3           moon_dir;
+    f32            star_intensity;
+    f32            moon_intensity;
+    f32            cloud_coverage;
+    f32            cloud_wind_x;
+    f32            cloud_wind_z;
+    Mat4           prev_vp;
     Vec3           sky_zenith;
     Vec3           sky_horiz;
     Vec3           sea_deep;
@@ -59,5 +66,9 @@ b32 gpu_ocean_render(Arena* scratch, const GpuOceanFrameParams* p, u32* out_tris
  * derleyip ir_eval_compute ile koşturur ve CPU referans kademesiyle karşılaştırır. */
 b32 gpu_ocean_test_compute_fft(Arena* scratch, const Ocean* ref_ocean, u32 cascade_idx,
                                f64 sim_time, f32* out_max_err);
+
+/* Birim testi yardımcısı: V1 atmosfer + 3B bulut gürültüsü Matoki @compute çekirdeklerini
+ * (transmittance, multiscatter, skyview, aerial, cloud_noise) derler ve fiziksel çıktılarını doğrular. */
+b32 gpu_ocean_test_atmos_compute(Arena* scratch);
 
 #endif /* GPU_OCEAN_H */

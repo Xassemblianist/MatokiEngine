@@ -373,13 +373,15 @@ export async function initGpu(canvas, exports, memory, options = {}) {
 
   allocSurfaceTargets(surfaceWidth, surfaceHeight);
 
-  const MAX_TIMESTAMP_QUERIES = 16;
+  const MAX_TIMESTAMP_QUERIES = 32;
   let querySet = null;
   let queryResolveBuf = null;
   let queryReadbackBuf = null;
   let queryIndex = 0;
+  let querySkyMask = 0;
   let queryReadbackInFlight = false;
   let lastGpuTimeUs = 0;
+  let lastSkyGpuTimeUs = 0;
 
   if (hasTimestampQuery && typeof device.createQuerySet === "function") {
     try {
@@ -592,23 +594,27 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const handle = dv.getUint32(off + 8, true);
           const width = dv.getUint32(off + 12, true);
           const height = dv.getUint32(off + 16, true);
-          const mipLevels = dv.getUint32(off + 20, true);
+          const rawMip = dv.getUint32(off + 20, true);
+          const mipLevels = Math.max(1, rawMip & 0xffff);
+          const depthLayers = Math.max(1, rawMip >>> 16);
+          const is3D = depthLayers > 1;
           const format = dv.getUint32(off + 24, true);
           const usage = dv.getUint32(off + 28, true);
           const gpuFormat = mapTextureFormat(format, canvasFormat);
-          const tex = withValidationScope(handle, () =>
-            device.createTexture({
-              size: { width, height, depthOrArrayLayers: 1 },
-              mipLevelCount: mipLevels,
-              format: gpuFormat,
-              usage: mapTextureUsage(usage),
-            })
-          );
+          const texDesc = {
+            size: { width, height, depthOrArrayLayers: depthLayers },
+            mipLevelCount: mipLevels,
+            format: gpuFormat,
+            usage: mapTextureUsage(usage),
+          };
+          if (is3D) texDesc.dimension = "3d";
+          const tex = withValidationScope(handle, () => device.createTexture(texDesc));
           resources.set(handle, {
             texture: tex,
-            view: tex.createView(),
+            view: is3D ? tex.createView({ dimension: "3d" }) : tex.createView(),
             width,
             height,
+            depth: depthLayers,
             format: gpuFormat,
           });
           break;
@@ -625,6 +631,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
             device.createSampler({
               addressModeU: mapAddressMode(addrU),
               addressModeV: mapAddressMode(addrV),
+              addressModeW: mapAddressMode(addrU),
               magFilter: mapFilterMode(magFilter),
               minFilter: mapFilterMode(minFilter),
               mipmapFilter: mapFilterMode(mipFilter),
@@ -881,6 +888,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           if (!cmdEncoder) {
             cmdEncoder = device.createCommandEncoder();
             queryIndex = 0;
+            querySkyMask = 0;
           }
 
           let colorView = null;
@@ -950,6 +958,9 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           }
 
           if (querySet && queryIndex + 2 <= MAX_TIMESTAMP_QUERIES) {
+            if ((flags & 0x10000) !== 0) {
+              querySkyMask |= 1 << (queryIndex >>> 1);
+            }
             passDesc.timestampWrites = {
               querySet,
               beginningOfPassWriteIndex: queryIndex,
@@ -1055,12 +1066,17 @@ export async function initGpu(canvas, exports, memory, options = {}) {
         }
 
         case RHI_CMD_BEGIN_COMPUTE_PASS: {
+          const cFlags = cmdSize >= 12 ? dv.getUint32(off + 8, true) : 0;
           if (!cmdEncoder) {
             cmdEncoder = device.createCommandEncoder();
             queryIndex = 0;
+            querySkyMask = 0;
           }
           const cpassDesc = {};
           if (querySet && queryIndex + 2 <= MAX_TIMESTAMP_QUERIES) {
+            if ((cFlags & 0x100) !== 0) {
+              querySkyMask |= 1 << (queryIndex >>> 1);
+            }
             cpassDesc.timestampWrites = {
               querySet,
               beginningOfPassWriteIndex: queryIndex,
@@ -1148,10 +1164,12 @@ export async function initGpu(canvas, exports, memory, options = {}) {
                 { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 }
               );
             }
+            const resolvedSkyMask = querySkyMask;
             const submitT0 = typeof performance !== "undefined" ? performance.now() : 0;
             device.queue.submit([cmdEncoder.finish()]);
             cmdEncoder = null;
             queryIndex = 0;
+            querySkyMask = 0;
 
             if (resolvedQueries > 0) {
               queryReadbackBuf
@@ -1161,17 +1179,29 @@ export async function initGpu(canvas, exports, memory, options = {}) {
                     queryReadbackBuf.getMappedRange(0, resolvedQueries * 8)
                   );
                   let totalNs = 0n;
+                  let skyNs = 0n;
                   for (let i = 0; i + 1 < resolvedQueries; i += 2) {
                     const t0 = u64[i];
                     const t1 = u64[i + 1];
-                    if (t1 >= t0) totalNs += t1 - t0;
+                    if (t1 >= t0) {
+                      const dt = t1 - t0;
+                      totalNs += dt;
+                      if ((resolvedSkyMask & (1 << (i >>> 1))) !== 0) {
+                        skyNs += dt;
+                      }
+                    }
                   }
                   queryReadbackBuf.unmap();
                   queryReadbackInFlight = false;
                   const us = Math.max(1, Number((totalNs + 500n) / 1000n)) >>> 0;
+                  const skyUs = skyNs > 0n ? Math.max(1, Number((skyNs + 500n) / 1000n)) >>> 0 : 0;
                   lastGpuTimeUs = us;
+                  lastSkyGpuTimeUs = skyUs;
                   if (exports && typeof exports.engine_gpu_set_frame_time_us === "function") {
                     exports.engine_gpu_set_frame_time_us(us);
+                  }
+                  if (exports && typeof exports.engine_gpu_set_sky_time_us === "function") {
+                    exports.engine_gpu_set_sky_time_us(skyUs);
                   }
                 })
                 .catch(() => {
@@ -1292,6 +1322,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     getLastPixels: () => lastPixels,
     getReadbackCount: () => readbackCount,
     getLastGpuTimeUs: () => lastGpuTimeUs,
+    getLastSkyGpuTimeUs: () => lastSkyGpuTimeUs,
     destroy,
   };
 }
