@@ -111,7 +111,7 @@
       table = createTableForModule(mod);
 
       let instance = null;
-      for (const tryShared of [false, true]) {
+      for (const tryShared of [true, false]) {
         try {
           memory = new WebAssembly.Memory({ initial: 4096, maximum: 16384, shared: tryShared });
           const env = {
@@ -132,13 +132,43 @@
           instance = new WebAssembly.Instance(mod, { env });
           break;
         } catch (err) {
-          if (tryShared) throw err;
+          if (!tryShared) throw err;
         }
       }
 
       const exports = instance.exports;
       const gpu = await initGpu(canvas, exports, memory);
-      globalThis.matokiGpu = { exports, memory, gpu };
+
+      function readSummary() {
+        if (!exports.engine_gpu_test_summary) return null;
+        const ptr = exports.engine_gpu_test_summary() >>> 0;
+        if (!ptr) return null;
+        const dv = new DataView(memory.buffer, ptr, 48);
+        return {
+          width: dv.getUint32(0, true),
+          height: dv.getUint32(4, true),
+          bgPixels: dv.getUint32(8, true),
+          triPixels: dv.getUint32(12, true),
+          triRedPixels: dv.getUint32(16, true),
+          triGreenPixels: dv.getUint32(20, true),
+          triBluePixels: dv.getUint32(24, true),
+          cubePixels: dv.getUint32(28, true),
+          cubeWarmPixels: dv.getUint32(32, true),
+          cubeCoolPixels: dv.getUint32(36, true),
+          gpuErrors: dv.getUint32(40, true),
+          passed: dv.getUint32(44, true) !== 0,
+        };
+      }
+
+      async function verify() {
+        if (!gpu) return null;
+        await gpu.readbackPixels();
+        const s = readSummary();
+        globalThis.matokiGpu.summary = s;
+        return s;
+      }
+
+      globalThis.matokiGpu = { exports, memory, gpu, summary: null, readSummary, verify };
 
       if (!gpu) {
         const avail = exports.engine_gpu_available ? exports.engine_gpu_available() : 0;
@@ -161,6 +191,8 @@
 
         const streamBytes = exports.engine_gpu_test_frame(now, dt);
         const cmdCount = gpu.executeFrame();
+        const s = readSummary();
+        globalThis.matokiGpu.summary = s;
 
         fpsFrames++;
         if (now - fpsLast >= 500) {
@@ -169,10 +201,14 @@
           fpsLast = now;
         }
 
+        const verifyTxt = s && s.bgPixels > 0
+          ? ` | piksel=${s.passed ? "OK" : "HATA"} (üçgen=${s.triPixels}, küp=${s.cubePixels}, hata=${s.gpuErrors})`
+          : "";
+
         hud.textContent =
-          `MATOKI WebGPU RHI (M15_B) | format=${gpu.format} | ` +
+          `MATOKI WebGPU RHI (M15_C) | format=${gpu.format} | ` +
           `FPS=${fpsVal.toFixed(1)} | akış=${streamBytes} B (${cmdCount} komut) | ` +
-          `kaynaklar=${gpu.resources.size}`;
+          `kaynaklar=${gpu.resources.size}${verifyTxt}`;
 
         requestAnimationFrame(frame);
       }
