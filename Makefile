@@ -45,7 +45,7 @@ WASM_ST_OBJ      := $(SRC:%.c=build/wasm_st/%.o)
 
 # shaders/*.mtk -> build/gen/embed_shaders.c (sadece wasm; bkz. src/core/embed.h)
 .DEFAULT_GOAL := all
-SHADERS  := $(sort $(wildcard shaders/*.mtk))
+SHADERS  := $(sort $(wildcard shaders/*.mtk shaders/compute/*.mtk))
 WASM_OBJ         += build/wasm/build/gen/embed_shaders.o
 WASM_RELAXED_OBJ += build/wasm_relaxed/build/gen/embed_shaders.o
 WASM_ST_OBJ      += build/wasm_st/build/gen/embed_shaders.o
@@ -62,9 +62,9 @@ HOST_OBJ     := $(HOST_SRC:%.c=build/host/%.o)
 # Native araçlar: tools/host/tool_X.c -> build/host/X  (src kütüphanesi + plat_host ile linklenir)
 TOOL_SRC     := $(sort $(wildcard tools/host/tool_*.c))
 TOOL_BINS    := $(TOOL_SRC:tools/host/tool_%.c=build/host/%)
-HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o
+HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o build/host/build/gen/embed_shaders.o
 
-.PHONY: all host test serve clean check status detcheck gpucheck fuzz
+.PHONY: all host test serve clean check status detcheck gpucheck gpucompare fuzz
 .SECONDARY:
 
 all: web/engine.wasm web/engine_relaxed.wasm web/engine_st.wasm
@@ -157,6 +157,14 @@ else
 GPUCHECK_FLAGS ?= --use-webgpu-adapter=swiftshader
 endif
 
+gpucompare: all build/host/test_runner
+	@if [ ! -f build/wgsl/solid.wgsl ]; then ./build/host/test_runner matoki_wgsl; fi
+	@python3 tools/host/serve_coi.py $(GPUCHECK_PORT) >/dev/null 2>&1 & \
+	srv_pid=$$!; \
+	trap "kill $$srv_pid 2>/dev/null || true" EXIT INT TERM; \
+	sleep 0.4; \
+	node tools/host/gpu_compare.mjs http://127.0.0.1:$(GPUCHECK_PORT)/gpu_test.html?compare=1 $(GPUCHECK_FLAGS)
+
 gpucheck: all build/host/test_runner
 	@if [ ! -f build/wgsl/solid.wgsl ]; then ./build/host/test_runner matoki_wgsl; fi
 	@python3 tools/host/serve_coi.py $(GPUCHECK_PORT) >/dev/null 2>&1 & \
@@ -164,6 +172,7 @@ gpucheck: all build/host/test_runner
 	trap "kill $$srv_pid 2>/dev/null || true" EXIT INT TERM; \
 	sleep 0.4; \
 	node tools/host/webgpu_check.mjs http://127.0.0.1:$(GPUCHECK_PORT)/gpu_test.html DEFAULT $(GPUCHECK_FLAGS)
+	@$(MAKE) gpucompare GPUCHECK_PORT=$(GPUCHECK_PORT)
 
 FUZZ_N ?= 100000
 fuzz: host

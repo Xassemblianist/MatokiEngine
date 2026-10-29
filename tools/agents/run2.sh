@@ -1,8 +1,8 @@
 #!/bin/bash
 # Özerk kuyruk: items2.txt satırları "görev model [bağımlılık,...]". Her turda hazır olan (bağımlılıkları main'de DONE,
 # worktree'si yok) tüm görevleri boş yer oldukça başlatır. Her ajan merge.sh ile kendisi main'e alır + yayınlar.
-# agy hub süreci de sayılır: MAX=7 → 6 ajan. Commit atmadan biten ajanın worktree'si korunur (yeniden başlatılmaz).
-MAX=${MAX:-7}; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
+# agy hub süreci de sayılır: MAX=10 → 9 ajan. Commit atmadan biten ajanın worktree'si korunur (yeniden başlatılmaz).
+MAX=${MAX:-10}; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
 done_in_main() { grep -qi '^durum: *done' "$MAIN/tasks/$1.md" 2>/dev/null; }
 launch() { local t=$1 m=$2
   git -C $MAIN worktree add -q -b "$t" "$W/$t" main 2>/dev/null || git -C $MAIN worktree add -q "$W/$t" "$t"

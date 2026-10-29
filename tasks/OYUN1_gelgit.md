@@ -1,6 +1,11 @@
 # OYUN1 — "Gelgit": fırtınalı okyanusta yelkenli (motorun ilk gerçek oyunu)
 
-Durum: TODO (G1_A, V1_sky_clouds, G1_B_gpu_scene, P1_B_solver_parallel bittikten sonra)
+Durum: TODO
+
+> **Öne çekildi (2026-10-29):** Yalnız G1_A (GPU okyanus, main'de) gerekli. V1 (atmosfer/bulut), G1_B (GPU sahnesi), P1_A/B (fizik)
+> paralel çalışıyor ya da bekliyor: onları BEKLEME, mevcut `src/phys2` (ya da main'de hangisi varsa) ve G1_A'nın GPU okyanus/gök
+> yolunu kullan. Öncelik: **grafik kalitesi ve oynanabilir dikey dilim**. Sıra: prototip (tekne+rüzgâr+dalga) → görsel cila
+> (GPU yolunda, 1080p) → görevler. Limit kısıtlı: önce oynanabilir + güzel bir sürümü main'e al (merge.sh), sonra iyileştir.
 Model: gemini-4-argon-high
 
 ## Neden Argon, neden bu oyun
