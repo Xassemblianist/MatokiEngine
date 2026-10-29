@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MATOKI — WebGPU RHI Demosu (M15_B)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #0b0d14;
+      color: #dce6f7;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: monospace;
+    }
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 12px;
+      background: rgba(16, 20, 32, 0.88);
+      border: 1px solid #3c4d6e;
+      padding: 8px 12px;
+      font-size: 13px;
+      line-height: 1.45;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #gpu-screen {
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      display: block;
+    }
+    #panic-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(20, 0, 0, 0.92);
+      color: #ff5555;
+      padding: 32px;
+      font-size: 15px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">MATOKI WebGPU RHI (M15_B) — Yükleniyor...</div>
+  <canvas id="gpu-screen" width="640" height="360"></canvas>
+  <div id="panic-overlay"></div>
+
+  <script type="module">
+    import { createJitLoader } from "./jit.js";
+    import { initGpu } from "./gpu.js";
+
+    const decoder = new TextDecoder("utf-8");
+    const canvas = document.getElementById("gpu-screen");
+    const hud = document.getElementById("hud");
+    const panicOverlay = document.getElementById("panic-overlay");
+
+    let memory = null;
+    let table = null;
+    let running = true;
+
+    function readCString(ptr, len) {
+      const bytes = new Uint8Array(memory.buffer, ptr, len);
+      if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer) {
+        return decoder.decode(bytes.slice());
+      }
+      return decoder.decode(bytes);
+    }
+
+    function showPanic(msg) {
+      running = false;
+      console.error(`[MATOKI GPU PANIC] ${msg}`);
+      panicOverlay.textContent = `MATOKI GPU PANIC\n\n${msg}`;
+      panicOverlay.style.display = "block";
+    }
+
+    function createTableForModule(mod) {
+      const imports = WebAssembly.Module.imports(mod);
+      let initial = 64;
+      for (const imp of imports) {
+        if (imp.module === "env" && imp.name === "__indirect_function_table" && imp.kind === "table") {
+          if (imp.type && typeof imp.type.minimum === "number") {
+            initial = Math.max(initial, imp.type.minimum);
+          } else if (imp.type && typeof imp.type.initial === "number") {
+            initial = Math.max(initial, imp.type.initial);
+          }
+        }
+      }
+      return new WebAssembly.Table({ element: "anyfunc", initial });
+    }
+
+    async function main() {
+      const resp = await fetch("./engine.wasm", { cache: "no-store" });
+      const bytes = await resp.arrayBuffer();
+      const mod = await WebAssembly.compile(bytes);
+      table = createTableForModule(mod);
+
+      let instance = null;
+      for (const tryShared of [false, true]) {
+        try {
+          memory = new WebAssembly.Memory({ initial: 4096, maximum: 16384, shared: tryShared });
+          const env = {
+            memory,
+            __indirect_function_table: table,
+            plat_log(ptr, len) {
+              console.log(readCString(ptr, len));
+            },
+            plat_panic(ptr, len) {
+              showPanic(readCString(ptr, len));
+            },
+            plat_time_ms() {
+              return performance.now();
+            },
+            plat_jit_load: createJitLoader(memory, table),
+            plat_download() {},
+          };
+          instance = new WebAssembly.Instance(mod, { env });
+          break;
+        } catch (err) {
+          if (tryShared) throw err;
+        }
+      }
+
+      const exports = instance.exports;
+      const gpu = await initGpu(canvas, exports, memory);
+      globalThis.matokiGpu = { exports, memory, gpu };
+
+      if (!gpu) {
+        const avail = exports.engine_gpu_available ? exports.engine_gpu_available() : 0;
+        const f1Bytes = exports.engine_gpu_test_frame(0, 0.016);
+        hud.textContent =
+          `WebGPU cihazı yok (engine_gpu_available=${avail}) — CPU yedek yolu.\n` +
+          `Komut akışı yine üretildi: 1. kare ${f1Bytes} bayt`;
+        return;
+      }
+
+      let lastTime = performance.now();
+      let fpsFrames = 0;
+      let fpsLast = lastTime;
+      let fpsVal = 0;
+
+      function frame(now) {
+        if (!running) return;
+        const dt = Math.min((now - lastTime) * 0.001, 0.1);
+        lastTime = now;
+
+        const streamBytes = exports.engine_gpu_test_frame(now, dt);
+        const cmdCount = gpu.executeFrame();
+
+        fpsFrames++;
+        if (now - fpsLast >= 500) {
+          fpsVal = (fpsFrames * 1000) / (now - fpsLast);
+          fpsFrames = 0;
+          fpsLast = now;
+        }
+
+        hud.textContent =
+          `MATOKI WebGPU RHI (M15_B) | format=${gpu.format} | ` +
+          `FPS=${fpsVal.toFixed(1)} | akış=${streamBytes} B (${cmdCount} komut) | ` +
+          `kaynaklar=${gpu.resources.size}`;
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    main().catch((err) => showPanic(err.message || String(err)));
+  </script>
+</body>
+</html>

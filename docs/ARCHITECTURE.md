@@ -57,6 +57,15 @@ u32   engine_fb_height(void);
 // kilit değişince set_pointer_lock(0/1) bildirir; kilitliyken mouse_dx/dy = movementX/Y (konum sabit).
 u32   engine_wants_pointer_lock(void);
 void  engine_set_pointer_lock(u32 locked);
+// İsteğe bağlı WebGPU RHI ikinci arka uç (D-108, src/gpu/rhi.h, web/gpu.js):
+b32           engine_gpu_available(void);        // WebGPU cihazı aktifse 1, yoksa 0 (CPU yoluna kalır)
+void          engine_gpu_set_available(b32 on);  // web/gpu.js kurulumda 1 veya 0 bildirir
+const u8*     engine_gpu_cmd_stream(void);       // aktif Rhi komut akışı tamponu (RhiStreamHeader*)
+u32           engine_gpu_cmd_bytes(void);        // akıştaki toplam geçerli bayt (başlık dahil)
+RhiErrorRing* engine_gpu_error_ring(void);       // JS → C hata geri bildirim halkası (paylaşımlı bellek)
+b32           engine_gpu_push_error(u32 kind, u32 handle, u32 line, u32 col,
+                                    const char* msg, u32 msg_len);
+u32           engine_gpu_test_frame(f64 now_ms, f32 dt); // bağımsız WebGPU RHI demosu (gpu_test.html)
 ```
 
 ### Imports (`src/plat/platform.h`, modül `env`)
@@ -78,6 +87,38 @@ i32  plat_jit_load(const u8* wasm, u32 len, const char* export_name, u32 name_le
 ### Framebuffer sunumu
 JS her frame `engine_framebuffer()`'dan `Uint8ClampedArray` görünümü alır → `ImageData` → `putImageData`.
 (SAB'e geçince ImageData SAB kabul etmediği için tek kopya gerekir; bu bilinçli bir maliyet.)
+
+### WebGPU RHI İkili Komut Akışı ve Hata Halkası (D-108)
+C tarafı (`src/gpu/rhi.h/.c`) GPU kaynaklarını nesil sayaçlı 32-bit tutamaçlarla (`RhiHandle = (type << 24) | (gen << 16) | index`, `0 = geçersiz`) yönetir ve her karede paylaşımlı bellekte düz, 4-bayt hizalı ikili bir komut akışı üretir. `web/gpu.js` kare sonunda `engine_gpu_cmd_stream()` + `engine_gpu_cmd_bytes()` görünümünü tek geçişte WebGPU çağrılarına çevirir; cihaz yoksa `engine_gpu_available() == 0` döner ve motor CPU yolunda kalır.
+
+- **Akış Başlığı (`RhiStreamHeader`, 16 bayt)**:
+  - `+0`: `u32 magic = 0x4D475055` (`"MGPU"`, little-endian)
+  - `+4`: `u32 version = 1`
+  - `+8`: `u32 byte_len` (başlık dahil toplam bayt, `>= 16`, 4'ün katı)
+  - `+12`: `u32 cmd_count` (akıştaki tam komut sayısı)
+- **Komut Başlığı (`RhiCmdHeader`, 8 bayt)**:
+  Her komut `u32 opcode; u32 size;` ile başlar (`size` bu 8 baytlık başlık dahil komutun 4-bayt hizalı toplam bayt uzunluğudur). Değişken uzunluklu yükler (`CREATE_SHADER` WGSL metni, `WRITE_BUFFER` ve `WRITE_TEXTURE` baytları) komut yapısının hemen ardından gelir ve `ALIGN_UP(len, 4)` bayta sıfırla tamamlanır:
+  1. `RHI_CMD_CREATE_BUFFER (1, 20 B)`: `handle, byte_size, usage`
+  2. `RHI_CMD_CREATE_TEXTURE (2, 32 B)`: `handle, width, height, mip_levels, format, usage`
+  3. `RHI_CMD_CREATE_SAMPLER (3, 32 B)`: `handle, address_u, address_v, mag_filter, min_filter, mipmap_filter`
+  4. `RHI_CMD_CREATE_SHADER (4, 16 + align4(code_len) B)`: `handle, code_len, u8 code[]`
+  5. `RHI_CMD_CREATE_PIPELINE (5, 96 + attr_count * 12 B)`: `handle, vertex_shader, fragment_shader, char vs_entry[16], char fs_entry[16], vertex_stride, attr_count, topology, cull_mode, front_face, color_format, blend_mode, depth_format, depth_test, depth_write, depth_compare, RhiVertexAttr attrs[attr_count]` (`shader_location, offset, format`)
+  6. `RHI_CMD_CREATE_BIND_GROUP (6, 24 + entry_count * 20 B)`: `handle, pipeline, group_index, entry_count, RhiBindEntry entries[entry_count]` (`binding, kind, resource, offset, size`)
+  7. `RHI_CMD_DESTROY_RESOURCE (7, 12 B)`: `handle`
+  8. `RHI_CMD_WRITE_BUFFER (8, 20 + align4(data_len) B)`: `dst_buffer, dst_offset, data_len, u8 data[]`
+  9. `RHI_CMD_WRITE_TEXTURE (9, 40 + align4(data_len) B)`: `dst_texture, mip_level, x, y, width, height, bytes_per_row, data_len, u8 data[]`
+  10. `RHI_CMD_BEGIN_PASS (10, 40 B)`: `color_texture (0=tuval), depth_texture, flags (bit0=clear_color, bit1=clear_depth), f32 clear_rgba[4], f32 clear_depth`
+  11. `RHI_CMD_SET_PIPELINE (11, 12 B)`: `pipeline`
+  12. `RHI_CMD_SET_BIND_GROUP (12, 16 B)`: `group_index, bind_group`
+  13. `RHI_CMD_SET_VERTEX_BUFFER (13, 24 B)`: `slot, buffer, offset, size`
+  14. `RHI_CMD_SET_INDEX_BUFFER (14, 24 B)`: `buffer, index_format (0=uint16, 1=uint32), offset, size`
+  15. `RHI_CMD_DRAW (15, 24 B)`: `vertex_count, instance_count, first_vertex, first_instance`
+  16. `RHI_CMD_DRAW_INDEXED (16, 28 B)`: `index_count, instance_count, first_index, i32 base_vertex, first_instance`
+  17. `RHI_CMD_SET_VIEWPORT (17, 32 B)`: `f32 x, y, w, h, min_depth, max_depth`
+  18. `RHI_CMD_END_PASS (18, 8 B)`: yalnız başlık
+  19. `RHI_CMD_PRESENT (19, 8 B)`: yalnız başlık
+- **Hata Halkası (`RhiErrorRing`, `engine_gpu_error_ring()`)**:
+  `write_pos (+0)`, `read_pos (+4)`, `capacity (+8, 16)`, `dropped (+12)` ve ardından 16 × 256 baytlık `RhiErrorEntry` (`kind, handle, line, col, msg_len, char msg[236]`). `web/gpu.js` WGSL derleme ve doğrulama hatalarını Atomics ile halkaya yazar; C tarafı `rhi_pop_error` / `rhi_poll_errors` ile tüketir.
 
 ## 3. Raster çekirdeği
 
