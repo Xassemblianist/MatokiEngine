@@ -31,6 +31,7 @@ src/  (C11 → engine.wasm)
  matoki/  lexer, parser, sema, IR, opt, codegen(→mbin), jit köprüsü
  gfx2d/   sprite batch, tilemap + çarpışma, Camera2D, animasyon (M7_1)
  gfx3d/   mesh, kamera, homojen kırpma (guard band), reverse-Z boru hattı (M8_A), paralel ertelenmiş ön uç (D-105)
+ graph/   kare grafiği (L3): CPU/GPU düğümleri, geçici kaynak ömrü/takma adlama, 3'lü kare boru hattı (F0_C)
  asset/   JSON (RFC 8259), base64, OBJ/MTL, glTF 2.0/GLB yükleyicileri — sıfırdan (M8_D)
  audio/   synth (osilatör, ADSR, sıralayıcı) + paylaşılan bellek ses halkası (M7_2)
  img/ ui/ PNG, prosedürel doku, font, immediate-mode UI (M7_0)
