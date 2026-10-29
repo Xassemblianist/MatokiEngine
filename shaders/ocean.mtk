@@ -1,0 +1,117 @@
+// ocean.mtk — 3 kademeli FFT okyanus yüzey gölgelendiricisi:
+// Mipmap'li eğim+köpük dokularından piksel başına normal, Schlick Fresnel, analitik gökyüzü yansıması,
+// çift loblu güneş yakamozu, dalga tepesinde alt yüzey saçılması (yükseklik × arka ışık), Jacobian köpüğü,
+// atmosferik ufuk sisi ve ACES ton eşleme + gama 2.
+uniform sun_dir:     vec3;   // güneşe doğru birim vektör
+uniform sun_col:     vec3;   // doğrusal güneş ışınımı
+uniform sky_zenith:  vec3;   // zenit gök rengi (doğrusal)
+uniform sky_horizon: vec3;   // ufuk/sis gök rengi (doğrusal)
+uniform sea_deep:    vec3;   // derin su rengi (doğrusal)
+uniform sea_shallow: vec3;   // sığ/alt-yüzey turkuaz rengi (doğrusal)
+uniform eye:         vec3;   // kamera dünya konumu
+uniform scales:      vec4;   // x = L0/L1, y = L0/L2, z = eğim çözme ölçeği, w = sis yoğunluğu
+uniform params:      vec4;   // x = SSS gücü, y = köpük gücü, z = parlama gücü, w = ufuk sıcaklığı
+uniform map0:        texture2d @bilinear @mipmap;
+uniform map1:        texture2d @bilinear @mipmap;
+uniform map2:        texture2d @bilinear @mipmap;
+in uv:    vec2;
+in nrm:   vec3;
+in depth: f32;
+in wpos:  vec3;
+
+fn frag() -> rgba {
+    let uv0 = uv;
+    let uv1 = uv * scales.x;
+    let uv2 = uv * scales.y;
+    let t0 = sample(map0, uv0);
+    let t1 = sample(map1, uv1);
+    let t2 = sample(map2, uv2);
+
+    // Uzaklıkla ince kademe ağırlıkları
+    let w1 = clamp(1.0 - depth * 0.0035, 0.25, 1.0);
+    let w2 = clamp(1.0 - depth * 0.012, 0.10, 1.0);
+
+    // RGBA8'den (128 = sıfır eğim) piksel başına eğim çözme
+    let zc = vec2(0.50196078, 0.50196078);
+    let d0 = t0.rg - zc;
+    let d1 = (t1.rg - zc) * w1;
+    let d2 = (t2.rg - zc) * w2;
+    let slope = (d0 + d1 + d2) * scales.z;
+
+    let vn = normalize(nrm);
+    let n = normalize(vec3(vn.x * 0.25 - slope.x, 1.0, vn.z * 0.25 - slope.y));
+    let v = normalize(eye - wpos);
+    let ndv = max(dot(n, v), 0.001);
+
+    // Schlick Fresnel (su F0 = 0.02)
+    let fx = clamp(1.0 - ndv, 0.0, 1.0);
+    let fx2 = fx * fx;
+    let fx5 = fx2 * fx2 * fx;
+    let fresnel = 0.02 + 0.98 * fx5;
+
+    // Yansıma vektörü R = 2*(N·V)*N - V ve analitik gökyüzü yansıması
+    let r_raw = n * (2.0 * dot(n, v)) - v;
+    let r_dir = normalize(vec3(r_raw.x, max(r_raw.y, 0.01), r_raw.z));
+    let ry = clamp(r_dir.y, 0.0, 1.0);
+    let iry = 1.0 - clamp(ry * 1.85, 0.0, 1.0);
+    let r_hz = iry * iry * iry;
+    let r_mu = max(dot(r_dir, sun_dir), 0.0);
+    let r_mu2 = r_mu * r_mu;
+    let r_mu4 = r_mu2 * r_mu2;
+    let r_mu8 = r_mu4 * r_mu4;
+    let r_mu16 = r_mu8 * r_mu8;
+    let warm_col = vec3(1.0, 0.48, 0.18) * params.w;
+    let refl_sky = mix(sky_zenith, sky_horizon, r_hz)
+                 + warm_col * (r_mu4 * r_hz * 0.45)
+                 + sun_col * (r_mu16 * 0.28);
+
+    // Güneş parlaması (yakamoz: geniş + orta + keskin loblar)
+    let h_vec = normalize(v + sun_dir);
+    let ndh = max(dot(n, h_vec), 0.0);
+    let ndl = max(dot(n, sun_dir), 0.0);
+    let nh2 = ndh * ndh;
+    let nh4 = nh2 * nh2;
+    let nh8 = nh4 * nh4;
+    let nh16 = nh8 * nh8;
+    let nh64 = nh16 * nh16;
+    let nh256 = nh64 * nh64;
+    let glare_f = (nh16 * 0.10 + nh64 * 0.55 + nh256 * 3.4) * (0.25 + 0.75 * fresnel) * params.z;
+    let sun_glare = sun_col * (glare_f * (0.2 + 0.8 * smoothstep(-0.05, 0.25, ndl)));
+
+    // Su gövdesi ve dik dalga tepesinde alt yüzey saçılması (yerel yükseklik × diklik × arka ışık)
+    let up_f = clamp(1.0 - ndv * 0.65, 0.0, 1.0);
+    let sun_lift = 0.35 + 0.65 * max(sun_dir.y, 0.15);
+    let water_body = mix(sea_deep, sea_shallow * 0.38, up_f * 0.40) * sun_lift;
+
+    let local_h = max((t0.b - 0.52) * 0.45 + (t1.b - 0.48) * 1.15 + (t2.b - 0.48) * 0.65, 0.0);
+    let dist_sss = clamp(1.0 - depth * 0.0085, 0.0, 1.0);
+    let crest_h = clamp((local_h * 0.85 + (1.0 - n.y) * 1.25) * dist_sss, 0.0, 1.4);
+    let back_dir = normalize(sun_dir + n * 0.45);
+    let back_lit = max(dot(v, vec3(0.0, 0.0, 0.0) - back_dir), 0.0);
+    let bl2 = back_lit * back_lit;
+    let front_sss = max(ndl * 0.5 + 0.5, 0.0) * (1.0 - ndv) * 0.45;
+    let sss_amount = crest_h * (bl2 * 1.45 + front_sss) * params.x;
+    let sss_col = sea_shallow * (sun_col * 0.35 + vec3(0.12, 0.42, 0.38)) * sss_amount;
+
+    let refracted = water_body + sss_col;
+    let surface_col = mix(refracted, refl_sky, fresnel) + sun_glare;
+
+    // Köpük (Jacobian beyaz başlıklar)
+    let raw_foam = t0.a * 0.85 + t1.a * 0.80 + t2.a * (0.60 * w1);
+    let foam_detail = 0.60 + 0.40 * (t1.b * 0.5 + t2.b * 0.5);
+    let foam_mask = clamp(smoothstep(0.08, 0.58, raw_foam * foam_detail) * params.y, 0.0, 0.94);
+    let foam_lit = sky_horizon * 0.55 + sun_col * (max(sun_dir.y, 0.15) * 0.26 + ndl * 0.18);
+    let with_foam = mix(surface_col, foam_lit, foam_mask);
+
+    // Mesafe sisi
+    let fd = clamp(depth * scales.w, 0.0, 1.0);
+    let fog_f = fd * (2.0 - fd);
+    let v_sun = max(dot(vec3(0.0, 0.0, 0.0) - v, sun_dir), 0.0);
+    let fog_col = sky_horizon + warm_col * (v_sun * v_sun * 0.35);
+    let c = mix(with_foam, fog_col, fog_f);
+
+    // ACES (Narkowicz) + gama 2
+    let tm = (c * (c * 2.51 + vec3(0.03, 0.03, 0.03))) / (c * (c * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14));
+    let o = sqrt(clamp(tm, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)));
+    return vec4(o.r, o.g, o.b, 1.0);
+}
