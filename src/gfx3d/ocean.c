@@ -140,6 +140,34 @@ void ocean_rebuild_spectrum(Ocean* o) {
     o->hs        = 4.0f * m_sqrt((f32)sample_var);
 }
 
+b32 ocean_set_wind(Ocean* o, f32 wind_speed, f32 wind_x, f32 wind_z) {
+    ASSERT(o != NULL);
+    f32 u10 = m_clamp(wind_speed, 1.0f, 28.0f);
+    f32 wl  = m_sqrt(wind_x * wind_x + wind_z * wind_z);
+    f32 wx  = (wl > 1e-6f) ? (wind_x / wl) : 1.0f;
+    f32 wz  = (wl > 1e-6f) ? (wind_z / wl) : 0.0f;
+
+    /* Deterministik kuantizasyon: geri sarma (rollback) ve replay sıfırlamalarında
+     * spektrumun geçmiş durumdan bağımsız olarak birebir aynı kurulmasını sağlar. */
+    f32 q_u10 = m_floor(u10 * 10.0f + 0.5f) * 0.1f;
+    f32 q_wx  = m_floor(wx * 100.0f + 0.5f) * 0.01f;
+    f32 q_wz  = m_floor(wz * 100.0f + 0.5f) * 0.01f;
+
+    o->d.choppy         = m_clamp(0.95f + 0.030f * q_u10, 0.85f, 1.65f);
+    o->d.foam_threshold = m_clamp(0.68f + 0.010f * q_u10, 0.70f, 0.92f);
+    o->d.foam_scale     = m_clamp(1.80f + 0.040f * q_u10, 0.80f, 2.80f);
+
+    if (o->d.wind_speed != q_u10 || o->d.wind_x != q_wx || o->d.wind_z != q_wz) {
+        o->d.wind_speed = q_u10;
+        o->d.wind_x     = q_wx;
+        o->d.wind_z     = q_wz;
+        o->d.fetch      = 100000.0f + m_max(q_u10 - 10.0f, 0.0f) * 9000.0f;
+        ocean_rebuild_spectrum(o);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 void ocean_init(Ocean* o, Arena* a, const OceanDesc* d) {
     ASSERT(o != NULL && a != NULL && d != NULL);
     __builtin_memset(o, 0, sizeof(*o));
@@ -431,6 +459,39 @@ void ocean_update(Ocean* o, f64 time_sec, f32 dt) {
         tex_build_mips(&c->tex);
     }
     o->has_updated = TRUE;
+}
+
+static void job_unpack_sim_rows(u32 start, u32 end, void* user) {
+    CascadeJobCtx* jc = (CascadeJobCtx*)user;
+    OceanCascade* c   = jc->cas;
+    u32 n = c->n;
+    for (u32 j = start; j < end; j++) {
+        u32 row = j * n;
+        for (u32 i = 0; i < n; i++) {
+            u32 idx = row + i;
+            c->height[idx]  = c->wr[0][idx];
+            c->dxz[idx]     = c->wi[0][idx];
+            c->disp_x[idx]  = c->wr[1][idx];
+            c->disp_z[idx]  = c->wi[1][idx];
+            c->slope_x[idx] = c->wr[2][idx];
+            c->slope_z[idx] = c->wi[2][idx];
+            c->dxx[idx]     = c->wr[3][idx];
+            c->dzz[idx]     = c->wi[3][idx];
+        }
+    }
+}
+
+void ocean_update_sim(Ocean* o, f64 time_sec) {
+    ASSERT(o != NULL);
+    for (u32 ci = 0; ci < OCEAN_CASCADES; ci++) {
+        OceanCascade* c = &o->cascades[ci];
+        CascadeJobCtx jc = { o, c, time_sec, 0.0f, FALSE };
+        u32 n = c->n;
+        job_parallel_for(n, 8u, job_pack_rows, &jc);
+        job_parallel_for(4u * n, 8u, job_fft_rows, &jc);
+        job_parallel_for(4u * n, 8u, job_fft_cols, &jc);
+        job_parallel_for(n, 8u, job_unpack_sim_rows, &jc);
+    }
 }
 
 void ocean_sample_cascade(const OceanCascade* c, f32 choppy, f32 x, f32 z, OceanSample* out) {

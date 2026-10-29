@@ -363,3 +363,113 @@ b32 synth_song_add_track(Synth* s, const char* pattern, const SynthSfx* instrume
     tr->instrument = *instrument;
     return TRUE;
 }
+
+void synth_sfx_sea_wind(f32 app_wind_speed, f32 app_angle_rad, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    f32 spd_n = clamp_safe(app_wind_speed / 22.0f, 0.0f, 1.0f);
+    f32 ang_n = 0.5f + 0.5f * m_cos(app_angle_rad);
+    out->wave          = WAVE_NOISE;
+    out->freq          = 1800.0f + spd_n * 3200.0f;
+    out->attack        = 0.08f;
+    out->decay         = 0.10f;
+    out->sustain       = 0.85f;
+    out->hold          = 0.14f;
+    out->release       = 0.16f;
+    out->volume        = 0.04f + spd_n * 0.16f;
+    out->cutoff_hz     = 220.0f + spd_n * 780.0f + ang_n * 260.0f;
+    out->cutoff_end_hz = out->cutoff_hz * 0.92f;
+    out->resonance     = 0.35f + spd_n * 0.35f;
+}
+
+void synth_sfx_hull_water(f32 boat_speed, b32 is_surfing, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    f32 spd_n = clamp_safe(boat_speed / 12.0f, 0.0f, 1.0f);
+    out->wave          = WAVE_NOISE;
+    out->freq          = is_surfing ? 4200.0f : 2600.0f;
+    out->freq_end      = is_surfing ? 5200.0f : 2200.0f;
+    out->attack        = 0.04f;
+    out->decay         = 0.08f;
+    out->sustain       = 0.75f;
+    out->hold          = 0.10f;
+    out->release       = 0.12f;
+    out->volume        = spd_n * (is_surfing ? 0.18f : 0.10f);
+    out->cutoff_hz     = 380.0f + spd_n * (is_surfing ? 1400.0f : 720.0f);
+    out->cutoff_end_hz = out->cutoff_hz * (is_surfing ? 1.18f : 0.88f);
+    out->resonance     = is_surfing ? 0.55f : 0.25f;
+}
+
+void synth_sfx_sail_flap(f32 luffing, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    f32 lf = clamp_safe(luffing, 0.0f, 1.0f);
+    out->wave          = WAVE_NOISE;
+    out->freq          = 950.0f + lf * 600.0f;
+    out->freq_end      = 420.0f;
+    out->attack        = 0.01f;
+    out->decay         = 0.05f;
+    out->sustain       = 0.30f;
+    out->hold          = 0.02f;
+    out->release       = 0.06f;
+    out->volume        = 0.08f + lf * 0.18f;
+    out->cutoff_hz     = 320.0f + lf * 280.0f;
+    out->cutoff_end_hz = 140.0f;
+    out->resonance     = 0.45f;
+}
+
+void synth_sfx_rope_creak(f32 heel_norm, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    f32 hn = clamp_safe(heel_norm, 0.0f, 1.0f);
+    out->wave          = WAVE_SAW;
+    out->freq          = 110.0f + hn * 65.0f;
+    out->freq_end      = 78.0f + hn * 30.0f;
+    out->attack        = 0.02f;
+    out->decay         = 0.07f;
+    out->sustain       = 0.40f;
+    out->hold          = 0.04f;
+    out->release       = 0.08f;
+    out->volume        = 0.06f + hn * 0.12f;
+    out->vibrato_hz    = 18.0f;
+    out->vibrato_depth = 1.5f;
+    out->cutoff_hz     = 280.0f;
+    out->resonance     = 0.60f;
+}
+
+void synth_sfx_thunder(f32 intensity, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    f32 k = clamp_safe(intensity, 0.1f, 1.0f);
+    out->wave          = WAVE_NOISE;
+    out->freq          = 620.0f + k * 480.0f;
+    out->freq_end      = 140.0f;
+    out->attack        = 0.02f;
+    out->decay         = 0.35f;
+    out->sustain       = 0.55f;
+    out->hold          = 0.45f;
+    out->release       = 0.95f;
+    out->volume        = 0.22f + k * 0.25f;
+    out->cutoff_hz     = 260.0f + k * 220.0f;
+    out->cutoff_end_hz = 65.0f;
+    out->resonance     = 0.50f;
+}
+
+void synth_sfx_buoy_bell(b32 major_chime, SynthSfx* out) {
+    if (!out) return;
+    __builtin_memset(out, 0, sizeof(*out));
+    out->wave          = WAVE_TRIANGLE;
+    out->freq          = major_chime ? 659.25f : 523.25f; /* E5 veya C5 */
+    out->freq_end      = out->freq * 0.996f;
+    out->attack        = 0.008f;
+    out->decay         = 0.18f;
+    out->sustain       = 0.45f;
+    out->hold          = 0.12f;
+    out->release       = 0.55f;
+    out->volume        = 0.24f;
+    out->vibrato_hz    = 5.5f;
+    out->vibrato_depth = 0.15f;
+    out->cutoff_hz     = 1800.0f;
+    out->cutoff_end_hz = 620.0f;
+    out->resonance     = 0.35f;
+}

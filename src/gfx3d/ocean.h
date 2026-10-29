@@ -100,6 +100,14 @@ void ocean_init(Ocean* o, Arena* a, const OceanDesc* d);
 /* Rüzgâr hızı/yönü veya fetch/gamma değiştiğinde aynı Gauss çekilişleriyle spektrumu ve Hs'yi günceller */
 void ocean_rebuild_spectrum(Ocean* o);
 
+/* Rüzgâr hızı (m/s) ve yönüne (wx, wz) göre JONSWAP parametrelerini (fetch, choppy, köpük)
+ * günceller; rüzgâr değişimi eşiği aştıysa spektrumu yeniden kurup TRUE döner. */
+b32  ocean_set_wind(Ocean* o, f32 wind_speed, f32 wind_x, f32 wind_z);
+
+/* Yalnızca simülasyon (kaldırma kuvveti ve dalga sörfü) için IFFT yükseklik/eğim alanlarını
+ * günceller (doku/mipmap üretimini atlar); 1T ve 8T'de bit-bit özdeştir. */
+void ocean_update_sim(Ocean* o, f64 time_sec);
+
 /* Tek kademede idx dalga vektörünün t anındaki karmaşık genliği h̃(k,t) (birim testler için) */
 void ocean_cascade_amplitude(const OceanCascade* c, u32 idx, f64 t, f32* out_re, f32* out_im);
 
