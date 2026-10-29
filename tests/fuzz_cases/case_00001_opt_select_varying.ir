@@ -1,0 +1,16 @@
+// Matoki Fuzz Regression Case: case_00001_opt_select_varying
+// Sebep: opt.c IR_SELECT folding was incorrectly collapsing select(cond, b, c) inside varying IF blocks
+// Tür: pixel
+
+%0 = const.f32.u 0.000000
+%1 = varying.v 0
+%2 = fgt.v %1, %0
+if.v %2
+  %4 = const.f32.u 1.000000
+  %5 = const.f32.u 2.000000
+  %6 = select.v %2, %4, %5
+  output 0, %6
+  output 1, %6
+  output 2, %6
+  output 3, %4
+endif

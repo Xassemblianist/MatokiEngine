@@ -909,6 +909,9 @@ b32 ir_verify(const IrFunc* f, char* err, u32 err_cap) {
             break;
 
         case IR_DISCARD:
+            if (f->is_compute) {
+                return verify_fail(err, err_cap, "inst %%%u: DISCARD cannot be used in compute shader", i);
+            }
             if (!check_operand(f, i, in->a, IR_T_BOOL, err, err_cap)) return FALSE;
             exp_t   = IR_T_VOID;
             exp_var = f->insts[in->a].flags & IR_FLAG_VARYING;
