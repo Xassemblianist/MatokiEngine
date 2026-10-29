@@ -29,6 +29,7 @@ nohup /home/ostriquetrum/matoki-wt/queue/run2.sh > /home/ostriquetrum/matoki-wt/
 | [V2_terrain](../tasks/V2_terrain.md) | 4-argon-high | G1_B_gpu_scene | V2 — Prosedürel ada: arazi + bitki örtüsü (GPU, yeni sahne "10:Ada") |
 | [P1_F_gpu_fluid](../tasks/P1_F_gpu_fluid.md) | 4-argon-high | G1_B_gpu_scene | P1_F — GPU akışkan / parçacık fiziği (PBF) |
 | [Z1_next_wave](../tasks/Z1_next_wave.md) | 4-argon-high | V1_sky_clouds,P1_B_solver_parallel,V2_terrain,P1_F_gpu_fluid | Z1 — Sonraki dalganın planı (yalnız belge) |
+| [OYUN1_gelgit](../tasks/OYUN1_gelgit.md) | 4-argon-high | G1_A, V1, G1_B, P1_B | OYUN1 — "Gelgit": fırtınalı okyanusta yelkenli (ilk gerçek oyun) |
 
 Neden böyle: **Argon** görsel/3D/karmaşık sistemlerde güçlü (okyanus M17_A tek seferde fiziksel doğru çıktı) ama
 inceleme/sadakat işinde uyduruyor → ona sahne, shader, GPU, çözücü işleri. **Flash** dar, mekanik, test ağırlıklı işlerde
