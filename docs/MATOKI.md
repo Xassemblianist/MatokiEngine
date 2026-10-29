@@ -122,3 +122,38 @@ kaynak → lexer → parser → AST → sema (tip + uniform/varying analizi)
 Struct, dizi, pointer, özyineleme, vertex shader (vertex dönüşümü v0'da C'de), compute kernel'leri,
 trilinear filtreleme, ince (fine) türevler.
 Bunlar v1+ için `DECISIONS.md`'de tartışılır.
+
+## 11. WGSL Kod Üretimi (WebGPU Arka Ucu, D-108)
+
+Aynı `.mtk` kaynağı CPU için wasm SIMD'e (`mtk_codegen`) derlendiği gibi, WebGPU arka ucu için
+optimizasyon sonrası `IrFunc` üzerinden **WGSL**'e (`mtk_wgsl_frag` / `mtk_compile_wgsl`, `src/matoki/wgsl.h`) derlenir.
+CPU'da quad başına 4 lane (SPMD) çalışan semantik, GPU'da piksel başına tek çağrı olarak birebir korunur.
+
+### 11.1 Uniform Tamponu ve `MtkLayout` Uyumluluğu
+- Sema aşamasında her `uniform` bildirimi `MtkLayout` içinde 16-bayt sınırına (`ALIGN_UP(offset, 16)`) hizalanır.
+- WGSL tarafında tüm skaler/vektör/matris uniform'lar tek bir uniform tamponunda paketlenir:
+  ```wgsl
+  struct MtkUniforms {
+      data: array<vec4<f32>, N>, // N = (uniform_bytes + 15) / 16
+  };
+  @group(0) @binding(0) var<uniform> mtk_u: MtkUniforms;
+  ```
+- `byte_offset` ofsetindeki her 32-bit bileşen `mtk_u.data[byte_offset / 16].<xyzw[(byte_offset / 4) % 4]>` ile okunur
+  (`i32`/`u32` uniform'lar için `bitcast<i32>(...)`). Böylece CPU `ShadeBatch.uniforms` bellek yerleşimi ile
+  WebGPU uniform buffer yerleşimi **bayt-bayt aynıdır** (`vec3` veya `mat3` dolgu farkı oluşmaz).
+
+### 11.2 Dokular ve Örnekleyiciler (`@group(0)`)
+- Her `texture2d` slotu `s` (`0 <= s < texture_count`) için iki bağlama üretilir:
+  - `@group(0) @binding(1 + 2*s) var tex_<s>: texture_2d<f32>;`
+  - `@group(0) @binding(2 + 2*s) var samp_<s>: sampler;`
+- Doku boyutları `textureDimensions(tex_<s>, 0)` ve mip sayısı `textureNumLevels(tex_<s>)` ile sorgulanır;
+  texel okumaları `textureLoad(tex_<s>, vec2<i32>(wx, wy), level)` + `pack4x8unorm` ile CPU referansıyla aynı
+  en yakın/çift doğrusal/wrap/clamp/mipmap semantiğini korur.
+
+### 11.3 Varying `@location(n)` ve Vertex Shader Sözleşmesi (`mtk_wgsl_vert`)
+- Fragment girdisi `struct FragIn`, `@builtin(position) frag_pos: vec4<f32>` ve her `in` bildirimi için
+  bildirim sırasıyla `@location(0..k-1)` (`f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`) içerir.
+- `mtk_wgsl_vert(attrs, attr_count, ...)` fonksiyonu `gfx3d` boru hattının `G3dAttr` listesine (`UV`, `NORMAL`,
+  `VIEW_DEPTH`, `COLOR`, `WORLD_POS`, `SHADOW_POS`) göre `@group(1) @binding(0)` altında `VsUniforms` (`mvp`,
+  `model`, `normal_mat`, `shadow_mat`) ve eşleşen `@location(0..k-1)` çıkışlarını üreten WGSL vertex shader'ını üretir.
+- Türevler `IR_DERIV_X/Y` → `dpdx`/`dpdy`, `IR_DISCARD` → `if (cond) { discard; }`, `IR_SELECT` → `select(if_false, if_true, cond)` olarak çevrilir.

@@ -84,4 +84,6 @@ b32 mtk_compile_ir(const char* src, u32 len, const char* filename, Arena* a,
 u32 mtk_compile_wasm(const char* src, u32 len, const char* filename, const MtkCodegenOpts* o,
                      Arena* a, u8* out, u32 out_cap, MtkLayout* layout, MtkDiag* diag);
 
+#include "matoki/wgsl.h"
+
 #endif
