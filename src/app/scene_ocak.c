@@ -15,6 +15,8 @@
 #include "audio/audio.h"
 #include "audio/synth.h"
 #include "ui/font.h"
+#include "gpu/rhi.h"
+#include "gpu/gpu_scene.h"
 
 #define KEY_SPACE 32
 #define KEY_A 65
@@ -420,6 +422,12 @@ static void draw_world(R3dPass* p, void* user) {
     f32 fs = (0.08f + 0.14f * g_o.torch) * flick;
     m = mat4_trs(vec3(hand.x, hand.y + 0.28f, hand.z), 0.0f, 0.0f, vec3(fs, fs * 1.4f, fs));
     r3d_draw_emissive(p, g_o.sphere, &m, vec4(1.0f, 0.62f + 0.3f * g_o.torch, 0.2f, 1.0f));
+    if (p->gpu_active && g_o.torch > 0.02f) {
+        gpu_scene_add_point_light(vec3(hand.x, hand.y + 0.35f, hand.z),
+                                  11.0f * (0.3f + 0.7f * g_o.torch),
+                                  vec3(3.0f * g_o.torch * flick, 1.5f * g_o.torch * flick, 0.45f * g_o.torch * flick),
+                                  0.14f);
+    }
 
     /* Kıvılcımlar */
     EcsQuery q = ecs_query(&g_o.ecs, (1u << g_o.c_tr) | (1u << g_o.c_spark));
@@ -429,6 +437,9 @@ static void draw_world(R3dPass* p, void* user) {
         f32 s = 0.22f + 0.05f * m_sin(sp->phase * 6.0f);
         m = mat4_trs(tr->pos, sp->phase, 0.0f, vec3(s, s, s));
         r3d_draw_emissive(p, g_o.sphere, &m, vec4(1.0f, 0.85f, 0.35f, 1.0f));
+        if (p->gpu_active) {
+            gpu_scene_add_point_light(tr->pos, 4.5f, vec3(1.8f, 1.3f, 0.4f), 0.35f);
+        }
     }
 
     /* Ocak: taşlar + yanan ateş (yakılan kıvılcım sayısıyla büyür) */
@@ -438,6 +449,12 @@ static void draw_world(R3dPass* p, void* user) {
         r3d_draw(p, g_o.cube, &m, &g_o.tex_stone, vec4(1, 1, 1, 1), 0.0f, 0.9f, G3D_CULL_BACK);
     }
     f32 fire = (f32)g_o.lit / (f32)SPARK_COUNT;
+    if (p->gpu_active) {
+        gpu_scene_add_point_light(vec3(0.0f, 1.2f, 0.0f),
+                                  8.0f + 16.0f * fire,
+                                  vec3(0.8f + 3.5f * fire, 0.35f + 1.6f * fire, 0.1f + 0.4f * fire),
+                                  0.08f);
+    }
     for (u32 k = 0; k < 5; k++) {
         f32 ph = t * (5.0f + (f32)k) + (f32)k * 1.7f;
         f32 h  = 0.15f + 1.4f * fire * (0.6f + 0.4f * m_sin(ph));
@@ -507,6 +524,7 @@ void scene_ocak_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shader
     transform_update(&g_o.ecs);
 
     R3dFrame f;
+    __builtin_memset(&f, 0, sizeof(f));
     f.cam           = &g_o.cam;
     f.dl            = r3d_daylight(g_o.tod);
     f.pbr           = TRUE;
@@ -515,6 +533,7 @@ void scene_ocak_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shader
     f.shadow_center = vec3(g_o.feet.x, 2.0f, g_o.feet.z);
     f.shadow_radius = 26.0f;
     f.fog_density   = 1.0f / 90.0f;
+    f.time_sec      = g_o.anim_time;
     r3d_render(&g_o.r3d, r, fb, frame, sm, &f, draw_world, NULL, &g_o.stats_main, &g_o.stats_shadow);
 }
 
@@ -524,8 +543,14 @@ void scene_ocak_draw_hud(UiContext* ui, const Framebuffer* fb) {
     ui_draw_rect(ui, 0, 22, (i32)fb->w, 14, FB_RGBA(15, 18, 26, 170));
     f32 left = (DAY_END - g_o.tod) / (DAY_END - DAY_START) * DAY_SECONDS;
     if (left < 0.0f) left = 0.0f;
-    fmt_format(line, sizeof(line), "OCAK  %u/%u   tasinan %u/%u   gunes batana %u:%02u",
-               g_o.lit, SPARK_COUNT, g_o.carried, MAX_CARRY, (u32)left / 60u, (u32)left % 60u);
+    if (engine_gpu_available()) {
+        f32 gpu_ms = (f32)engine_gpu_frame_time_us() * 0.001f;
+        fmt_format(line, sizeof(line), "OCAK [GPU %.2fms] %u/%u  tasinan %u/%u  batis %u:%02u",
+                   (f64)gpu_ms, g_o.lit, SPARK_COUNT, g_o.carried, MAX_CARRY, (u32)left / 60u, (u32)left % 60u);
+    } else {
+        fmt_format(line, sizeof(line), "OCAK  %u/%u   tasinan %u/%u   gunes batana %u:%02u",
+                   g_o.lit, SPARK_COUNT, g_o.carried, MAX_CARRY, (u32)left / 60u, (u32)left % 60u);
+    }
     ui_draw_text(ui, 6, 25, line, FB_RGBA(255, 226, 150, 255), 1);
 
     /* Meşale çubuğu */

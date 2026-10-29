@@ -56,7 +56,8 @@ typedef enum {
     RHI_BUF_UNIFORM  = 1u << 2,
     RHI_BUF_COPY_DST = 1u << 3,
     RHI_BUF_COPY_SRC = 1u << 4,
-    RHI_BUF_STORAGE  = 1u << 5
+    RHI_BUF_STORAGE  = 1u << 5,
+    RHI_BUF_INDIRECT = 1u << 6
 } RhiBufferUsage;
 
 typedef enum {
@@ -184,7 +185,8 @@ typedef enum {
     RHI_CMD_SET_COMPUTE_PIPELINE    = 22,
     RHI_CMD_DISPATCH                = 23,
     RHI_CMD_END_COMPUTE_PASS        = 24,
-    RHI_CMD_COUNT                   = 25
+    RHI_CMD_DRAW_INDEXED_INDIRECT   = 25,
+    RHI_CMD_COUNT                   = 26
 } RhiCmdOp;
 
 typedef struct {
@@ -362,6 +364,13 @@ typedef struct {
 } RhiCmdDrawIndexed;
 
 typedef struct {
+    RhiCmdHeader hdr;            /* opcode=RHI_CMD_DRAW_INDEXED_INDIRECT, size=20 */
+    RhiBuffer    indirect_buffer;
+    u32          indirect_offset;
+    u32          draw_count;
+} RhiCmdDrawIndexedIndirect;
+
+typedef struct {
     RhiCmdHeader hdr;       /* opcode=RHI_CMD_SET_VIEWPORT, size=32 */
     f32          x;
     f32          y;
@@ -430,6 +439,7 @@ _Static_assert(sizeof(RhiCmdBeginComputePass)      == 8,  "RhiCmdBeginComputePas
 _Static_assert(sizeof(RhiCmdSetComputePipeline)    == 12, "RhiCmdSetComputePipeline");
 _Static_assert(sizeof(RhiCmdDispatch)              == 20, "RhiCmdDispatch");
 _Static_assert(sizeof(RhiCmdEndComputePass)        == 8,  "RhiCmdEndComputePass");
+_Static_assert(sizeof(RhiCmdDrawIndexedIndirect)   == 20, "RhiCmdDrawIndexedIndirect");
 
 /* --- Hata Halkası (JS → C geri bildirim, paylaşımlı bellek) --- */
 
@@ -611,6 +621,7 @@ b32 rhi_set_viewport(Rhi* rhi, f32 x, f32 y, f32 w, f32 h, f32 min_depth, f32 ma
 b32 rhi_draw(Rhi* rhi, u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance);
 b32 rhi_draw_indexed(Rhi* rhi, u32 index_count, u32 instance_count,
                      u32 first_index, i32 base_vertex, u32 first_instance);
+b32 rhi_draw_indexed_indirect(Rhi* rhi, RhiBuffer indirect_buffer, u32 indirect_offset, u32 draw_count);
 b32 rhi_end_pass(Rhi* rhi);
 b32 rhi_present(Rhi* rhi);
 

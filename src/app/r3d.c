@@ -5,6 +5,8 @@
 #include "core/log.h"
 #include "core/embed.h"
 #include "core/profiler.h"
+#include "gpu/rhi.h"
+#include "gpu/gpu_scene.h"
 
 /* ---------- Gün ışığı ---------- */
 
@@ -147,6 +149,12 @@ static void draw_lit(R3dPass* p, const Mesh* mesh, const Mat4* model, const Text
 
 void r3d_draw(R3dPass* p, const Mesh* mesh, const Mat4* model, const Texture* tex, Vec4 color,
               f32 metal, f32 rough, G3dCull cull) {
+    if (p->gpu_active) {
+        u32 flags = GPU_INST_CAST_SHADOW | GPU_INST_RECV_SHADOW;
+        gpu_scene_submit_draw(mesh, model, gpu_pack_rgba(color), tex, metal, rough,
+                              p->pbr ? GPU_SHADE_PBR : GPU_SHADE_LIT, flags, FALSE);
+        return;
+    }
     if (p->shadow_pass) {
         G3dMaterial m = p->mat;
         if (cull == G3D_CULL_NONE) m.cull = G3D_CULL_NONE;
@@ -158,11 +166,21 @@ void r3d_draw(R3dPass* p, const Mesh* mesh, const Mat4* model, const Texture* te
 
 void r3d_draw_receiver(R3dPass* p, const Mesh* mesh, const Mat4* model, const Texture* tex, Vec4 color,
                        f32 metal, f32 rough) {
+    if (p->gpu_active) {
+        gpu_scene_submit_draw(mesh, model, gpu_pack_rgba(color), tex, metal, rough,
+                              p->pbr ? GPU_SHADE_PBR : GPU_SHADE_LIT, GPU_INST_RECV_SHADOW, FALSE);
+        return;
+    }
     if (p->shadow_pass) return;
     draw_lit(p, mesh, model, tex, color, metal, rough, G3D_CULL_BACK);
 }
 
 void r3d_draw_emissive(R3dPass* p, const Mesh* mesh, const Mat4* model, Vec4 color) {
+    if (p->gpu_active) {
+        gpu_scene_submit_draw(mesh, model, gpu_pack_rgba(color), NULL, 0.0f, 1.0f,
+                              GPU_SHADE_UNLIT, 0u, FALSE);
+        return;
+    }
     if (p->shadow_pass || p->emissive.shade_fn == NULL) return;
     G3dMaterial m = p->emissive;
     Unlit3dUniforms* u = ARENA_PUSH_STRUCT(p->frame, Unlit3dUniforms);
@@ -173,6 +191,13 @@ void r3d_draw_emissive(R3dPass* p, const Mesh* mesh, const Mat4* model, Vec4 col
 }
 
 void r3d_draw_particles(R3dPass* p, const Mesh* mesh) {
+    if (p->gpu_active) {
+        if (!mesh || mesh->vertex_count == 0u || mesh->index_count == 0u) return;
+        Mat4 model = mat4_identity();
+        gpu_scene_submit_draw(mesh, &model, 0xFFFFFFFFu, NULL, 0.0f, 1.0f,
+                              GPU_SHADE_PARTICLE, 0u, TRUE);
+        return;
+    }
     if (p->shadow_pass || p->particles.shade_fn == NULL) return;
     if (!mesh || mesh->vertex_count == 0u || mesh->index_count == 0u) return;
     G3dMaterial m = p->particles;
@@ -204,6 +229,67 @@ void r3d_render(R3dRenderer* rr, Rasterizer* r, Framebuffer* fb, Arena* frame, c
     pass.pbr         = f->pbr;
     pass.shadow_tex  = &rr->shadow.tex;
     pass.fog_density = f->fog_density;
+
+    /* WebGPU arka ucu aktifse GPU'da yaşayan sahne + dolaylı çizim yolunu kullan */
+    if (engine_gpu_available()) {
+        u32 vp_w = engine_gpu_viewport_width();
+        u32 vp_h = engine_gpu_viewport_height();
+        f32 aspect = (vp_h > 0u) ? ((f32)vp_w / (f32)vp_h) : ((f32)fb->w / (f32)fb->h);
+        Mat4 view = camera_view(f->cam);
+        Mat4 proj = camera_proj(f->cam, aspect);
+        Mat4 vp   = mat4_mul(proj, view);
+        f32 fog_end = (f->fog_density > 1e-6f) ? (1.0f / f->fog_density) : 160.0f;
+
+        GpuSceneFrameDesc gdesc;
+        __builtin_memset(&gdesc, 0, sizeof(gdesc));
+        gdesc.view         = view;
+        gdesc.proj         = proj;
+        gdesc.view_proj    = vp;
+        gdesc.vm_view_proj = vp;
+        gdesc.eye          = eye;
+        gdesc.cam_fwd      = camera_forward(f->cam);
+        gdesc.near_z       = f->cam->near_z;
+        gdesc.far_z        = 220.0f;
+        gdesc.fov_y        = f->cam->fov_y;
+        gdesc.aspect       = aspect;
+        gdesc.sun_dir      = f->dl.light_dir;
+        gdesc.sun_color    = f->dl.light_col;
+        gdesc.sky_color    = f->dl.sky_lin;
+        gdesc.ground_color = f->dl.gnd_lin;
+        gdesc.fog_color    = f->pbr ? f->dl.sky_lin : f->dl.sky_srgb;
+        gdesc.fog_start    = fog_end * 0.12f;
+        gdesc.fog_end      = fog_end;
+        gdesc.clear_color  = f->dl.sky_srgb;
+        gdesc.shadows_on   = f->pbr;
+        gdesc.pbr_on       = f->pbr;
+        gdesc.mipmap_on    = f->mipmap;
+        gdesc.stress_100k  = f->stress_100k;
+        gdesc.time_sec     = f->time_sec;
+
+        if (gpu_scene_begin_frame(&gdesc)) {
+            pass.gpu_active  = TRUE;
+            pass.shadow_pass = FALSE;
+            scene(&pass, user);
+            gpu_scene_end_frame();
+
+            /* 2B HUD katmanı için CPU tamponunu saydam temizle (WebGPU tuvali altta görünür) */
+            fb_clear(fb, 0u);
+
+            const GpuSceneStats* gs = gpu_scene_stats();
+            if (out_main) {
+                __builtin_memset(out_main, 0, sizeof(*out_main));
+                out_main->draws        = gs->active_instances;
+                out_main->draws_culled = gs->frustum_culled + gs->hiz_culled;
+                out_main->tris_in      = (u64)gs->active_instances * 12ULL;
+                out_main->tris_out     = (u64)gs->visible_instances * 12ULL;
+            }
+            if (out_shadow) {
+                __builtin_memset(out_shadow, 0, sizeof(*out_shadow));
+                out_shadow->tris_out = f->pbr ? (u64)gs->visible_instances * 12ULL : 0ULL;
+            }
+            return;
+        }
+    }
 
     /* (1) Gölge haritası */
     G3dContext sctx;

@@ -34,6 +34,7 @@ export const RHI_CMD_BEGIN_COMPUTE_PASS = 21;
 export const RHI_CMD_SET_COMPUTE_PIPELINE = 22;
 export const RHI_CMD_DISPATCH = 23;
 export const RHI_CMD_END_COMPUTE_PASS = 24;
+export const RHI_CMD_DRAW_INDEXED_INDIRECT = 25;
 
 export const RHI_ERR_WGSL_COMPILE = 1;
 export const RHI_ERR_VALIDATION = 2;
@@ -57,6 +58,7 @@ const GPU_BUF_INDEX = 0x0010;
 const GPU_BUF_VERTEX = 0x0020;
 const GPU_BUF_UNIFORM = 0x0040;
 const GPU_BUF_STORAGE = 0x0080;
+const GPU_BUF_INDIRECT = 0x0100;
 const GPU_BUF_QUERY_RESOLVE = 0x0200;
 const GPU_MAP_READ = 0x0001;
 
@@ -139,6 +141,7 @@ function mapBufferUsage(rhiUsage) {
   if (rhiUsage & 8) u |= GPU_BUF_COPY_DST;
   if (rhiUsage & 16) u |= GPU_BUF_COPY_SRC;
   if (rhiUsage & 32) u |= GPU_BUF_STORAGE;
+  if (rhiUsage & 64) u |= GPU_BUF_INDIRECT;
   return u;
 }
 
@@ -269,9 +272,14 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     adapter = await gpuRoot.requestAdapter();
     if (!adapter) throw new Error("WebGPU adapter bulunamadı");
     const requiredFeatures = [];
-    if (adapter.features && typeof adapter.features.has === "function" && adapter.features.has("timestamp-query")) {
-      requiredFeatures.push("timestamp-query");
-      hasTimestampQuery = true;
+    if (adapter.features && typeof adapter.features.has === "function") {
+      if (adapter.features.has("timestamp-query")) {
+        requiredFeatures.push("timestamp-query");
+        hasTimestampQuery = true;
+      }
+      if (adapter.features.has("indirect-first-instance")) {
+        requiredFeatures.push("indirect-first-instance");
+      }
     }
     try {
       device = await adapter.requestDevice(
@@ -1029,6 +1037,19 @@ export async function initGpu(canvas, exports, memory, options = {}) {
           const firstInstance = dv.getUint32(off + 24, true);
           if (passEncoder) {
             passEncoder.drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+          }
+          break;
+        }
+
+        case RHI_CMD_DRAW_INDEXED_INDIRECT: {
+          const bufHandle = dv.getUint32(off + 8, true);
+          const indirectOffset = dv.getUint32(off + 12, true);
+          const drawCount = dv.getUint32(off + 16, true);
+          const buf = resources.get(bufHandle);
+          if (passEncoder && buf) {
+            for (let i = 0; i < drawCount; i++) {
+              passEncoder.drawIndexedIndirect(buf, indirectOffset + i * 20);
+            }
           }
           break;
         }

@@ -22,11 +22,14 @@
 #include "audio/audio.h"
 #include "audio/synth.h"
 #include "app/r3d.h"
+#include "gpu/rhi.h"
+#include "gpu/gpu_scene.h"
 #include "core/profiler.h"
 #include "ui/font.h"
 
 #define KEY_C 67
 #define KEY_G 71
+#define KEY_H 72
 #define KEY_M 77
 #define KEY_L 76
 #define KEY_N 78
@@ -62,7 +65,9 @@ static f32            g_smoke_acc;
 static f32            g_part_update_ms;
 static f32            g_part_mesh_ms;
 static u8             g_prev_burst;
+static u8             g_prev_h;
 static b32            g_fx_enabled;
+static b32            g_stress_100k;
 
 /* Patlama ses efektleri: TPT SVF alçak geçiren filtre (kesim frekansı kaymalı) */
 static const SynthSfx k_sfx_burst_boom = {
@@ -232,7 +237,8 @@ void scene3d_init(Arena* perm, Arena* scratch, Framebuffer* fb) {
     g_pbr_on    = TRUE;
     g_day_paused = FALSE;
     g_tod       = 0.13f;     /* sabah */
-    g_prev_m = g_prev_p = g_prev_t = g_prev_burst = 0;
+    g_prev_m = g_prev_p = g_prev_t = g_prev_burst = g_prev_h = 0;
+    g_stress_100k = FALSE;
     r3d_init(&g_r3d, perm, scratch, SHADOW_SIZE);
     tex_init(&g_tex[1], perm, 32, 32, TEX_FLAG_BILINEAR);
     tex_gen_gradient(&g_tex[1], FB_RGBA(255, 220, 90, 255), FB_RGBA(255, 120, 60, 255),
@@ -270,12 +276,36 @@ static Vec4 hue_color(f32 h) {
 /* Sahnedeki tüm nesneler (gölge ve ana geçiş aynı listeyi kullanır). Zemin gölge düşürmez. */
 static void draw_scene(R3dPass* p, void* user) {
     f32 time_sec = *(const f32*)user;
+    if (p->gpu_active) {
+        /* Kamp ateşi nokta ışığı + 3D kümelenmiş ileri aydınlatma (clustered forward) ışık dizisi */
+        f32 flick = 0.90f + 0.10f * m_sin(time_sec * 17.0f);
+        gpu_scene_add_point_light(vec3(-3.2f, 1.35f, 1.5f), 14.0f,
+                                  vec3(3.4f * flick, 1.65f * flick, 0.42f * flick), 0.10f);
+        for (u32 li = 0u; li < 12u; li++) {
+            f32 lx = ((f32)(li % 4u) - 1.5f) * 22.0f;
+            f32 lz = -14.0f - (f32)(li / 4u) * 24.0f;
+            Vec4 hc = hue_color((f32)(li * 5u) / 16.0f);
+            gpu_scene_add_point_light(vec3(lx, 3.2f, lz), 18.0f,
+                                      vec3(hc.x * 2.2f, hc.y * 2.2f, hc.z * 2.2f), 0.06f);
+        }
+    }
+
     /* Önden arkaya kaba sıra early-Z'ye yardım eder: önce yakın nesneler, zemin en son */
     Mat4 m = mat4_trs(vec3(0.0f, 1.6f, 0.0f), time_sec * 0.7f, time_sec * 0.45f, vec3(2.2f, 2.2f, 2.2f));
     r3d_draw(p, g_cube, &m, &g_tex[1], vec4(1, 1, 1, 1), 0.0f, 0.45f, G3D_CULL_BACK);
 
     m = mat4_trs(vec3(4.0f, 1.2f + 0.4f * m_sin(time_sec * 1.3f), -1.0f), 0.0f, 0.0f, vec3(1.2f, 1.2f, 1.2f));
     r3d_draw(p, g_sphere, &m, &g_tex[2], vec4(0.95f, 0.75f, 0.35f, 1.0f), 1.0f, 0.25f, G3D_CULL_BACK);
+
+    if (p->gpu_active && g_stress_100k) {
+        /* 100k stres kipinde ön plan Hi-Z örtücü monolit duvarı + GPU'da yaşayan 100,000 sütun */
+        m = mat4_trs(vec3(0.0f, 1.8f, 4.0f), 0.0f, 0.0f, vec3(5.6f, 3.6f, 0.6f));
+        r3d_draw(p, g_cube, &m, &g_tex[0], vec4(0.32f, 0.36f, 0.44f, 1.0f), 0.85f, 0.22f, G3D_CULL_BACK);
+
+        m = mat4_identity();
+        r3d_draw_receiver(p, g_ground, &m, g_mipmap_on ? &g_tex[0] : &g_tex_ground_nomip, vec4(1, 1, 1, 1), 0.0f, 0.85f);
+        return;
+    }
 
     /* 1000 küplük ızgara: sütunlar boyunca metallik (5 adım), satırlar boyunca pürüzlülük (5 adım) */
     for (u32 j = 0; j < GRID_Z; j++) {
@@ -377,7 +407,13 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     if (key_pressed(in, KEY_P, &g_prev_burst)) {
         trigger_spark_burst();
     }
-    if (g_fx_enabled) {
+    if (key_pressed(in, KEY_H, &g_prev_h)) {
+        g_stress_100k = !g_stress_100k;
+        gpu_scene_set_100k_mode(g_stress_100k);
+        LOG("GPU 100k ornek kipi: %s", g_stress_100k ? "acik" : "kapali");
+    }
+    g_stress_100k = gpu_scene_100k_mode();
+    if (g_fx_enabled && !(engine_gpu_available() && g_stress_100k)) {
         PROF_BEGIN("particles");
         f64 t0 = plat_time_ms();
         emit_continuous_fx(dt);
@@ -400,6 +436,7 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     c.y = 1.0f;
 
     R3dFrame f;
+    __builtin_memset(&f, 0, sizeof(f));
     f.cam           = &g_cam;
     f.dl            = r3d_daylight(g_tod);
     f.pbr           = g_pbr_on;
@@ -408,6 +445,8 @@ void scene3d_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderMan
     f.shadow_center = c;
     f.shadow_radius = 36.0f;
     f.fog_density   = 1.0f / 160.0f;
+    f.stress_100k   = g_stress_100k;
+    f.time_sec      = time_sec;
     r3d_render(&g_r3d, r, fb, frame, sm, &f, draw_scene, &time_sec, &g_last_stats, &g_shadow_stats);
 }
 
@@ -427,24 +466,42 @@ void scene3d_draw_hud(UiContext* ui, const Framebuffer* fb) {
     const G3dStats* s = &g_last_stats;
     i32 y = (i32)fb->h - 22;
     ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 36, FB_RGBA(15, 18, 26, 190));
-    fmt_format(line, sizeof(line),
-               "[P] Patlama | Parcacik %u/%u | sim+mesh %.3f ms (sim %.3f + mesh %.3f)",
-               g_particles.count, g_particles.capacity,
-               (f64)(g_part_update_ms + g_part_mesh_ms),
-               (f64)g_part_update_ms, (f64)g_part_mesh_ms);
-    ui_draw_text(ui, 4, y - 11, line, FB_RGBA(255, 205, 130, 255), 1);
-    fmt_format(line, sizeof(line),
-               "Nesne %llu (culled %llu) | Ucgen %llu -> ciz %llu, kirp %llu, arka %llu, red %llu | golge %llu",
-               (unsigned long long)s->draws, (unsigned long long)s->draws_culled,
-               (unsigned long long)s->tris_in, (unsigned long long)s->tris_out,
-               (unsigned long long)s->tris_clipped, (unsigned long long)s->tris_backface,
-               (unsigned long long)s->tris_rejected,
-               (unsigned long long)(g_pbr_on ? g_shadow_stats.tris_out : 0));
-    ui_draw_text(ui, 4, y, line, FB_RGBA(225, 235, 248, 255), 1);
+    if (engine_gpu_available()) {
+        const GpuSceneStats* gs = gpu_scene_stats();
+        u32 vp_w = engine_gpu_viewport_width();
+        u32 vp_h = engine_gpu_viewport_height();
+        f64 gpu_ms = (f64)engine_gpu_frame_time_us() * 0.001;
+        const char* ts_tag = engine_gpu_has_timestamp() ? "ts" : "sub";
+        fmt_format(line, sizeof(line),
+                   "GPU %ux%u | CPU gonderim %.3f ms | GPU %.2f ms (%s) | [H] 100k:%s [P] Patlama",
+                   vp_w, vp_h, (f64)gs->cpu_submit_ms, gpu_ms, ts_tag,
+                   g_stress_100k ? "ACIK" : "kapali");
+        ui_draw_text(ui, 4, y - 11, line, FB_RGBA(110, 235, 190, 255), 1);
+        fmt_format(line, sizeof(line),
+                   "Ornek %u (kirli %u, %u span, %uB) | Batch %u | Isik %u (16x8x8) | CSM %u kademe",
+                   gs->active_instances, gs->dirty_instances, gs->dirty_spans, gs->dirty_bytes,
+                   gs->batch_count, gs->light_count, gs->csm_cascades);
+        ui_draw_text(ui, 4, y, line, FB_RGBA(225, 235, 248, 255), 1);
+    } else {
+        fmt_format(line, sizeof(line),
+                   "[P] Patlama | Parcacik %u/%u | sim+mesh %.3f ms (sim %.3f + mesh %.3f)",
+                   g_particles.count, g_particles.capacity,
+                   (f64)(g_part_update_ms + g_part_mesh_ms),
+                   (f64)g_part_update_ms, (f64)g_part_mesh_ms);
+        ui_draw_text(ui, 4, y - 11, line, FB_RGBA(255, 205, 130, 255), 1);
+        fmt_format(line, sizeof(line),
+                   "Nesne %llu (culled %llu) | Ucgen %llu -> ciz %llu, kirp %llu, arka %llu, red %llu | golge %llu",
+                   (unsigned long long)s->draws, (unsigned long long)s->draws_culled,
+                   (unsigned long long)s->tris_in, (unsigned long long)s->tris_out,
+                   (unsigned long long)s->tris_clipped, (unsigned long long)s->tris_backface,
+                   (unsigned long long)s->tris_rejected,
+                   (unsigned long long)(g_pbr_on ? g_shadow_stats.tris_out : 0));
+        ui_draw_text(ui, 4, y, line, FB_RGBA(225, 235, 248, 255), 1);
+    }
     u32 hh = (u32)(g_tod * 24.0f + 6.0f) % 24u;   /* tod 0 = 06:00 gün doğumu */
     f32 hf = g_tod * 24.0f;
     u32 mm = (u32)((hf - m_floor(hf)) * 60.0f);
-    fmt_format(line, sizeof(line), "[C] %s [M] mip %s [L] %s [N] %s [G] hizli %02u:%02u | (%.1f, %.1f, %.1f)",
+    fmt_format(line, sizeof(line), "[C] %s [M] mip %s [L] %s [N] %s [G] hizli [H] 100k %02u:%02u | (%.1f, %.1f, %.1f)",
                g_cam.mode == CAM_FLY ? "Ucus" : "Orbit", g_mipmap_on ? "acik" : "kapali",
                g_pbr_on ? "PBR+golge" : "Lambert", g_day_paused ? "durdu" : "gun", hh, mm,
                (f64)camera_eye(&g_cam).x, (f64)camera_eye(&g_cam).y, (f64)camera_eye(&g_cam).z);

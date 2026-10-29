@@ -38,6 +38,7 @@
 #include "jit/jit.h"
 #include "bench/asm_sources.h"
 #include "spec/spec.h"
+#include "gpu/gpu_scene.h"
 
 #define FB_DEFAULT_W 640
 #define FB_DEFAULT_H 360
@@ -1228,3 +1229,25 @@ EXPORT(engine_spec_report_ptr) const char* engine_spec_report_ptr(void) {
 EXPORT(engine_spec_report_len) u32 engine_spec_report_len(void) {
     return spec_bench_report_len();
 }
+
+/* G1_B (ARCH_V2 H5): GPU sahne + 100k nesne benchmark dışa aktarımları */
+EXPORT(engine_gpu_scene_set_100k) void engine_gpu_scene_set_100k(b32 enable) {
+    gpu_scene_set_100k_mode(enable);
+}
+
+EXPORT(engine_gpu_scene_cpu_submit_us) u32 engine_gpu_scene_cpu_submit_us(void) {
+    const GpuSceneStats* st = gpu_scene_stats();
+    if (!st) return 0u;
+    return (u32)(st->cpu_submit_ms * 1000.0f + 0.5f);
+}
+
+EXPORT(engine_gpu_scene_dirty_count) u32 engine_gpu_scene_dirty_count(void) {
+    const GpuSceneStats* st = gpu_scene_stats();
+    return st ? st->dirty_instances : 0u;
+}
+
+EXPORT(engine_gpu_scene_active_count) u32 engine_gpu_scene_active_count(void) {
+    const GpuSceneStats* st = gpu_scene_stats();
+    return st ? st->active_instances : 0u;
+}
+

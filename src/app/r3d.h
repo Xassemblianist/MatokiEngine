@@ -44,6 +44,7 @@ typedef struct {
     f32            shadow_bias;
     const Texture* shadow_tex;
     f32            fog_density;
+    b32            gpu_active;
 } R3dPass;
 
 typedef void (*R3dSceneFn)(R3dPass* pass, void* user);
@@ -57,6 +58,8 @@ typedef struct {
     Vec3     shadow_center;
     f32      shadow_radius;
     f32      fog_density;  /* 1/birim */
+    b32      stress_100k;  /* TRUE: GPU 100k örnek stres modu */
+    f32      time_sec;     /* animasyon zamanı (s) */
 } R3dFrame;
 
 /* shaders_init'ten sonra: @mipmap'siz varyantları derler, gölge haritasını kurar */
