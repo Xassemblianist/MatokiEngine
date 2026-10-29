@@ -442,6 +442,31 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   (seçim kuralı ARCHITECTURE §2'de, JS'te başka mantık yok).
 - CPU ve GPU yolları birinci sınıftır: CPU yolu yalnız "yedek" değil, kendi başına en hızlı hale getirilir.
 
+## O. Belirlenimci simülasyon ve ağ (M16)
+
+### D-110 — Deterministik simülasyon çekirdeği, tek arena snapshot halkası ve rollback
+**KABUL** · 2026-10-29 · M16_A
+- **Sabit adımlı döngü ve girdi halkası (`src/sim/`):** Simülasyon varsayılan 60 Hz (`1/60 s`) sabit adımla ilerler.
+  Oyuncu girdisi 16 baytlık dolgusuz tamsayı yapısıdır (`SimInput`: `buttons`, `move_x/y`, `look_dx/dy`, `aux`);
+  oyuncu başına 256 karelik halka tamponda (`SimInputSlot`) kare numarası ve `confirmed` bayrağıyla tutulur.
+- **Tahmin ve geri sarma (rollback):** Kare `f` simüle edilirken oyuncu `p`'nin gerçek girdisi henüz gelmemişse
+  `f - 1` karesindeki girdi tahmin olarak tekrarlanır (`confirmed = FALSE`). Sonradan `f < current_frame` için
+  gerçek girdi ulaştığında tahminden farklıysa en eski kirli kare (`rollback_frame`) işaretlenir; o karenin
+  başlangıç anlık görüntüsü geri yüklenip `current_frame`'e kadar yeniden simüle edilir.
+- **Tek arena bölgesi ve ofset/indeks sözleşmesi:** Oyun durumu tek bir bitişik `Arena` bölgesinde (`sim->state`,
+  `sim->state_size`) tutulur; anlık görüntü (snapshot) bu bölgenin 2'nin kuvveti uzunluklu (varsayılan 16 kare)
+  halka tampona düz `memcpy` kopyasıdır. Durum içindeki çapraz referanslar ham C işaretçisi (`T*`) yerine dizi
+  indeksi (`u32`), `EcsEntity` tutamağı veya bölge tabanından bayt ofseti (`SimOffset` / `SIM_PTR`) kullanır;
+  böylece snapshot'lar taşınabilir ve ham durum özeti (`sim_hash`) adres-bağımsız olur. Mevcut `PhysWorld` ve
+  `EcsWorld` yapılarını durum arenası içinde kullanan sahneler için işaretçi adreslerini atlayıp yalnız değer
+  dizilerini ve kanonik float'ları (`-0.0f → +0.0f`, tüm NaN → tek kanonik qNaN) özetleyen `sim_hash_phys` ve
+  `sim_hash_ecs` yardımcıları sunulur.
+- **Belirlenimcilik denetimi düzeltmeleri:** `phys/shapes.h` içindeki `shape_from_*` kurucularında `PhysShape`
+  birliğinin (union) kullanılmayan kuyruk baytları sıfırlandı (yığın çöpünün durum özetini bozması önlendi);
+  `scene/transform.c` içinde `quat_norm` NaN korumalı hale getirildi ve `walk_stack` temizlendi; `scene/ecs.c`
+  içinde silinen yoğun dizi yuvaları, serbest liste ve ertelenmiş komut tamponu sıfırlanarak arena belleğinin
+  geçmiş çöp veriden bağımsız kalması sağlandı.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü

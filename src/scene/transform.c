@@ -6,7 +6,7 @@
 
 Quat quat_norm(Quat q) {
     f32 len2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
-    if (len2 <= 0.0f) return quat_identity();
+    if (!(len2 > 0.0f)) return quat_identity();
     f32 inv = 1.0f / m_sqrt(len2);
     return quat(q.x * inv, q.y * inv, q.z * inv, q.w * inv);
 }
@@ -174,6 +174,7 @@ static void transform_eval_entity(EcsWorld* w, EcsEntity e) {
     }
     while (n > 0u) {
         EcsEntity x = stack[--n];
+        stack[n] = 0u;
         Transform* t = (Transform*)ecs_get(w, x, w->transform_cid);
         Mat4 local = transform_local_mat4(t);
         t->world = base ? mat4_mul(base->world, local) : local;
