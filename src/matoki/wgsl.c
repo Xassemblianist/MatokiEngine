@@ -314,7 +314,20 @@ typedef struct {
     b32          flatten_if[WGSL_MAX_INSTS];
     char         var_expr[SHADE_MAX_VARYINGS][48];
     b32          var_defined[SHADE_MAX_VARYINGS];
+    const MtkLayout* layout;
 } WgslFragCtx;
+
+static b32 is_f32_tex(const MtkLayout* layout, u32 slot) {
+    if (!layout) return FALSE;
+    for (u32 s = 0; s < layout->sym_count; s++) {
+        if (layout->syms[s].kind == MTK_SYM_TEXTURE &&
+            layout->syms[s].offset_or_index == slot &&
+            layout->syms[s].type == MTK_TYPE_TEXTURE2D_F32) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
 
 /* Büyük yığın çerçevesinden kaçınmak için statik çalışma alanı (tek iş parçacıklı derleme) */
 static WgslFragCtx g_wgsl_ctx;
@@ -347,6 +360,7 @@ u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* o
 
     WgslFragCtx* ctx = &g_wgsl_ctx;
     __builtin_memset(ctx, 0, sizeof(*ctx));
+    ctx->layout = layout;
 
     u32 u_bytes   = f->uniform_bytes;
     u32 nvar      = f->varying_count;
@@ -1008,9 +1022,14 @@ u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* o
             wb_putf(&wb, "i32(textureNumLevels(tex_%u))", in->imm.u);
             break;
 
-        case IR_TEXEL_LOAD:
+        case IR_TEXEL_LOAD: {
+            b32 is_f32 = is_f32_tex(ctx->layout, in->imm.u);
             if (ctx->tex_match[i].matched) {
-                wb_putf(&wb, "bitcast<i32>(pack4x8unorm(textureLoad(tex_%u, vec2<i32>(", in->imm.u);
+                if (is_f32) {
+                    wb_putf(&wb, "bitcast<i32>(textureLoad(tex_%u, vec2<i32>(", in->imm.u);
+                } else {
+                    wb_putf(&wb, "bitcast<i32>(pack4x8unorm(textureLoad(tex_%u, vec2<i32>(", in->imm.u);
+                }
                 emit_operand(&wb, f, ctx->tex_match[i].wx);
                 wb_puts(&wb, ", ");
                 emit_operand(&wb, f, ctx->tex_match[i].wy);
@@ -1020,15 +1039,28 @@ u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* o
                 } else {
                     wb_putc(&wb, '0');
                 }
-                wb_puts(&wb, ")))");
+                if (is_f32) {
+                    wb_puts(&wb, ").r)");
+                } else {
+                    wb_puts(&wb, ")))");
+                }
             } else {
-                wb_putf(&wb, "bitcast<i32>(pack4x8unorm(textureLoad(tex_%u, vec2<i32>((", in->imm.u);
+                if (is_f32) {
+                    wb_putf(&wb, "bitcast<i32>(textureLoad(tex_%u, vec2<i32>((", in->imm.u);
+                } else {
+                    wb_putf(&wb, "bitcast<i32>(pack4x8unorm(textureLoad(tex_%u, vec2<i32>((", in->imm.u);
+                }
                 emit_operand(&wb, f, in->a);
                 wb_putf(&wb, ") %% i32(textureDimensions(tex_%u, 0).x), (", in->imm.u);
                 emit_operand(&wb, f, in->a);
-                wb_putf(&wb, ") / i32(textureDimensions(tex_%u, 0).x)), 0)))", in->imm.u);
+                if (is_f32) {
+                    wb_putf(&wb, ") / i32(textureDimensions(tex_%u, 0).x)), 0).r)", in->imm.u);
+                } else {
+                    wb_putf(&wb, ") / i32(textureDimensions(tex_%u, 0).x)), 0)))", in->imm.u);
+                }
             }
             break;
+        }
 
         case IR_DERIV_X:
             wb_puts(&wb, "dpdx(");
@@ -1091,6 +1123,7 @@ u32 mtk_wgsl_compute(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts
 
     WgslFragCtx* ctx = &g_wgsl_ctx;
     __builtin_memset(ctx, 0, sizeof(*ctx));
+    ctx->layout = layout;
 
     u32 u_bytes     = f->uniform_bytes;
     u32 buf_count   = f->buffer_count;

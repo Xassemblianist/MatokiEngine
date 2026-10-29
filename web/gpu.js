@@ -1215,6 +1215,20 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     if (executed !== cmdCount) {
       reportStreamError(0, `Komut sayısı uyuşmazlığı (${executed}/${cmdCount})`);
     }
+
+    if (cmdEncoder) {
+      if (passEncoder) {
+        passEncoder.end();
+        passEncoder = null;
+      }
+      if (computePassEncoder) {
+        computePassEncoder.end();
+        computePassEncoder = null;
+      }
+      device.queue.submit([cmdEncoder.finish()]);
+      cmdEncoder = null;
+    }
+
     return executed;
   }
 
@@ -1248,6 +1262,28 @@ export async function initGpu(canvas, exports, memory, options = {}) {
       await readbackPromise;
     }
     return lastPixels;
+  }
+
+  async function readbackBufferData(handle, byteLength) {
+    const srcBuf = resources.get(handle);
+    if (!srcBuf) {
+      throw new Error(`Buffer handle ${handle} bulunamadı`);
+    }
+    const alignedSize = Math.max((byteLength + 3) & ~3, 4);
+    const stagingBuf = device.createBuffer({
+      size: alignedSize,
+      usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST,
+    });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(srcBuf, 0, stagingBuf, 0, alignedSize);
+    device.queue.submit([enc.finish()]);
+
+    await stagingBuf.mapAsync(GPUMapMode.READ, 0, alignedSize);
+    const copy = new Uint8Array(byteLength);
+    copy.set(new Uint8Array(stagingBuf.getMappedRange(0, byteLength)));
+    stagingBuf.unmap();
+    stagingBuf.destroy();
+    return copy;
   }
 
   function resize(newW, newH) {
@@ -1288,6 +1324,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     executeStream,
     executeFrame,
     readbackPixels,
+    readbackBufferData,
     resize,
     getLastPixels: () => lastPixels,
     getReadbackCount: () => readbackCount,

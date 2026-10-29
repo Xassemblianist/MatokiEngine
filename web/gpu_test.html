@@ -74,7 +74,10 @@
     let table = null;
     let running = true;
 
-    function readCString(ptr, len) {
+    function readCString(ptr, maxLen = 256) {
+      const u8 = new Uint8Array(memory.buffer, ptr);
+      let len = 0;
+      while (len < maxLen && u8[len] !== 0) len++;
       const bytes = new Uint8Array(memory.buffer, ptr, len);
       if (typeof SharedArrayBuffer !== "undefined" && memory.buffer instanceof SharedArrayBuffer) {
         return decoder.decode(bytes.slice());
@@ -168,7 +171,113 @@
         return s;
       }
 
-      globalThis.matokiGpu = { exports, memory, gpu, summary: null, readSummary, verify };
+      async function runCompare() {
+        if (!gpu) return { error: "WebGPU desteklenmiyor" };
+        if (typeof exports.engine_gpu_compare_count !== "function") {
+          return { error: "engine_gpu_compare export bulunamadı" };
+        }
+        const count = exports.engine_gpu_compare_count() >>> 0;
+        const results = [];
+        gpu.resize(128, 128);
+
+        if (typeof exports.engine_gpu_compare_init_gpu === "function") {
+          const initBytes = exports.engine_gpu_compare_init_gpu() >>> 0;
+          if (initBytes > 0) {
+            gpu.executeFrame();
+          }
+        }
+
+        for (let i = 0; i < count; i++) {
+          try {
+            const isComp = exports.engine_gpu_compare_is_compute(i) !== 0;
+            const namePtr = exports.engine_gpu_compare_name(i) >>> 0;
+            const name = readCString(namePtr, 64);
+
+            // 1. CPU JIT yürüt
+            const cpuOk = exports.engine_gpu_compare_run_cpu(i);
+            if (!cpuOk) {
+              results.push({ index: i, name, isCompute: isComp, passed: false, error: "CPU JIT başarısız" });
+              continue;
+            }
+
+            // 2. GPU komut akışı yay
+            const emitBytes = exports.engine_gpu_compare_emit_gpu(i);
+            if (emitBytes === 0) {
+              results.push({ index: i, name, isCompute: isComp, passed: false, error: "GPU emit başarısız" });
+              continue;
+            }
+
+            // 3. GPU yürüt
+            gpu.executeFrame();
+
+            // 4. Readback
+            const readbackPtr = exports.engine_gpu_compare_readback_ptr() >>> 0;
+            if (!isComp) {
+              const pixels = await gpu.readbackPixels();
+              if (!pixels || pixels.length < 128 * 128 * 4) {
+                results.push({ index: i, name, isCompute: isComp, passed: false, error: "readbackPixels başarısız" });
+                continue;
+              }
+              new Uint8Array(memory.buffer, readbackPtr, 128 * 128 * 4).set(pixels.subarray(0, 128 * 128 * 4));
+            } else {
+              const resPtr = exports.engine_gpu_compare_result(i) >>> 0;
+              const dvTemp = new DataView(memory.buffer, resPtr, 80);
+              const bufHandle = dvTemp.getUint32(72, true);
+              const bufBytes = dvTemp.getUint32(76, true);
+              const bufData = await gpu.readbackBufferData(bufHandle, bufBytes);
+              new Uint8Array(memory.buffer, readbackPtr, bufBytes).set(bufData);
+            }
+
+            // 5. Verify & Fark haritası üret
+            exports.engine_gpu_compare_verify(i);
+
+            // 6. Sonuçları al
+            const resPtr = exports.engine_gpu_compare_result(i) >>> 0;
+            const dv = new DataView(memory.buffer, resPtr, 80);
+            const is_compute = dv.getUint32(36, true) !== 0;
+            const width = dv.getUint32(40, true);
+            const height = dv.getUint32(44, true);
+            const total_count = dv.getUint32(48, true);
+            const max_diff = dv.getFloat32(52, true);
+            const avg_diff = dv.getFloat32(56, true);
+            const exceeded_count = dv.getUint32(60, true);
+            const tolerance = dv.getFloat32(64, true);
+            const passed = dv.getUint32(68, true) !== 0;
+
+            // Fark haritası (128x128 RGBA8 = 65536 byte)
+            const diffMapPtr = exports.engine_gpu_compare_diff_map_ptr() >>> 0;
+            const diffMap = Array.from(new Uint8Array(memory.buffer, diffMapPtr, 128 * 128 * 4));
+
+            results.push({
+              index: i,
+              name,
+              isCompute: is_compute,
+              width,
+              height,
+              elementCount: total_count,
+              maxDiff: max_diff,
+              avgDiff: avg_diff,
+              exceededCount: exceeded_count,
+              tolerance,
+              passed,
+              diffMap,
+            });
+          } catch (err) {
+            console.error(`runCompare hatası (çekirdek ${i}):`, err);
+            results.push({ index: i, name: `kernel_${i}`, isCompute: false, passed: false, error: String(err) });
+          }
+        }
+
+        return { count, results, allPassed: results.every(r => r.passed) };
+      }
+
+      globalThis.matokiGpu = { exports, memory, gpu, summary: null, readSummary, verify, runCompare };
+
+      const isCompareMode = new URLSearchParams(window.location.search).has("compare");
+      if (isCompareMode) {
+        hud.textContent = "MATOKI WebGPU RHI | CPU ↔ GPU Karşılaştırma Modu Hazır.";
+        return;
+      }
 
       if (!gpu) {
         const avail = exports.engine_gpu_available ? exports.engine_gpu_available() : 0;
