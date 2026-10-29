@@ -299,19 +299,24 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
     f32 dx = ((f32)qx + 0.5f) - tri->x0;
     f32 dy = ((f32)qy + 0.5f) - tri->y0;
 
-    v128_t vz = wasm_f32x4_const_splat(0.0f);
-    b32 has_depth = (r->fb->depth != NULL) && (state->depth_test || state->depth_write);
+    v128_t vz  = wasm_f32x4_const_splat(0.0f);
+    v128_t ref = wasm_f32x4_const_splat(0.0f);
+    f32* d0    = NULL;
+    f32* d1    = NULL;
+    b32 ref_loaded = FALSE;
+    b32 has_depth  = (r->fb->depth != NULL) && (state->depth_test || state->depth_write);
     if (has_depth) {
         f32 zb = tri->z0 + dx * tri->dz_dx + dy * tri->dz_dy;
         f32 gx = tri->dz_dx;
         f32 gy = tri->dz_dy;
         vz = wasm_f32x4_add(wasm_f32x4_splat(zb), wasm_f32x4_make(0.0f, gx, gy, gx + gy));
+        d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
+        d1 = d0 + r->fb->w;
 
         if (state->depth_test) {
-            const f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
-            const f32* d1 = d0 + r->fb->w;
-            v128_t ref = wasm_v128_load64_zero(d0);
+            ref = wasm_v128_load64_zero(d0);
             ref = wasm_v128_load64_lane(d1, ref, 1);
+            ref_loaded = TRUE;
             v128_t cmp = simd_depth_cmp(state->depth_func, vz, ref);
             u32 zmask = (u32)wasm_i32x4_bitmask(cmp);
             mask &= zmask;
@@ -322,15 +327,19 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
     if (state->shade_fn == NULL) {
         /* Yalnız derinlik (gölge haritası): shade/blend yok, quad kuyruğa girmez */
         if (has_depth && state->depth_write) {
-            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
-            f32* d1 = d0 + r->fb->w;
-            v128_t old = wasm_v128_load64_zero(d0);
-            old = wasm_v128_load64_lane(d1, old, 1);
-            v128_t lm = wasm_i32x4_ne(wasm_v128_and(wasm_i32x4_splat((i32)mask), wasm_i32x4_make(1, 2, 4, 8)),
-                                      wasm_i32x4_const_splat(0));
-            v128_t nz = wasm_v128_bitselect(vz, old, lm);
-            wasm_v128_store64_lane(d0, nz, 0);
-            wasm_v128_store64_lane(d1, nz, 1);
+            if (mask == 0xFu) {
+                wasm_v128_store64_lane(d0, vz, 0);
+                wasm_v128_store64_lane(d1, vz, 1);
+            } else {
+                if (!ref_loaded) {
+                    ref = wasm_v128_load64_zero(d0);
+                    ref = wasm_v128_load64_lane(d1, ref, 1);
+                }
+                v128_t lm = wasm_v128_load(k_quad_mask_lut[mask]);
+                v128_t nz = wasm_v128_bitselect(vz, ref, lm);
+                wasm_v128_store64_lane(d0, nz, 0);
+                wasm_v128_store64_lane(d1, nz, 1);
+            }
         }
         return;
     }
@@ -345,15 +354,19 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
             wasm_v128_store(r->quad_z + q * 4u, vz);
         } else {
             /* Early-Z yazımı: sonraki üçgenler aynı batch içinde güncel derinliği görür */
-            f32* d0 = r->fb->depth + (u32)qy * r->fb->w + (u32)qx;
-            f32* d1 = d0 + r->fb->w;
-            v128_t old = wasm_v128_load64_zero(d0);
-            old = wasm_v128_load64_lane(d1, old, 1);
-            v128_t lm = wasm_i32x4_ne(wasm_v128_and(wasm_i32x4_splat((i32)mask), wasm_i32x4_make(1, 2, 4, 8)),
-                                      wasm_i32x4_const_splat(0));
-            v128_t nz = wasm_v128_bitselect(vz, old, lm);
-            wasm_v128_store64_lane(d0, nz, 0);
-            wasm_v128_store64_lane(d1, nz, 1);
+            if (mask == 0xFu) {
+                wasm_v128_store64_lane(d0, vz, 0);
+                wasm_v128_store64_lane(d1, vz, 1);
+            } else {
+                if (!ref_loaded) {
+                    ref = wasm_v128_load64_zero(d0);
+                    ref = wasm_v128_load64_lane(d1, ref, 1);
+                }
+                v128_t lm = wasm_v128_load(k_quad_mask_lut[mask]);
+                v128_t nz = wasm_v128_bitselect(vz, ref, lm);
+                wasm_v128_store64_lane(d0, nz, 0);
+                wasm_v128_store64_lane(d1, nz, 1);
+            }
         }
     }
 
@@ -410,9 +423,246 @@ static void emit_quad_general_simd(Rasterizer* r, const BinnedTri* tri,
     }
 }
 
+static inline __attribute__((always_inline)) void emit_quad_depth_simd(
+    f32* drow0, f32* drow1, u32 qx, u32 mask,
+    f32 x0, f32 z0, f32 gx, f32 gy_dy, v128_t z_lane,
+    b32 do_test, DepthFunc dfunc) {
+    f32 dx    = ((f32)qx + 0.5f) - x0;
+    f32 zb    = z0 + dx * gx + gy_dy;
+    v128_t vz = wasm_f32x4_add(wasm_f32x4_splat(zb), z_lane);
+    f32* d0   = drow0 + qx;
+    f32* d1   = drow1 + qx;
+
+    if (!do_test && mask == 0xFu) {
+        wasm_v128_store64_lane(d0, vz, 0);
+        wasm_v128_store64_lane(d1, vz, 1);
+        return;
+    }
+
+    v128_t ref = wasm_v128_load64_zero(d0);
+    ref = wasm_v128_load64_lane(d1, ref, 1);
+
+    v128_t vmask = wasm_v128_load(k_quad_mask_lut[mask]);
+    if (do_test) {
+        v128_t cmp = simd_depth_cmp(dfunc, vz, ref);
+        vmask = wasm_v128_and(vmask, cmp);
+    }
+
+    v128_t nz = wasm_v128_bitselect(vz, ref, vmask);
+    wasm_v128_store64_lane(d0, nz, 0);
+    wasm_v128_store64_lane(d1, nz, 1);
+}
+
+static inline __attribute__((always_inline)) void scan_depth_only_simd_impl(
+    Rasterizer* r, const BinnedTri* tri,
+    i32 tile_x0, i32 tile_y0, i32 tile_x1, i32 tile_y1,
+    b32 do_test, DepthFunc dfunc) {
+    i32 min_x = MAX((i32)tri->min_x, tile_x0);
+    i32 max_x = MIN((i32)tri->max_x, tile_x1);
+    i32 min_y = MAX((i32)tri->min_y, tile_y0);
+    i32 max_y = MIN((i32)tri->max_y, tile_y1);
+    if (min_x > max_x || min_y > max_y) return;
+
+    i32 a0 = tri->a0, b0 = tri->b0, c0 = tri->c0;
+    i32 a1 = tri->a1, b1 = tri->b1, c1 = tri->c1;
+    i32 a2 = tri->a2, b2 = tri->b2, c2 = tri->c2;
+
+    i32 qx_min = min_x & ~1;
+    i32 qy_min = min_y & ~1;
+
+    const v128_t step_x0 = wasm_i32x4_splat(2 * a0);
+    const v128_t step_x1 = wasm_i32x4_splat(2 * a1);
+    const v128_t step_x2 = wasm_i32x4_splat(2 * a2);
+
+    const v128_t lane_off0 = wasm_i32x4_make(0, a0, b0, a0 + b0);
+    const v128_t lane_off1 = wasm_i32x4_make(0, a1, b1, a1 + b1);
+    const v128_t lane_off2 = wasm_i32x4_make(0, a2, b2, a2 + b2);
+
+    f32 x0 = tri->x0, y0 = tri->y0;
+    f32 z0 = tri->z0, gx = tri->dz_dx, gy = tri->dz_dy;
+    const v128_t z_lane = wasm_f32x4_make(0.0f, gx, gy, gx + gy);
+
+    f32* depth = r->fb->depth;
+    u32  fb_w  = r->fb->w;
+
+    if (max_x - qx_min < 16 && max_y - qy_min < 16) {
+        i32 srow_e0 = a0 * qx_min + b0 * qy_min + c0;
+        i32 srow_e1 = a1 * qx_min + b1 * qy_min + c1;
+        i32 srow_e2 = a2 * qx_min + b2 * qy_min + c2;
+
+        for (i32 qy = qy_min; qy <= max_y; qy += 2) {
+            v128_t qe0 = wasm_i32x4_add(wasm_i32x4_splat(srow_e0), lane_off0);
+            v128_t qe1 = wasm_i32x4_add(wasm_i32x4_splat(srow_e1), lane_off1);
+            v128_t qe2 = wasm_i32x4_add(wasm_i32x4_splat(srow_e2), lane_off2);
+            u32 y_clip = (qy + 1 > tile_y1) ? ~0xCu : 0xFu;
+            f32 dy_z   = (((f32)qy + 0.5f) - y0) * gy;
+            f32* drow0 = depth + (u32)qy * fb_w;
+            f32* drow1 = drow0 + fb_w;
+
+            for (i32 qx = qx_min; qx <= max_x; qx += 2) {
+                v128_t any_neg = wasm_v128_or(wasm_v128_or(qe0, qe1), qe2);
+                u32 mask = (u32)wasm_i32x4_bitmask(wasm_v128_not(any_neg)) & y_clip;
+                if (qx + 1 > tile_x1) mask &= ~0xAu;
+
+                if (mask != 0) {
+                    emit_quad_depth_simd(drow0, drow1, (u32)qx, mask,
+                                         x0, z0, gx, dy_z, z_lane, do_test, dfunc);
+                }
+
+                qe0 = wasm_i32x4_add(qe0, step_x0);
+                qe1 = wasm_i32x4_add(qe1, step_x1);
+                qe2 = wasm_i32x4_add(qe2, step_x2);
+            }
+            srow_e0 += 2 * b0;
+            srow_e1 += 2 * b1;
+            srow_e2 += 2 * b2;
+        }
+    } else {
+        i32 max_off0 = (a0 > 0 ? 7 * a0 : 0) + (b0 > 0 ? 7 * b0 : 0);
+        i32 max_off1 = (a1 > 0 ? 7 * a1 : 0) + (b1 > 0 ? 7 * b1 : 0);
+        i32 max_off2 = (a2 > 0 ? 7 * a2 : 0) + (b2 > 0 ? 7 * b2 : 0);
+        i32 min_off0 = (a0 < 0 ? 7 * a0 : 0) + (b0 < 0 ? 7 * b0 : 0);
+        i32 min_off1 = (a1 < 0 ? 7 * a1 : 0) + (b1 < 0 ? 7 * b1 : 0);
+        i32 min_off2 = (a2 < 0 ? 7 * a2 : 0) + (b2 < 0 ? 7 * b2 : 0);
+
+        i32 bx0 = min_x & ~7;
+        i32 by0 = min_y & ~7;
+
+        i32 row_e0 = a0 * bx0 + b0 * by0 + c0;
+        i32 row_e1 = a1 * bx0 + b1 * by0 + c1;
+        i32 row_e2 = a2 * bx0 + b2 * by0 + c2;
+
+        const v128_t z_row0_off = wasm_f32x4_make(0.0f, gx, 0.0f, gx);
+        const v128_t z_row1_off = wasm_f32x4_make(gy, gx + gy, gy, gx + gy);
+
+        for (i32 by = by0; by <= max_y; by += 8) {
+            i32 blk_e0 = row_e0;
+            i32 blk_e1 = row_e1;
+            i32 blk_e2 = row_e2;
+
+            for (i32 bx = bx0; bx <= max_x; bx += 8) {
+                /* 8x8 Trivial Reject */
+                if (((blk_e0 + max_off0) | (blk_e1 + max_off1) | (blk_e2 + max_off2)) >= 0) {
+                    /* 8x8 Trivial Accept: her 2 satırda 16 pikseli 4x v128 yükle/karşılaştır/yaz */
+                    if (bx + 7 <= tile_x1 && by + 7 <= tile_y1 &&
+                        ((blk_e0 + min_off0) | (blk_e1 + min_off1) | (blk_e2 + min_off2)) >= 0) {
+                        f32 zx0 = z0 + (((f32)bx + 0.5f) - x0) * gx;
+                        f32 zx1 = z0 + (((f32)bx + 2.5f) - x0) * gx;
+                        f32 zx2 = z0 + (((f32)bx + 4.5f) - x0) * gx;
+                        f32 zx3 = z0 + (((f32)bx + 6.5f) - x0) * gx;
+                        v128_t vzx_lo = wasm_f32x4_make(zx0, zx0, zx1, zx1);
+                        v128_t vzx_hi = wasm_f32x4_make(zx2, zx2, zx3, zx3);
+
+                        for (i32 qy = by; qy < by + 8; qy += 2) {
+                            f32 dy_z    = (((f32)qy + 0.5f) - y0) * gy;
+                            v128_t vdyz = wasm_f32x4_splat(dy_z);
+                            v128_t vb0  = wasm_f32x4_add(vzx_lo, vdyz);
+                            v128_t vb1  = wasm_f32x4_add(vzx_hi, vdyz);
+
+                            v128_t vz00 = wasm_f32x4_add(vb0, z_row0_off);
+                            v128_t vz01 = wasm_f32x4_add(vb1, z_row0_off);
+                            v128_t vz10 = wasm_f32x4_add(vb0, z_row1_off);
+                            v128_t vz11 = wasm_f32x4_add(vb1, z_row1_off);
+
+                            f32* d0 = depth + (u32)qy * fb_w + (u32)bx;
+                            f32* d1 = d0 + fb_w;
+
+                            if (!do_test) {
+                                wasm_v128_store(d0 + 0, vz00);
+                                wasm_v128_store(d0 + 4, vz01);
+                                wasm_v128_store(d1 + 0, vz10);
+                                wasm_v128_store(d1 + 4, vz11);
+                            } else {
+                                v128_t r00 = wasm_v128_load(d0 + 0);
+                                v128_t r01 = wasm_v128_load(d0 + 4);
+                                v128_t r10 = wasm_v128_load(d1 + 0);
+                                v128_t r11 = wasm_v128_load(d1 + 4);
+
+                                v128_t c00 = simd_depth_cmp(dfunc, vz00, r00);
+                                v128_t c01 = simd_depth_cmp(dfunc, vz01, r01);
+                                v128_t c10 = simd_depth_cmp(dfunc, vz10, r10);
+                                v128_t c11 = simd_depth_cmp(dfunc, vz11, r11);
+
+                                wasm_v128_store(d0 + 0, wasm_v128_bitselect(vz00, r00, c00));
+                                wasm_v128_store(d0 + 4, wasm_v128_bitselect(vz01, r01, c01));
+                                wasm_v128_store(d1 + 0, wasm_v128_bitselect(vz10, r10, c10));
+                                wasm_v128_store(d1 + 4, wasm_v128_bitselect(vz11, r11, c11));
+                            }
+                        }
+                    } else {
+                        /* Kısmi 8x8 blok -> SIMD 2x2 quad taraması */
+                        i32 qx0 = MAX(bx, qx_min);
+                        i32 qy0 = MAX(by, qy_min);
+                        i32 qx1 = MIN(bx + 6, max_x);
+                        i32 qy1 = MIN(by + 6, max_y);
+
+                        i32 s_e0 = blk_e0 + a0 * (qx0 - bx) + b0 * (qy0 - by);
+                        i32 s_e1 = blk_e1 + a1 * (qx0 - bx) + b1 * (qy0 - by);
+                        i32 s_e2 = blk_e2 + a2 * (qx0 - bx) + b2 * (qy0 - by);
+
+                        for (i32 qy = qy0; qy <= qy1; qy += 2) {
+                            v128_t qe0 = wasm_i32x4_add(wasm_i32x4_splat(s_e0), lane_off0);
+                            v128_t qe1 = wasm_i32x4_add(wasm_i32x4_splat(s_e1), lane_off1);
+                            v128_t qe2 = wasm_i32x4_add(wasm_i32x4_splat(s_e2), lane_off2);
+                            u32 y_clip = (qy + 1 > tile_y1) ? ~0xCu : 0xFu;
+                            f32 dy_z   = (((f32)qy + 0.5f) - y0) * gy;
+                            f32* drow0 = depth + (u32)qy * fb_w;
+                            f32* drow1 = drow0 + fb_w;
+
+                            for (i32 qx = qx0; qx <= qx1; qx += 2) {
+                                v128_t any_neg = wasm_v128_or(wasm_v128_or(qe0, qe1), qe2);
+                                u32 mask = (u32)wasm_i32x4_bitmask(wasm_v128_not(any_neg)) & y_clip;
+                                if (qx + 1 > tile_x1) mask &= ~0xAu;
+
+                                if (mask != 0) {
+                                    emit_quad_depth_simd(drow0, drow1, (u32)qx, mask,
+                                                         x0, z0, gx, dy_z, z_lane, do_test, dfunc);
+                                }
+
+                                qe0 = wasm_i32x4_add(qe0, step_x0);
+                                qe1 = wasm_i32x4_add(qe1, step_x1);
+                                qe2 = wasm_i32x4_add(qe2, step_x2);
+                            }
+                            s_e0 += 2 * b0;
+                            s_e1 += 2 * b1;
+                            s_e2 += 2 * b2;
+                        }
+                    }
+                }
+                blk_e0 += 8 * a0;
+                blk_e1 += 8 * a1;
+                blk_e2 += 8 * a2;
+            }
+            row_e0 += 8 * b0;
+            row_e1 += 8 * b1;
+            row_e2 += 8 * b2;
+        }
+    }
+}
+
+static void raster_scan_depth_only_simd(Rasterizer* r, const BinnedTri* tri,
+                                        const RasterShaderState* state,
+                                        i32 tile_x0, i32 tile_y0, i32 tile_x1, i32 tile_y1) {
+    if (r->fb->depth == NULL || !state->depth_write) return;
+    if (!state->depth_test || state->depth_func == DEPTH_ALWAYS) {
+        scan_depth_only_simd_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, FALSE, DEPTH_ALWAYS);
+    } else if (state->depth_func == DEPTH_LESS) {
+        scan_depth_only_simd_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, DEPTH_LESS);
+    } else if (state->depth_func == DEPTH_GREATER) {
+        scan_depth_only_simd_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, DEPTH_GREATER);
+    } else if (state->depth_func != DEPTH_NEVER) {
+        scan_depth_only_simd_impl(r, tri, tile_x0, tile_y0, tile_x1, tile_y1, TRUE, state->depth_func);
+    }
+}
+
 void raster_kern_tri_scan(Rasterizer* r, const BinnedTri* tri,
                           const RasterShaderState* state, i32 tile_x0, i32 tile_y0,
                           i32 tile_x1, i32 tile_y1) {
+    if (state->shade_fn == NULL) {
+        raster_scan_depth_only_simd(r, tri, state, tile_x0, tile_y0, tile_x1, tile_y1);
+        return;
+    }
+
     i32 min_x = MAX((i32)tri->min_x, tile_x0);
     i32 max_x = MIN((i32)tri->max_x, tile_x1);
     i32 min_y = MAX((i32)tri->min_y, tile_y0);

@@ -417,6 +417,25 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   memset etmez (alt arenanın kendi ayırmaları zaten sıfırlanır).
 - Gölge haritası kodlaması 16384 piksellik işlere bölündü.
 
+### D-106 — Paralel karo-şeridi binleme + yalnız-derinlik (depth-only) hızlı tarama yolu
+**KABUL** · M14_A
+- `raster_bin_tris` ve `raster_process_tri_buf` kurulmuş üçgen dilimlerini (`RasterSpanChunk`) O(1) sürede kuyruğa
+  alır; gerçek karo dağıtımı `raster_flush` başında (`raster_flush_bins`) tek bir `PROF_BEGIN("bin")` bölgesinde
+  birleştirilir (geçiş başına ~1000 `plat_time_ms()` çağrısı ve `TileBinChunk` sıfırlama `memset` maliyeti kalkar).
+- Çoklu iş parçacığında (`nthreads > 1`, `pending_bin_tris >= 32`) karo ızgarası ayrık karo şeritlerine bölünür
+  (`tiles_y < 8 && tiles_x >= 4` ise satır başına sol/sağ 2 şerit, aksi halde satır başına 1 şerit; 640×360'ta 12 şerit,
+  512×512'de 8 şerit). Her iş yalnız kendi şeridindeki karolara yazar ve tüm üçgen dilimlerini gönderim sırasıyla
+  tarar; `TileBinChunk` blokları `r->frame` kalan alanından atomik sayaçla (`atomic_add_u32`) çekilir. Karo içi üçgen
+  sırası ve çıktı seri yolla **bit düzeyinde aynıdır**.
+- `state->shade_fn == NULL` (gölge haritası / yalnız-derinlik geçişi) için `raster_kern_tri_scan` içinde
+  `QuadHeader`/`ShadeBatch` kurulumunu ve `emit_quad_general_simd` çağrısını tamamen atlayan özel hızlı yol
+  (`raster_scan_depth_only_simd` / `raster_scan_depth_only_scalar`) eklendi:
+  - `DEPTH_LESS`, `DEPTH_GREATER` ve testsiz yazım (`!depth_test || DEPTH_ALWAYS`) derleme zamanı sabitleriyle
+    özelleştirilir (`switch` dallanması yok).
+  - 8×8 trivial-accept bloklarında 4 quad sütununun `zx0..zx3` tabanları blok başına bir kez hesaplanır; Wasm SIMD'de
+    her 2 satırda 16 piksel 4 adet tam 128-bit `v128.load` + `f32x4.lt/gt` + `v128.bitselect` + `v128.store` ile
+    doğrudan derinlik tamponuna yazılır (16× `load64` + 8× `store64` + 16 fonksiyon çağrısı yerine).
+
 ### D-107 — Tek kanal f32 doku biçimi (`texture2d_f32` / `sample_depth`) ve kodlamasız gölge haritası (eski Ö-10)
 **KABUL** · M14_B
 - Matoki'ye tek kanal 32-bit kayan nokta doku tipi `texture2d_f32` (`TEX_FLAG_F32`) ve `sample_depth(tex, uv) -> f32`
