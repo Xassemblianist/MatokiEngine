@@ -435,6 +435,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     scene_ocak_init(&g_perm_arena, &g_frame_arena);
     scene_kuyu_init(&g_perm_arena, &g_frame_arena);
     scene_ocean_init(&g_perm_arena, &g_frame_arena);
+    scene_gelgit_init(&g_perm_arena, &g_frame_arena);
     scene_fluid_init(&g_perm_arena, &g_frame_arena);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
@@ -810,6 +811,7 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
     if (s_prev_scene == SCENE_GAME && g_scene != SCENE_GAME) scene_plat_leave();
     if (s_prev_scene == SCENE_OCAK && g_scene != SCENE_OCAK) scene_ocak_leave();
     if (s_prev_scene == SCENE_KUYU && g_scene != SCENE_KUYU) scene_kuyu_leave();
+    if (s_prev_scene == SCENE_GELGIT && g_scene != SCENE_GELGIT) scene_gelgit_leave();
     s_prev_scene = g_scene;
 
     fb_clear(&g_fb, FB_RGBA(18, 20, 28, 255));
@@ -848,6 +850,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
         scene_ocean_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
                           g_input.mouse_y >= 20 && !g_show_debug);
         scene_ocean_draw_hud(&g_ui, &g_fb);
+        break;
+    case SCENE_GELGIT:
+        scene_gelgit_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
+                           g_input.mouse_y >= 20 && !g_show_debug);
+        scene_gelgit_draw_hud(&g_ui, &g_fb);
         break;
     case SCENE_AKISKAN:
         scene_fluid_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
