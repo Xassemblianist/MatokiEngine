@@ -30,6 +30,7 @@
 #include "app/scene_platformer.h"
 #include "app/scene_ocak.h"
 #include "app/scene_kuyu.h"
+#include "app/scene_ocean.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
@@ -62,7 +63,8 @@ typedef enum {
     SCENE_GAME    = 5,
     SCENE_OCAK    = 6,
     SCENE_KUYU    = 7,
-    SCENE_COUNT   = 8
+    SCENE_OKYANUS = 8,
+    SCENE_COUNT   = 9
 } DemoScene;
 
 typedef struct {
@@ -132,6 +134,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_GAME:    return "6:Oyun";
     case SCENE_OCAK:    return "7:Ocak";
     case SCENE_KUYU:    return "8:Kuyu";
+    case SCENE_OKYANUS: return "9:Okyanus";
     default:            return "?";
     }
 }
@@ -300,6 +303,7 @@ EXPORT(engine_init) void engine_init(u32 seed) {
     scene_plat_init(&g_perm_arena);
     scene_ocak_init(&g_perm_arena, &g_frame_arena);
     scene_kuyu_init(&g_perm_arena, &g_frame_arena);
+    scene_ocean_init(&g_perm_arena, &g_frame_arena);
 
     /* Editörü plasma.mtk kaynağıyla ilklendir (+ resolution uniform'u de hazır olsun) */
     const char* default_ed_src =
@@ -483,10 +487,10 @@ static void draw_top_bar(void) {
     ui_draw_rect(&g_ui, 0, 19, (i32)g_fb.w, 1, FB_RGBA(64, 82, 110, 255));
 
     /* Sahne sekmeleri (tıklanabilir veya Tab ile geçişli) */
-    i32 tx = 4;
+    i32 tx = 3;
     for (u32 s = 0; s < SCENE_COUNT; s++) {
         const char* sname = scene_name((DemoScene)s);
-        i32 tw = font_measure_width(sname, 1) + 10;
+        i32 tw = font_measure_width(sname, 1) + 6;
         b32 active = ((u32)g_scene == s);
         b32 hover  = (g_input.mouse_x >= tx && g_input.mouse_x < tx + tw &&
                       g_input.mouse_y >= 2  && g_input.mouse_y < 17);
@@ -494,26 +498,24 @@ static void draw_top_bar(void) {
                         : (hover ? FB_RGBA(48, 62, 86, 255) : FB_RGBA(32, 40, 56, 255));
         ui_draw_rect(&g_ui, tx, 2, tw, 15, bg);
         ui_draw_outline(&g_ui, tx, 2, tw, 15, FB_RGBA(75, 95, 125, 255));
-        ui_draw_text(&g_ui, tx + 5, 6, sname, FB_RGBA(238, 244, 252, 255), 1);
+        ui_draw_text(&g_ui, tx + 3, 6, sname, FB_RGBA(238, 244, 252, 255), 1);
         if (hover && g_ui.mouse_pressed) {
             g_scene = (DemoScene)s;
         }
-        tx += tw + 3;
+        tx += tw + 2;
     }
 
     /* Mod ve JIT vs C-Ref ms karşılaştırma göstergesi */
     f32 ref_ms = g_mode_ms[g_scene][0];
     f32 jit_ms = g_mode_ms[g_scene][1];
-    f32 ref_sh = g_mode_shade_ms[g_scene][0];
-    f32 jit_sh = g_mode_shade_ms[g_scene][1];
 
-    char info[128];
+    char info[96];
     fmt_format(info, sizeof(info),
-               "[T]%uT [J]%s | JIT %.1f / C %.1fms (Sh %.1f/%.1f) | [F1]Dbg [F12]PNG",
-               thread_count(), g_use_jit ? "JIT" : "C-REF",
-               (f64)jit_ms, (f64)ref_ms, (f64)jit_sh, (f64)ref_sh);
+               "%uT %s %.1f/%.1fms",
+               thread_count(), g_use_jit ? "JIT" : "REF",
+               (f64)jit_ms, (f64)ref_ms);
     i32 iw = font_measure_width(info, 1);
-    ui_draw_text(&g_ui, MAX((i32)g_fb.w - iw - 4, tx + 4), 6,
+    ui_draw_text(&g_ui, MAX((i32)g_fb.w - iw - 3, tx + 2), 6,
                  info, g_use_jit ? FB_RGBA(110, 235, 165, 255) : FB_RGBA(245, 190, 90, 255), 1);
 }
 
@@ -690,6 +692,11 @@ EXPORT(engine_frame) void engine_frame(f64 now_ms, f32 dt) {
         scene3d_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, time_sec,
                       g_use_jit, g_input.mouse_y >= 20 && !g_show_debug);
         scene3d_draw_hud(&g_ui, &g_fb);
+        break;
+    case SCENE_OKYANUS:
+        scene_ocean_frame(&g_raster, &g_fb, &g_frame_arena, &g_shaders, &g_input, step_dt, g_use_jit,
+                          g_input.mouse_y >= 20 && !g_show_debug);
+        scene_ocean_draw_hud(&g_ui, &g_fb);
         break;
     case SCENE_EDITOR:
     default:
@@ -1030,6 +1037,18 @@ EXPORT(engine_kuyu_debug) const f32* engine_kuyu_debug(void) {
 
 EXPORT(engine_kuyu_cmd) void engine_kuyu_cmd(u32 cmd, f32 a, f32 b, f32 c) {
     scene_kuyu_debug_cmd(cmd, a, b, c);
+}
+
+EXPORT(engine_ocean_debug) const f32* engine_ocean_debug(void) {
+    return scene_ocean_debug();
+}
+
+EXPORT(engine_ocean_cmd) void engine_ocean_cmd(u32 cmd, f32 a, f32 b, f32 c) {
+    scene_ocean_debug_cmd(cmd, a, b, c);
+}
+
+EXPORT(engine_ocean_set_hud) void engine_ocean_set_hud(b32 show) {
+    scene_ocean_set_hud(show);
 }
 
 /* Platform yetenek bildirimi (ARCHITECTURE §2, D-109): web/caps.js sonuçlarını alır */

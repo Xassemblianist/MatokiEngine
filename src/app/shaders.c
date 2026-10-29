@@ -327,6 +327,287 @@ static void ref_shade_particle3d(ShadeBatch* batch) {
     }
 }
 
+static inline f32 mtk_smoothstep(f32 e0, f32 e1, f32 x) {
+    f32 raw = (x - e0) / (e1 - e0);
+    f32 t   = m_clamp(raw, 0.0f, 1.0f);
+    return (t * t) * (3.0f - (2.0f * t));
+}
+
+static inline void mtk_sample_bilerp_level(const Texture* tex, f32 u, f32 v, i32 level, f32 out_rgba[4]) {
+    if ((tex->flags & TEX_FLAG_BILINEAR) == 0u) {
+        ref_sample_tex_level(tex, u, v, level, out_rgba);
+        return;
+    }
+    Texture t = ref_tex_level_view(tex, level);
+    f32 wf   = (f32)(i32)t.w;
+    f32 hf   = (f32)(i32)t.h;
+    i32 w_m1 = (i32)t.w - 1;
+    i32 h_m1 = (i32)t.h - 1;
+    f32 fu   = u * wf - 0.5f;
+    f32 fv   = v * hf - 0.5f;
+    f32 x0_f = m_floor(fu);
+    f32 y0_f = m_floor(fv);
+    f32 ax   = fu - x0_f;
+    f32 ay   = fv - y0_f;
+    i32 x0_i = (i32)x0_f;
+    i32 y0_i = (i32)y0_f;
+    i32 x0   = x0_i & w_m1;
+    i32 y0   = y0_i & h_m1;
+    i32 x1   = (x0_i + 1) & w_m1;
+    i32 y1   = (y0_i + 1) & h_m1;
+    u32 p00  = t.px[(u32)(y0 * (i32)t.w + x0)];
+    u32 p10  = t.px[(u32)(y0 * (i32)t.w + x1)];
+    u32 p01  = t.px[(u32)(y1 * (i32)t.w + x0)];
+    u32 p11  = t.px[(u32)(y1 * (i32)t.w + x1)];
+    const f32 inv255 = 1.0f / 255.0f;
+    for (u32 c = 0; c < 4u; c++) {
+        u32 sh  = c * 8u;
+        f32 c00 = (f32)(i32)((p00 >> sh) & 0xFFu);
+        f32 c10 = (f32)(i32)((p10 >> sh) & 0xFFu);
+        f32 c01 = (f32)(i32)((p01 >> sh) & 0xFFu);
+        f32 c11 = (f32)(i32)((p11 >> sh) & 0xFFu);
+        f32 top = c00 + (c10 - c00) * ax;
+        f32 bot = c01 + (c11 - c01) * ax;
+        f32 lrp = top + (bot - top) * ay;
+        out_rgba[c] = lrp * inv255;
+    }
+}
+
+/* sky.mtk C referansı. Uniform: sun_dir@0 sun_col@16 sky_zenith@32 sky_horizon@48 params@64.
+ * Varying: nrm(3). */
+void ref_shade_sky(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    const f32* sun_dir     = &u[0];
+    const f32* sun_col     = &u[4];
+    const f32* sky_zenith  = &u[8];
+    const f32* sky_horizon = &u[12];
+    const f32* params      = &u[16];
+
+    for (u32 i = 0; i < n; i++) {
+        f32 dx = v[0u * n + i], dy = v[1u * n + i], dz = v[2u * n + i];
+        f32 il = 1.0f / m_sqrt(dx * dx + dy * dy + dz * dz);
+        dx *= il; dy *= il; dz *= il;
+
+        f32 y   = m_clamp(dy, 0.0f, 1.0f);
+        f32 iy  = 1.0f - m_clamp(y * 1.85f, 0.0f, 1.0f);
+        f32 iy2 = iy * iy;
+        f32 hz  = iy2 * iy;
+
+        f32 mu   = m_max(dx * sun_dir[0] + dy * sun_dir[1] + dz * sun_dir[2], 0.0f);
+        f32 mu2  = mu * mu;
+        f32 mu4  = mu2 * mu2;
+        f32 mu8  = mu4 * mu4;
+        f32 mu16 = mu8 * mu8;
+        f32 mu64 = mu16 * mu16;
+
+        f32 warm_col[3] = { 1.0f * params[3], 0.48f * params[3], 0.18f * params[3] };
+        f32 disk_k = mtk_smoothstep(0.9978f, 0.9994f, mu) * (14.0f * params[2]);
+
+        f32 py     = m_max(dy, 0.08f);
+        f32 inv_py = 1.8f / py;
+        f32 uvc_x  = dx * inv_py + params[0] * 0.015f;
+        f32 uvc_y  = dz * inv_py + params[0] * 0.008f;
+
+        f32 a1_x = uvc_x * 0.35f + 0.17f;
+        f32 a1_y = uvc_y * 0.35f + 0.43f;
+        f32 p1_x = m_abs((a1_x - m_floor(a1_x)) * 2.0f - 1.0f);
+        f32 p1_y = m_abs((a1_y - m_floor(a1_y)) * 2.0f - 1.0f);
+
+        f32 ruv_x = uvc_x * 0.62f - uvc_y * 0.48f;
+        f32 ruv_y = uvc_x * 0.48f + uvc_y * 0.62f;
+        f32 a2_x  = ruv_x + p1_y * 0.35f;
+        f32 a2_y  = ruv_y + p1_x * 0.35f;
+        f32 p2_x  = m_abs((a2_x - m_floor(a2_x)) * 2.0f - 1.0f);
+        f32 p2_y  = m_abs((a2_y - m_floor(a2_y)) * 2.0f - 1.0f);
+
+        f32 n_val      = (p1_x * p1_y + p2_x * 0.6f + p2_y * 0.4f) * 0.5f;
+        f32 c_vis      = mtk_smoothstep(0.42f, 0.80f, n_val) * mtk_smoothstep(0.04f, 0.26f, y);
+        f32 cloud_mask = c_vis * (1.0f - y * 0.55f) * params[1];
+        f32 cl_t       = 0.35f + 0.65f * mu4;
+        f32 below      = mtk_smoothstep(-0.06f, 0.0f, dy);
+        f32 white_c[3] = { 0.95f, 0.92f, 0.88f };
+
+        for (u32 k = 0; k < 3u; k++) {
+            f32 base_sky  = sky_zenith[k] + (sky_horizon[k] - sky_zenith[k]) * hz;
+            f32 mie_glow  = (warm_col[k] * (mu4 * hz * 0.55f) + sun_col[k] * (mu16 * 0.18f + mu64 * 0.95f)) * params[2];
+            f32 sun_disk  = sun_col[k] * disk_k;
+            f32 cl_a      = sky_horizon[k] * 1.10f;
+            f32 cl_b      = sun_col[k] * 0.55f + white_c[k];
+            f32 cloud_lit = cl_a + (cl_b - cl_a) * cl_t;
+            f32 under_col = sky_horizon[k] * 0.55f;
+            f32 bm        = base_sky + mie_glow;
+            f32 sky_above = (bm + (cloud_lit - bm) * cloud_mask) + sun_disk;
+            f32 c         = under_col + (sky_above - under_col) * below;
+            f32 tm        = (c * (c * 2.51f + 0.03f)) / (c * (c * 2.43f + 0.59f) + 0.14f);
+            o[k * n + i]  = m_sqrt(m_clamp(tm, 0.0f, 1.0f));
+        }
+        o[3u * n + i] = 1.0f;
+    }
+}
+
+/* ocean.mtk C referansı. Uniform: sun_dir@0 sun_col@16 sky_zenith@32 sky_horizon@48
+ * sea_deep@64 sea_shallow@80 eye@96 scales@112 params@128; dokular: map0, map1, map2.
+ * Varying: uv(0,1) nrm(2,3,4) depth(5) wpos(6,7,8). */
+void ref_shade_ocean(ShadeBatch* batch) {
+    u32 n = batch->count * 4u;
+    const f32* u = (const f32*)batch->uniforms;
+    const f32* v = batch->varyings;
+    f32* o = batch->out_rgba;
+    const Texture* map0 = &batch->textures[0];
+    const Texture* map1 = &batch->textures[1];
+    const Texture* map2 = &batch->textures[2];
+
+    const f32* sun_dir     = &u[0];
+    const f32* sun_col     = &u[4];
+    const f32* sky_zenith  = &u[8];
+    const f32* sky_horizon = &u[12];
+    const f32* sea_deep    = &u[16];
+    const f32* sea_shallow = &u[20];
+    const f32* eye         = &u[24];
+    const f32* scales      = &u[28];
+    const f32* params      = &u[32];
+
+    i32 lvl0 = 0, lvl1 = 0, lvl2 = 0;
+    for (u32 i = 0; i < n; i++) {
+        if ((i & 3u) == 0u) {
+            f32 u0_q[4] = { v[i], v[i + 1u], v[i + 2u], v[i + 3u] };
+            f32 v0_q[4] = { v[n + i], v[n + i + 1u], v[n + i + 2u], v[n + i + 3u] };
+            f32 u1_q[4] = { u0_q[0] * scales[0], u0_q[1] * scales[0], u0_q[2] * scales[0], u0_q[3] * scales[0] };
+            f32 v1_q[4] = { v0_q[0] * scales[0], v0_q[1] * scales[0], v0_q[2] * scales[0], v0_q[3] * scales[0] };
+            f32 u2_q[4] = { u0_q[0] * scales[1], u0_q[1] * scales[1], u0_q[2] * scales[1], u0_q[3] * scales[1] };
+            f32 v2_q[4] = { v0_q[0] * scales[1], v0_q[1] * scales[1], v0_q[2] * scales[1], v0_q[3] * scales[1] };
+            lvl0 = (map0->flags & TEX_FLAG_MIPMAP) ? ref_tex_mip_level(map0, u0_q, v0_q) : 0;
+            lvl1 = (map1->flags & TEX_FLAG_MIPMAP) ? ref_tex_mip_level(map1, u1_q, v1_q) : 0;
+            lvl2 = (map2->flags & TEX_FLAG_MIPMAP) ? ref_tex_mip_level(map2, u2_q, v2_q) : 0;
+        }
+
+        f32 uv0_x = v[i], uv0_y = v[n + i];
+        f32 uv1_x = uv0_x * scales[0], uv1_y = uv0_y * scales[0];
+        f32 uv2_x = uv0_x * scales[1], uv2_y = uv0_y * scales[1];
+
+        f32 t0[4], t1[4], t2[4];
+        mtk_sample_bilerp_level(map0, uv0_x, uv0_y, lvl0, t0);
+        mtk_sample_bilerp_level(map1, uv1_x, uv1_y, lvl1, t1);
+        mtk_sample_bilerp_level(map2, uv2_x, uv2_y, lvl2, t2);
+
+        f32 depth = v[5u * n + i];
+        f32 w1    = m_clamp(1.0f - depth * 0.0035f, 0.25f, 1.0f);
+        f32 w2    = m_clamp(1.0f - depth * 0.012f, 0.10f, 1.0f);
+
+        const f32 zc = 0.50196078f;
+        f32 d0_x = t0[0] - zc, d0_y = t0[1] - zc;
+        f32 d1_x = (t1[0] - zc) * w1, d1_y = (t1[1] - zc) * w1;
+        f32 d2_x = (t2[0] - zc) * w2, d2_y = (t2[1] - zc) * w2;
+        f32 sl_x = (d0_x + d1_x + d2_x) * scales[2];
+        f32 sl_y = (d0_y + d1_y + d2_y) * scales[2];
+
+        f32 vnx = v[2u * n + i], vny = v[3u * n + i], vnz = v[4u * n + i];
+        f32 il  = 1.0f / m_sqrt(vnx * vnx + vny * vny + vnz * vnz);
+        vnx *= il; vny *= il; vnz *= il;
+
+        f32 nx = vnx * 0.25f - sl_x;
+        f32 ny = 1.0f;
+        f32 nz = vnz * 0.25f - sl_y;
+        il = 1.0f / m_sqrt(nx * nx + ny * ny + nz * nz);
+        nx *= il; ny *= il; nz *= il;
+
+        f32 wx = v[6u * n + i], wy = v[7u * n + i], wz = v[8u * n + i];
+        f32 vx = eye[0] - wx, vy = eye[1] - wy, vz = eye[2] - wz;
+        il = 1.0f / m_sqrt(vx * vx + vy * vy + vz * vz);
+        vx *= il; vy *= il; vz *= il;
+
+        f32 dot_nv  = nx * vx + ny * vy + nz * vz;
+        f32 ndv     = m_max(dot_nv, 0.001f);
+        f32 fx      = m_clamp(1.0f - ndv, 0.0f, 1.0f);
+        f32 fx2     = fx * fx;
+        f32 fx5     = fx2 * fx2 * fx;
+        f32 fresnel = 0.02f + 0.98f * fx5;
+
+        f32 two_nv = 2.0f * dot_nv;
+        f32 rrx    = nx * two_nv - vx;
+        f32 rry    = m_max(ny * two_nv - vy, 0.01f);
+        f32 rrz    = nz * two_nv - vz;
+        il = 1.0f / m_sqrt(rrx * rrx + rry * rry + rrz * rrz);
+        f32 rdx = rrx * il, rdy = rry * il, rdz = rrz * il;
+
+        f32 ry   = m_clamp(rdy, 0.0f, 1.0f);
+        f32 iry  = 1.0f - m_clamp(ry * 1.85f, 0.0f, 1.0f);
+        f32 r_hz = iry * iry * iry;
+        f32 r_mu = m_max(rdx * sun_dir[0] + rdy * sun_dir[1] + rdz * sun_dir[2], 0.0f);
+        f32 r_mu2 = r_mu * r_mu;
+        f32 r_mu4 = r_mu2 * r_mu2;
+        f32 r_mu8 = r_mu4 * r_mu4;
+        f32 r_mu16 = r_mu8 * r_mu8;
+        f32 warm_col[3] = { 1.0f * params[3], 0.48f * params[3], 0.18f * params[3] };
+
+        f32 hx = vx + sun_dir[0], hy = vy + sun_dir[1], hz_v = vz + sun_dir[2];
+        il = 1.0f / m_sqrt(hx * hx + hy * hy + hz_v * hz_v);
+        hx *= il; hy *= il; hz_v *= il;
+
+        f32 ndh   = m_max(nx * hx + ny * hy + nz * hz_v, 0.0f);
+        f32 ndl   = m_max(nx * sun_dir[0] + ny * sun_dir[1] + nz * sun_dir[2], 0.0f);
+        f32 nh2   = ndh * ndh;
+        f32 nh4   = nh2 * nh2;
+        f32 nh8   = nh4 * nh4;
+        f32 nh16  = nh8 * nh8;
+        f32 nh64  = nh16 * nh16;
+        f32 nh256 = nh64 * nh64;
+        f32 glare_f = (nh16 * 0.10f + nh64 * 0.55f + nh256 * 3.4f) * (0.25f + 0.75f * fresnel) * params[2];
+        f32 glare_k = glare_f * (0.2f + 0.8f * mtk_smoothstep(-0.05f, 0.25f, ndl));
+
+        f32 up_f     = m_clamp(1.0f - ndv * 0.65f, 0.0f, 1.0f);
+        f32 sun_lift = 0.35f + 0.65f * m_max(sun_dir[1], 0.15f);
+        f32 wb_t     = up_f * 0.40f;
+
+        f32 local_h  = m_max((t0[2] - 0.52f) * 0.45f + (t1[2] - 0.48f) * 1.15f + (t2[2] - 0.48f) * 0.65f, 0.0f);
+        f32 dist_sss = m_clamp(1.0f - depth * 0.0085f, 0.0f, 1.0f);
+        f32 crest_h  = m_clamp((local_h * 0.85f + (1.0f - ny) * 1.25f) * dist_sss, 0.0f, 1.4f);
+        f32 bdx      = sun_dir[0] + nx * 0.45f;
+        f32 bdy      = sun_dir[1] + ny * 0.45f;
+        f32 bdz      = sun_dir[2] + nz * 0.45f;
+        il = 1.0f / m_sqrt(bdx * bdx + bdy * bdy + bdz * bdz);
+        bdx *= il; bdy *= il; bdz *= il;
+
+        f32 back_lit   = m_max(vx * (0.0f - bdx) + vy * (0.0f - bdy) + vz * (0.0f - bdz), 0.0f);
+        f32 bl2        = back_lit * back_lit;
+        f32 front_sss  = m_max(ndl * 0.5f + 0.5f, 0.0f) * (1.0f - ndv) * 0.45f;
+        f32 sss_amount = crest_h * (bl2 * 1.45f + front_sss) * params[0];
+        f32 sss_tint[3] = { 0.12f, 0.42f, 0.38f };
+
+        f32 raw_foam    = t0[3] * 0.85f + t1[3] * 0.80f + t2[3] * (0.60f * w1);
+        f32 foam_detail = 0.60f + 0.40f * (t1[2] * 0.5f + t2[2] * 0.5f);
+        f32 foam_mask   = m_clamp(mtk_smoothstep(0.08f, 0.58f, raw_foam * foam_detail) * params[1], 0.0f, 0.94f);
+        f32 foam_sun_k  = m_max(sun_dir[1], 0.15f) * 0.26f + ndl * 0.18f;
+
+        f32 fd    = m_clamp(depth * scales[3], 0.0f, 1.0f);
+        f32 fog_f = fd * (2.0f - fd);
+        f32 v_sun = m_max((0.0f - vx) * sun_dir[0] + (0.0f - vy) * sun_dir[1] + (0.0f - vz) * sun_dir[2], 0.0f);
+        f32 vs2   = v_sun * v_sun * 0.35f;
+
+        for (u32 k = 0; k < 3u; k++) {
+            f32 refl_sky = (sky_zenith[k] + (sky_horizon[k] - sky_zenith[k]) * r_hz)
+                         + warm_col[k] * (r_mu4 * r_hz * 0.45f)
+                         + sun_col[k] * (r_mu16 * 0.28f);
+            f32 sun_glare  = sun_col[k] * glare_k;
+            f32 sh_b       = sea_shallow[k] * 0.38f;
+            f32 water_body = (sea_deep[k] + (sh_b - sea_deep[k]) * wb_t) * sun_lift;
+            f32 sss_col    = (sea_shallow[k] * (sun_col[k] * 0.35f + sss_tint[k])) * sss_amount;
+            f32 refracted  = water_body + sss_col;
+            f32 surf_col   = (refracted + (refl_sky - refracted) * fresnel) + sun_glare;
+            f32 foam_lit   = sky_horizon[k] * 0.55f + sun_col[k] * foam_sun_k;
+            f32 with_foam  = surf_col + (foam_lit - surf_col) * foam_mask;
+            f32 fog_col    = sky_horizon[k] + warm_col[k] * vs2;
+            f32 c          = with_foam + (fog_col - with_foam) * fog_f;
+            f32 tm         = (c * (c * 2.51f + 0.03f)) / (c * (c * 2.43f + 0.59f) + 0.14f);
+            o[k * n + i]   = m_sqrt(m_clamp(tm, 0.0f, 1.0f));
+        }
+        o[3u * n + i] = 1.0f;
+    }
+}
+
 static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "sprite.mtk"))     return REF_SHADE_SPRITE_FN;
     if (str_eq_name(name, "solid.mtk"))      return REF_SHADE_SOLID_FN;
@@ -338,6 +619,8 @@ static ShadeFn default_ref_for_name(const char* name) {
     if (str_eq_name(name, "unlit3d.mtk"))    return ref_shade_unlit3d;
     if (str_eq_name(name, "dungeon3d.mtk"))  return ref_shade_dungeon3d;
     if (str_eq_name(name, "particle3d.mtk")) return ref_shade_particle3d;
+    if (str_eq_name(name, "ocean.mtk"))      return ref_shade_ocean;
+    if (str_eq_name(name, "sky.mtk"))        return ref_shade_sky;
     return REF_SHADE_SOLID_FN;
 }
 
