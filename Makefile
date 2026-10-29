@@ -49,7 +49,7 @@ TOOL_SRC     := $(sort $(wildcard tools/host/tool_*.c))
 TOOL_BINS    := $(TOOL_SRC:tools/host/tool_%.c=build/host/%)
 HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o
 
-.PHONY: all host test serve clean check status
+.PHONY: all host test serve clean check status gpucheck
 .SECONDARY:
 
 all: web/engine.wasm
@@ -90,6 +90,21 @@ check: test
 	@bad=$$(grep -rn '^[[:space:]]*#[[:space:]]*include[[:space:]]*<' src | grep -v 'wasm_simd128\.h' || true); \
 	if [ -n "$$bad" ]; then echo "HATA: src/ altında libc include:"; echo "$$bad"; exit 1; fi
 	@echo "check: tamam"
+
+GPUCHECK_PORT ?= 8095
+ifeq ($(GPU),1)
+GPUCHECK_FLAGS ?= --enable-features=Vulkan --use-angle=vulkan
+else
+GPUCHECK_FLAGS ?= --use-webgpu-adapter=swiftshader
+endif
+
+gpucheck: all build/host/test_runner
+	@if [ ! -f build/wgsl/solid.wgsl ]; then ./build/host/test_runner matoki_wgsl; fi
+	@python3 tools/host/serve_coi.py $(GPUCHECK_PORT) >/dev/null 2>&1 & \
+	srv_pid=$$!; \
+	trap "kill $$srv_pid 2>/dev/null || true" EXIT INT TERM; \
+	sleep 0.4; \
+	node tools/host/webgpu_check.mjs http://127.0.0.1:$(GPUCHECK_PORT)/gpu_test.html DEFAULT $(GPUCHECK_FLAGS)
 
 status:
 	@for f in $(sort $(wildcard tasks/*.md)); do \

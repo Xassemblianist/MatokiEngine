@@ -572,7 +572,28 @@ RhiErrorRing* engine_gpu_error_ring(void);
 b32           engine_gpu_push_error(u32 kind, u32 handle, u32 line, u32 col,
                                     const char* msg, u32 msg_len);
 
-/* Bağımsız GPU demo girişi (src/gpu/gpu_test.c) */
-u32 engine_gpu_test_frame(f64 now_ms, f32 dt);
+/* Bağımsız GPU demo girişi ve piksel doğrulaması (src/gpu/gpu_test.c) */
+typedef struct {
+    u32 width;
+    u32 height;
+    u32 bg_pixels;
+    u32 tri_pixels;
+    u32 tri_red_pixels;
+    u32 tri_green_pixels;
+    u32 tri_blue_pixels;
+    u32 cube_pixels;
+    u32 cube_warm_pixels;
+    u32 cube_cool_pixels;
+    u32 gpu_errors;
+    b32 passed;
+} GpuTestSummary;
+
+_Static_assert(sizeof(GpuTestSummary) == 48, "GpuTestSummary 48 bayt olmali");
+
+u32                   engine_gpu_test_frame(f64 now_ms, f32 dt);
+u8*                   engine_gpu_test_readback_buf(void);
+u32                   engine_gpu_test_readback_bytes(void);
+b32                   engine_gpu_test_analyze_readback(void);
+const GpuTestSummary* engine_gpu_test_summary(void);
 
 #endif

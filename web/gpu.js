@@ -44,12 +44,14 @@ const ERR_RING_OFF_ENTRIES = 16;
 const ERR_ENTRY_SIZE = 256;
 const ERR_MSG_MAX = 236;
 
-// WebGPU GPUBufferUsage ve GPUTextureUsage bayrak sabitleri (tarayıcıda global yoksa yedek)
+// WebGPU GPUBufferUsage, GPUTextureUsage ve GPUMapMode bayrak sabitleri (tarayıcıda global yoksa yedek)
+const GPU_BUF_MAP_READ = 0x0001;
 const GPU_BUF_COPY_SRC = 0x0004;
 const GPU_BUF_COPY_DST = 0x0008;
 const GPU_BUF_INDEX = 0x0010;
 const GPU_BUF_VERTEX = 0x0020;
 const GPU_BUF_UNIFORM = 0x0040;
+const GPU_MAP_READ = 0x0001;
 
 const GPU_TEX_COPY_SRC = 0x01;
 const GPU_TEX_COPY_DST = 0x02;
@@ -259,24 +261,104 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     return null;
   }
 
-  const context = options.context || (canvas ? canvas.getContext("webgpu") : null);
-  if (!context) {
+  const surfaceWidth = (canvas && canvas.width ? canvas.width : options.width || 640) >>> 0;
+  const surfaceHeight = (canvas && canvas.height ? canvas.height : options.height || 360) >>> 0;
+  const context = options.context || null;
+  const ctx2d = !context && canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+  if (!context && !ctx2d && canvas) {
     if (exports && typeof exports.engine_gpu_set_available === "function") {
       exports.engine_gpu_set_available(0);
     }
     return null;
   }
 
-  const canvasFormat =
-    typeof gpuRoot.getPreferredCanvasFormat === "function"
+  const canvasFormat = context
+    ? typeof gpuRoot.getPreferredCanvasFormat === "function"
       ? gpuRoot.getPreferredCanvasFormat()
-      : "bgra8unorm";
+      : "bgra8unorm"
+    : "rgba8unorm";
 
-  context.configure({
-    device,
-    format: canvasFormat,
-    alphaMode: "opaque",
-  });
+  if (context && typeof context.configure === "function") {
+    context.configure({
+      device,
+      format: canvasFormat,
+      alphaMode: "opaque",
+    });
+  }
+
+  const surfaceTexture =
+    !context && typeof device.createTexture === "function"
+      ? device.createTexture({
+          size: { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 },
+          mipLevelCount: 1,
+          format: canvasFormat,
+          usage: GPU_TEX_RENDER_ATTACHMENT | GPU_TEX_COPY_SRC | GPU_TEX_TEXTURE_BINDING,
+        })
+      : null;
+  const surfaceView = surfaceTexture ? surfaceTexture.createView() : null;
+  const readbackBytesPerRow = (surfaceWidth * 4 + 255) & ~255;
+  const readbackByteSize = readbackBytesPerRow * surfaceHeight;
+  const readbackBuffer =
+    surfaceTexture && typeof device.createBuffer === "function"
+      ? device.createBuffer({
+          size: readbackByteSize,
+          usage: GPU_BUF_COPY_DST | GPU_BUF_MAP_READ,
+        })
+      : null;
+  const imageData = ctx2d && typeof ctx2d.createImageData === "function"
+    ? ctx2d.createImageData(surfaceWidth, surfaceHeight)
+    : null;
+  let readbackInFlight = false;
+  let readbackPromise = null;
+  let lastPixels = null;
+  let readbackCount = 0;
+
+  async function finishReadback() {
+    try {
+      if (!readbackBuffer || typeof readbackBuffer.mapAsync !== "function") return null;
+      await readbackBuffer.mapAsync(GPU_MAP_READ);
+      const mapped = new Uint8Array(readbackBuffer.getMappedRange(0, readbackByteSize));
+      const rowBytes = surfaceWidth * 4;
+      const totalBytes = rowBytes * surfaceHeight;
+      if (!lastPixels || lastPixels.length !== totalBytes) {
+        lastPixels = new Uint8Array(totalBytes);
+      }
+      if (readbackBytesPerRow === rowBytes) {
+        lastPixels.set(mapped.subarray(0, totalBytes));
+      } else {
+        for (let y = 0; y < surfaceHeight; y++) {
+          const srcOff = y * readbackBytesPerRow;
+          lastPixels.set(mapped.subarray(srcOff, srcOff + rowBytes), y * rowBytes);
+        }
+      }
+      readbackBuffer.unmap();
+
+      if (exports && memory && typeof exports.engine_gpu_test_readback_buf === "function") {
+        const dstPtr = exports.engine_gpu_test_readback_buf() >>> 0;
+        const dstLen =
+          typeof exports.engine_gpu_test_readback_bytes === "function"
+            ? exports.engine_gpu_test_readback_bytes() >>> 0
+            : 0;
+        if (dstPtr && dstLen >= totalBytes) {
+          new Uint8Array(memory.buffer, dstPtr, totalBytes).set(lastPixels);
+          if (typeof exports.engine_gpu_test_analyze_readback === "function") {
+            exports.engine_gpu_test_analyze_readback();
+          }
+        }
+      }
+
+      if (ctx2d && imageData) {
+        imageData.data.set(lastPixels);
+        ctx2d.putImageData(imageData, 0, 0);
+      }
+      readbackCount++;
+      return lastPixels;
+    } catch (_err) {
+      return null;
+    } finally {
+      readbackInFlight = false;
+    }
+  }
 
   if (typeof device.addEventListener === "function") {
     device.addEventListener("uncapturederror", (ev) => {
@@ -645,7 +727,7 @@ export async function initGpu(canvas, exports, memory, options = {}) {
 
           let colorView = null;
           if (colorHandle === 0) {
-            colorView = context.getCurrentTexture().createView();
+            colorView = context ? context.getCurrentTexture().createView() : surfaceView;
           } else {
             const cEntry = resources.get(colorHandle);
             colorView = cEntry ? cEntry.view : null;
@@ -774,8 +856,29 @@ export async function initGpu(canvas, exports, memory, options = {}) {
             passEncoder = null;
           }
           if (cmdEncoder) {
+            const shouldCopy =
+              !readbackInFlight &&
+              readbackBuffer &&
+              surfaceTexture &&
+              typeof cmdEncoder.copyTextureToBuffer === "function";
+            if (shouldCopy) {
+              readbackInFlight = true;
+              cmdEncoder.copyTextureToBuffer(
+                { texture: surfaceTexture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+                {
+                  buffer: readbackBuffer,
+                  offset: 0,
+                  bytesPerRow: readbackBytesPerRow,
+                  rowsPerImage: surfaceHeight,
+                },
+                { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 }
+              );
+            }
             device.queue.submit([cmdEncoder.finish()]);
             cmdEncoder = null;
+            if (shouldCopy) {
+              readbackPromise = finishReadback();
+            }
           }
           break;
         }
@@ -803,22 +906,52 @@ export async function initGpu(canvas, exports, memory, options = {}) {
     return executeStream(ptr, len);
   }
 
+  async function readbackPixels() {
+    if (readbackPromise) {
+      await readbackPromise;
+    }
+    if (!lastPixels && !readbackInFlight && readbackBuffer && surfaceTexture) {
+      const enc = device.createCommandEncoder();
+      readbackInFlight = true;
+      enc.copyTextureToBuffer(
+        { texture: surfaceTexture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+        {
+          buffer: readbackBuffer,
+          offset: 0,
+          bytesPerRow: readbackBytesPerRow,
+          rowsPerImage: surfaceHeight,
+        },
+        { width: surfaceWidth, height: surfaceHeight, depthOrArrayLayers: 1 }
+      );
+      device.queue.submit([enc.finish()]);
+      readbackPromise = finishReadback();
+      await readbackPromise;
+    }
+    return lastPixels;
+  }
+
   function destroy() {
     for (const obj of resources.values()) {
       if (obj && typeof obj.destroy === "function") obj.destroy();
       else if (obj && obj.texture && typeof obj.texture.destroy === "function") obj.texture.destroy();
     }
     resources.clear();
+    if (surfaceTexture && typeof surfaceTexture.destroy === "function") surfaceTexture.destroy();
+    if (readbackBuffer && typeof readbackBuffer.destroy === "function") readbackBuffer.destroy();
   }
 
   return {
     adapter,
     device,
     context,
+    surfaceTexture,
     format: canvasFormat,
     resources,
     executeStream,
     executeFrame,
+    readbackPixels,
+    getLastPixels: () => lastPixels,
+    getReadbackCount: () => readbackCount,
     destroy,
   };
 }

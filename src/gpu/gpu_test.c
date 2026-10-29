@@ -120,9 +120,15 @@ typedef struct {
     RhiPipeline  cube_pipe;
     RhiBindGroup cube_bg;
     u32          cube_index_count;
+    /* Hata ve piksel geri okuma özeti */
+    u32            total_gpu_errors;
+    GpuTestSummary summary;
 } GpuTestState;
 
+#define GPU_TEST_READBACK_BYTES (GPU_TEST_W * GPU_TEST_H * 4u)
+
 static u8           g_gpu_test_mem[KB(512)] __attribute__((aligned(16)));
+static u8           g_gpu_test_readback[GPU_TEST_READBACK_BYTES] __attribute__((aligned(16)));
 static GpuTestState g_gpu_test;
 
 static void gpu_test_setup_resources(GpuTestState* st) {
@@ -288,14 +294,15 @@ EXPORT(engine_gpu_test_frame) u32 engine_gpu_test_frame(f64 now_ms, f32 dt) {
         rhi_init(rhi, &st->arena, 64u, KB(128));
         rhi_set_active(rhi);
         gpu_test_setup_resources(st);
-        st->inited    = TRUE;
-        st->frame_idx = 0u;
+        st->inited           = TRUE;
+        st->frame_idx        = 0u;
+        st->total_gpu_errors = 0u;
     } else {
         rhi_set_active(rhi);
         rhi_begin_frame(rhi);
     }
 
-    rhi_poll_errors(rhi);
+    st->total_gpu_errors += rhi_poll_errors(rhi);
 
     f32 t = (f32)(now_ms * 0.001);
     f32 aspect = (f32)GPU_TEST_W / (f32)GPU_TEST_H;
@@ -353,4 +360,76 @@ EXPORT(engine_gpu_test_frame) u32 engine_gpu_test_frame(f64 now_ms, f32 dt) {
 
     st->frame_idx++;
     return rhi_stream_bytes(rhi);
+}
+
+EXPORT(engine_gpu_test_readback_buf) u8* engine_gpu_test_readback_buf(void) {
+    return g_gpu_test_readback;
+}
+
+EXPORT(engine_gpu_test_readback_bytes) u32 engine_gpu_test_readback_bytes(void) {
+    return GPU_TEST_READBACK_BYTES;
+}
+
+EXPORT(engine_gpu_test_analyze_readback) b32 engine_gpu_test_analyze_readback(void) {
+    GpuTestState* st = &g_gpu_test;
+    Rhi* rhi = &st->rhi;
+    if (st->inited) {
+        st->total_gpu_errors += rhi_poll_errors(rhi);
+    }
+
+    GpuTestSummary sum;
+    __builtin_memset(&sum, 0, sizeof(sum));
+    sum.width      = GPU_TEST_W;
+    sum.height     = GPU_TEST_H;
+    sum.gpu_errors = st->total_gpu_errors + rhi->errors.dropped;
+
+    for (u32 y = 0u; y < GPU_TEST_H; y++) {
+        const u8* row = g_gpu_test_readback + (usize)y * GPU_TEST_W * 4u;
+        for (u32 x = 0u; x < GPU_TEST_W; x++) {
+            u32 r = row[x * 4u + 0u];
+            u32 g = row[x * 4u + 1u];
+            u32 b = row[x * 4u + 2u];
+            u32 a = row[x * 4u + 3u];
+
+            /* Arka plan temizleme rengi: (0.07, 0.08, 0.12, 1.0) -> ~(18, 20, 31, 255) */
+            b32 is_bg = (r >= 14u && r <= 22u &&
+                         g >= 16u && g <= 24u &&
+                         b >= 27u && b <= 35u &&
+                         a == 255u);
+            if (is_bg) {
+                sum.bg_pixels++;
+                continue;
+            }
+
+            if (x < 260u) {
+                /* Sol bölge (x in [85, 248]): dönen renkli üçgen (~7381 piksel) */
+                sum.tri_pixels++;
+                if (r > g + 35u && r > b + 35u) sum.tri_red_pixels++;
+                if (g > r + 35u && g > b + 35u) sum.tri_green_pixels++;
+                if (b > r + 35u && b > g + 35u) sum.tri_blue_pixels++;
+            } else {
+                /* Sağ bölge: dama dokulu, yönlü ışıklı 3D küp */
+                sum.cube_pixels++;
+                if (r > b + 25u) sum.cube_warm_pixels++;
+                if (b > r + 25u) sum.cube_cool_pixels++;
+            }
+        }
+    }
+
+    sum.passed = (sum.bg_pixels        >= 100000u &&
+                  sum.tri_pixels       >= 6000u   &&
+                  sum.tri_red_pixels   >= 500u    &&
+                  sum.tri_green_pixels >= 500u    &&
+                  sum.tri_blue_pixels  >= 500u    &&
+                  sum.cube_pixels      >= 20000u  &&
+                  sum.cube_warm_pixels >= 5000u   &&
+                  sum.cube_cool_pixels >= 5000u   &&
+                  sum.gpu_errors       == 0u) ? TRUE : FALSE;
+
+    st->summary = sum;
+    return sum.passed;
+}
+
+EXPORT(engine_gpu_test_summary) const GpuTestSummary* engine_gpu_test_summary(void) {
+    return &g_gpu_test.summary;
 }
