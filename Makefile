@@ -110,10 +110,12 @@ test: all host
 detcheck: all host
 	node tools/host/det_check.mjs
 
-# Kural denetimi: src/ altında libc başlığı yasak (derleyici intrinsic başlığı wasm_simd128.h serbest).
+# Kural denetimi: src/ altında libc başlığı yasak (derleyici intrinsic başlığı wasm_simd128.h serbest),
+# state_*.h başlıklarında işaretçi alanı yasak (D-112).
 check: test
 	@bad=$$(grep -rn '^[[:space:]]*#[[:space:]]*include[[:space:]]*<' src | grep -v 'wasm_simd128\.h' || true); \
 	if [ -n "$$bad" ]; then echo "HATA: src/ altında libc include:"; echo "$$bad"; exit 1; fi
+	@./tools/host/check_state_headers.sh
 	@echo "check: tamam"
 
 status:
