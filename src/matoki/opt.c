@@ -630,7 +630,8 @@ void ir_opt_constfold(IrFunc* f) {
             b32 resolved = FALSE;
             for (u32 d = if_depth; d > 0; d--) {
                 u32 idx_d = d - 1;
-                if (!if_stk[idx_d].is_const && if_stk[idx_d].cond_id == in->a) {
+                if (!if_stk[idx_d].is_const && if_stk[idx_d].cond_id == in->a &&
+                    !(f->insts[in->a].flags & IR_FLAG_VARYING)) {
                     remap[i] = if_stk[idx_d].in_else ? in->c : in->b;
                     resolved = TRUE;
                     break;
