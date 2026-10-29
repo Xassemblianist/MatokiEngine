@@ -1,0 +1,128 @@
+// GPU Akışkan (PBF — Macklin 2013) — Aşama 7: Hız güncelleme, Girdap Hapsi (Vorticity Confinement)
+// ve XSPH viskozite.
+// v_i = (p*_i - x_i) / dt + c * sum(v_ij * W_ij) + eps * (N x omega_i) * dt.
+
+uniform particle_count: u32;
+uniform grid_params: vec4;
+uniform box_min: vec4;
+uniform box_max: vec4;
+uniform kernel_params: vec4;
+uniform solver_params: vec4;
+uniform vort_params: vec4;
+uniform sphere0: vec4;
+uniform sphere0_vel: vec4;
+uniform sphere1: vec4;
+uniform box_obs: vec4;
+
+buffer pred_pos: buffer<vec4>;
+buffer sorted_orig_pos: buffer<vec4>;
+buffer cell_counts: buffer<u32>;
+buffer cell_offsets: buffer<u32>;
+buffer positions: buffer<vec4>;
+buffer velocities: buffer<vec4>;
+
+fn compute() {
+    let idx: u32 = global_id;
+    let last_p: u32 = max(particle_count, 1u) - 1u;
+    let i_safe: u32 = min(idx, last_p);
+    let pi_v4: vec4 = pred_pos[i_safe];
+    let pi: vec3 = vec3(pi_v4.x, pi_v4.y, pi_v4.z);
+    let orig_v4: vec4 = sorted_orig_pos[i_safe];
+    let orig_p: vec3 = vec3(orig_v4.x, orig_v4.y, orig_v4.z);
+
+    let dt: f32 = box_min.w;
+    let inv_dt: f32 = 1.0 / max(dt, 0.0001);
+    var vi: vec3 = (pi - orig_p) * inv_dt;
+
+    let h: f32 = kernel_params.x;
+    let h2: f32 = kernel_params.y;
+    let poly6_s: f32 = kernel_params.z;
+    let spiky_s: f32 = kernel_params.w;
+    let xsph_c: f32 = solver_params.w;
+    let vort_eps_dt: f32 = vort_params.x;
+    let wall_damp: f32 = vort_params.y;
+    let max_spd: f32 = vort_params.z;
+    let inv_cs: f32 = grid_params.w;
+
+    let rx: f32 = (pi.x - grid_params.x) * inv_cs - 0.5;
+    let ry: f32 = (pi.y - grid_params.y) * inv_cs - 0.5;
+    let rz: f32 = (pi.z - grid_params.z) * inv_cs - 0.5;
+    let bx: i32 = clamp(i32(floor(rx)), 0, 62);
+    let by: i32 = clamp(i32(floor(ry)), 0, 62);
+    let bz: i32 = clamp(i32(floor(rz)), 0, 62);
+
+    var xsph_sum: vec3 = vec3(0.0, 0.0, 0.0);
+    var omega: vec3 = vec3(0.0, 0.0, 0.0);
+    var eta: vec3 = vec3(0.0, 0.0, 0.0);
+
+    for oct in 0..8 {
+        let ox: i32 = bx + (oct & 1);
+        let oz: i32 = bz + ((oct >> 1) & 1);
+        let oy: i32 = by + ((oct >> 2) & 1);
+        let ncell: u32 = u32(ox) + (u32(oz) << 6u) + (u32(oy) << 12u);
+        let start: u32 = cell_offsets[ncell];
+        let cnt: u32 = min(cell_counts[ncell], 3u);
+
+        for s in 0..3 {
+            let su: u32 = u32(s);
+            let valid_m: u32 = u32((i32(su) - i32(cnt)) >> 31);
+            let raw_j: u32 = min(start + su, last_p);
+            let j: u32 = i_safe ^ ((raw_j ^ i_safe) & valid_m);
+            let pj_v4: vec4 = pred_pos[j];
+            let pj: vec3 = vec3(pj_v4.x, pj_v4.y, pj_v4.z);
+            let diff: vec3 = pi - pj;
+            let r2: f32 = dot(diff, diff);
+            let gate: f32 = step(0.00000001, r2) * step(r2, h2);
+
+            let oj_v4: vec4 = sorted_orig_pos[j];
+            let vj: vec3 = (pj - vec3(oj_v4.x, oj_v4.y, oj_v4.z)) * inv_dt;
+            let vij: vec3 = (vj - vi) * gate;
+
+            let d2: f32 = max(h2 - r2, 0.0) * gate;
+            let w: f32 = poly6_s * d2 * d2 * d2;
+            xsph_sum = xsph_sum + vij * w;
+
+            let r: f32 = sqrt(max(r2, 0.00000001));
+            let hr: f32 = max(h - r, 0.0) * gate;
+            let gs: f32 = (spiky_s * hr * hr) / r;
+            let grad_w: vec3 = diff * gs;
+            omega = omega + cross(vij, grad_w);
+            eta = eta + grad_w * length(vij);
+        }
+    }
+
+    let eta_len: f32 = max(length(eta), 0.0001);
+    let eta_gate: f32 = step(0.0002, eta_len);
+    let n_vort: vec3 = eta * (eta_gate / eta_len);
+    let f_vort: vec3 = cross(n_vort, omega) * vort_eps_dt;
+
+    vi = vi + xsph_sum * xsph_c + f_vort;
+
+    // Hareketli katı küre 0 ile hız transferi (tek yönlü eşleşme)
+    let s0_c: vec3 = vec3(sphere0.x, sphere0.y, sphere0.z);
+    let dist0: f32 = length(pi - s0_c);
+    let near_s0: f32 = step(dist0, sphere0.w + h * 0.6) * 0.35;
+    let s0_v: vec3 = vec3(sphere0_vel.x, sphere0_vel.y, sphere0_vel.z);
+    vi = mix(vi, s0_v, near_s0);
+
+    // Kova duvarlarından elastik olmayan sekme / sönümleme
+    if (pi.x <= (box_min.x + 0.002) && vi.x < 0.0) { vi.x = -vi.x * wall_damp; }
+    if (pi.x >= (box_max.x - 0.002) && vi.x > 0.0) { vi.x = -vi.x * wall_damp; }
+    if (pi.y <= (box_min.y + 0.002) && vi.y < 0.0) { vi.y = -vi.y * wall_damp; }
+    if (pi.z <= (box_min.z + 0.002) && vi.z < 0.0) { vi.z = -vi.z * wall_damp; }
+    if (pi.z >= (box_max.z - 0.002) && vi.z > 0.0) { vi.z = -vi.z * wall_damp; }
+
+    let spd: f32 = length(vi);
+    if (spd > max_spd) {
+        vi = vi * (max_spd / spd);
+    }
+
+    let prev_foam: f32 = orig_v4.w;
+    let new_foam: f32 = clamp(prev_foam * 0.96 + clamp((spd - 1.1) * 0.14, 0.0, 0.45), 0.0, 1.0);
+    let norm_spd: f32 = clamp(spd / max_spd, 0.0, 1.0);
+
+    if (idx < particle_count) {
+        positions[idx] = vec4(pi.x, pi.y, pi.z, new_foam);
+        velocities[idx] = vec4(vi.x, vi.y, vi.z, norm_spd);
+    }
+}
