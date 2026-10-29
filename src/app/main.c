@@ -36,6 +36,7 @@
 #include "masm/masm.h"
 #include "jit/jit.h"
 #include "bench/asm_sources.h"
+#include "spec/spec.h"
 
 #define FB_DEFAULT_W 640
 #define FB_DEFAULT_H 360
@@ -1045,4 +1046,35 @@ EXPORT(engine_set_caps) void engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u
         SIMD_RELAXED ? "engine_relaxed.wasm" : "engine.wasm",
         (g_caps_mask & CAP_WORKER_RENDER) ? "worker" : "main",
         g_caps_gpu_max_tex2d, g_caps_gpu_max_buf_mb);
+
+/* F0_B (ARCH_V2 H1): Çalışma anı özelleştirme (arketip başına JIT ECS döngüsü) benchmark dışa aktarımları */
+static void ensure_spec_arena(void) {
+    if (g_frame_arena.base == NULL) {
+        u8* heap = &__heap_base;
+        arena_init(&g_frame_arena, heap + MB(64), MB(128));
+    }
+}
+
+EXPORT(engine_spec_verify) i32 engine_spec_verify(void) {
+    ensure_spec_arena();
+    arena_reset(&g_frame_arena);
+    i32 rc = spec_bench_verify(&g_frame_arena);
+    arena_reset(&g_frame_arena);
+    return rc;
+}
+
+EXPORT(engine_spec_bench_run) i32 engine_spec_bench_run(u32 entity_count) {
+    ensure_spec_arena();
+    arena_reset(&g_frame_arena);
+    i32 rc = spec_bench_run(&g_frame_arena, entity_count);
+    arena_reset(&g_frame_arena);
+    return rc;
+}
+
+EXPORT(engine_spec_report_ptr) const char* engine_spec_report_ptr(void) {
+    return spec_bench_report_ptr();
+}
+
+EXPORT(engine_spec_report_len) u32 engine_spec_report_len(void) {
+    return spec_bench_report_len();
 }
