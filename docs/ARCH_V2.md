@@ -1,6 +1,6 @@
 # MATOKI Mimari v2 — Temel (motorun altındaki katman)
 
-Durum: TASLAK (Faz 0 kanıtlamaları sürüyor) · 2026-10-29 · Sahibi: yönetici (Claude)
+Durum: TASLAK r2 (F0_F eleştirisi işlendi, bkz. `ARCH_V2_REVIEW.md`) · 2026-10-29 · Sahibi: yönetici
 İlgili kararlar: D-105 (paralel ön uç), D-108 (WebGPU), D-109 (platform tavanı). Vizyon: "webin Unreal'i".
 
 Bu belge oyun motorunu değil, **motorun üzerine kurulacağı temeli** tanımlar. Her ilke ölçülebilir bir hipoteze
@@ -78,6 +78,15 @@ bildirir. Grafik derleyicisi: topolojik sıra, CPU→GPU bağımlılıkları, ba
 
 ## 6. Değişmezler
 
+**Belirlenimcilik sınıfları (D-112):**
+
+| Sınıf | Kapsam | İzinli | Yasak | Test |
+|---|---|---|---|---|
+| Sim-kritik | ECS sim, fizik, oyun mantığı, hash'e giren her şey | non-relaxed wasm SIMD, sabit bloklu paralellik | relaxed SIMD, GPU, FMA daralması, NaN, float atomik, duvar saati | 1T=2T=8T hash; tarayıcılar arası hash |
+| Yalnız-görsel | render, skin, gölge, parçacık görseli, ses | relaxed SIMD, GPU, dinamik CPU↔GPU seçimi | sim durumuna geri yazmak | tolerans + görüntü hash'i |
+
+Sim, render'a yalnız **extract** düğümüyle (kare N'in salt-okunur kopyası) veri verir; render sim durumunu okumaz.
+
 - Durum bölgesinde işaretçi yok; sim adımı belirlenimci (aynı girdi → aynı bit). Paralellik sonucu sıraya bağlamaz.
 - JS'te motor mantığı yok (yükleyici seçimi ve RHI yürütme dışında).
 - Bellek yalnız arena/halka/havuz; malloc yok.
@@ -87,21 +96,38 @@ bildirir. Grafik derleyicisi: topolojik sıra, CPU→GPU bağımlılıkları, ba
 
 | # | Hipotez | Ölçüt (geçme eşiği) | Görev |
 |---|---|---|---|
-| H1 | Çalışma anı özelleştirilmiş ECS döngüsü genel C döngüsünü belirgin geçer | 100k varlık, 3 sistem: ≥ 2× | F0_B |
+| H1 | Çalışma anı özelleştirilmiş ECS döngüsü en iyi elle yazılmış C/SIMD döngüsünü geçer | 3 kol (genel / elle SIMD / özel): özel ≥ 1.3× elle SIMD; derleme geri ödeme süresi; p95 derleme+çoğaltma | F0_B |
 | H2 | Aynı Matoki `compute` çekirdeği wasm ve WGSL'de aynı sonucu verir | bit/ulp toleransı, 3 çekirdek | F0_A |
 | H3 | Kare grafiği ek yükü küçük, boru hattı verimi artırır | 200 düğüm < 0.1 ms; boru hattı ≥ 1.3× | F0_C |
-| H4 | Durum anlık görüntüsü rollback'e yeter | 16 MB < 2 ms; 8 kare geri sarma bütçede | F0_D + M16_A |
+| H4 | Rollback bütçesi | gerçek fizik+ECS ile 8 kare geri sar + yeniden simüle ≤ 12 ms p99 | F0_D + M16_A + P1 |
 | H5 | GPU'da yaşayan sahne CPU'yu boşaltır | 100k örnek, CPU gönderimi < 0.5 ms | Faz 1 (M15 sonrası) |
-| H6 | Hedef özellikler gerçekte var | tarayıcı/özellik tablosu, kaynaklı | F0_E |
+| H6 | Hedef özellikler gerçekte var | karar kuralı: hedef kitlenin ≥ %80'inde varsa tavan, yoksa tespitli seçenek; Safari/Firefox asgari küme | F0_E |
+| H7 | Belirlenimcilik | fizik+ECS 10 000 tick: {1T,2T,8T} × {Chrome, Firefox} aynı hash dizisi | F0_G |
+| H8 | Fizik v2 | 2 000 dinamik cisim @ 120 Hz, 8T adım ≤ 1.8 ms, 1T = 8T hash | P1 |
+| H9 | JIT yaşam döngüsü | 200 özelleştirme/oturum: tablo/arena sızıntısı 0, kare p99 sıçraması < 4 ms | F0_B ek |
+| H10 | Yedek kademe | SAB yok → tek iş parçacıklı derleme tam çalışır, CI'da koşar | K1 |
+| H11 | Gecikme | girdi → foton, boru hattı derinliği 1/2/3 ölçülür | F0_C ek |
+| H12 | Bütçe | orta segment mobilde 60 fps hedef senaryo + bellek tavanı tablosu | Faz 1 |
 
 Hipotez çökerse ilgili ilke bu belgede revize edilir; karar DECISIONS'a yazılır.
 
 ## 8. Fazlar
 
-- **Faz 0:** kanıtlamalar (F0_A..F), M15/M16 temelleri.
-- **Faz 1 (L0–L1):** bellek bölgeleri, iş çalan zamanlayıcı v2, render worker, RHI, Matoki çekirdek türleri + önbellek.
-- **Faz 2 (L2–L3):** ECS v2 (durum bölgesinde), GPU sahnesi, kare grafiği + boru hattı.
-- **Faz 3 (L4):** render v2 (visibility buffer, meshlet, compute raster, sanal gölge/doku, GI), rollback ağ, akış.
+Sıra (r2): belirlenimcilik ve durum yerleşimi, her sistemin veri düzenini belirlediği için GPU render v2'den **önce** gelir.
+- **Faz 0:** kanıtlamalar (F0_A..G), M15/M16 temelleri, fizik taşıma (P1_0).
+- **Faz 1 (L0 + sim çekirdeği):** tick zamanlayıcı, girdi olay halkası, ofset tabanlı durum bölgesi, iş zamanlayıcı v2
+  (deque + öncelik + servis katmanı: IO/ağ/derleme kare grafiği dışında), tek iş parçacıklı yedek derleme, fizik v2 (P1_A..E).
+- **Faz 2 (L1–L3):** IR v2 kararı + Matoki çekirdek türleri, JIT yaşam döngüsü, ECS v2 (durum bölgesinde), GPU sahnesi,
+  kare grafiği + extract düğümü + boru hattı.
+- **Faz 3 (L4, daraltılmış):** render v2 yalnız GPU-sürümlü kırpma + dolaylı çizim + kümelenmiş ileri aydınlatma ile başlar;
+  meshlet/sanal gölge/GI ancak bunlar ölçülünce. Rollback ağı, varlık hattı (cook/paket/sürüm), akış.
+
+## 8b. Açık kararlar (r2)
+- **IR v2 kapsamı:** bugünkü IR quad-piksel IR'ıdır (bellek/döngü/atomik/struct yok). F0_A sonucu: kısıtlı şablon mu, IR v2 mi.
+- **Oyun mantığı dili:** C + wasm AOT mi, Matoki genişletme mi (Ö-11).
+- **Ağ:** rollback + sunucu-yetkili anlık görüntü iki mod; WebRTC/WebTransport worker'da (F0_E).
+- **Headless tarayıcı CI:** `tools/host/webgpu_check.mjs` temelli; test araçlarında JS istisnası ve altın görüntü/hash yöntemi.
+- **Varlık hattı:** cook aracı, paket formatı, doku sıkıştırma (KTX2/Basis benzeri).
 
 ## 9. Ajan ataması (bkz. hafıza: agent-model-routing)
 

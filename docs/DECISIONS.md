@@ -143,7 +143,7 @@ Tek kullanımlı ifadeler yığında kalır; döngüden bağımsız her şey pre
 Varsayılan: en yakın + wrap. Sampler bayrakları varyant anahtarına girer.
 
 ### D-036 — Relaxed-SIMD kullanılmaz
-**KABUL** · M5_3
+**KAPSAMI DARALTILDI** (D-112, 2026-10-29): yalnız *sim-kritik* sınıf için geçerli; *yalnız-görsel* kod relaxed kullanabilir. · M5_3
 Donanıma bağlı (x86 FMA/pshufb vs ARM) sonuçlar bit-bit kâhin kuralını (D-032) bozar.
 
 ### D-037 — JIT shader'ları karo/batch başına çağrılır
@@ -496,6 +496,17 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   `scene/transform.c` içinde `quat_norm` NaN korumalı hale getirildi ve `walk_stack` temizlendi; `scene/ecs.c`
   içinde silinen yoğun dizi yuvaları, serbest liste ve ertelenmiş komut tamponu sıfırlanarak arena belleğinin
   geçmiş çöp veriden bağımsız kalması sağlandı.
+
+### D-112 — Belirlenimcilik sınıfları; durum bölgesi ve tick modeli (ARCH_V2_REVIEW A-01..A-06)
+**KABUL** · 2026-10-29 · yönetici (F0_F kırmızı takım bulgularıyla)
+- **Sim-kritik** sınıf (ECS sim sistemleri, fizik, oyun mantığı, durum hash'ine giren her şey): non-relaxed wasm, GPU yok,
+  `-ffp-contract=off`, NaN yasak (debug assert, hash öncesi kanonikleştirme), paralel işte ayrık yazım + iş parçacığı
+  sayısından bağımsız sabit bloklu azaltma, float atomik yok; her sim sistemi için "1T = 2T = 8T hash" testi zorunlu.
+  Sim-kritik kod derleme birimi düzeyinde ayrılır ve relaxed derlemeye girmez.
+- **Yalnız-görsel** sınıf (raster, vertex/skin, gölge, parçacık görseli, ses): relaxed SIMD ve GPU serbest; tolerans testli.
+- **Zaman:** sim yalnız tamsayı `tick` ve o tick'in girdisini görür; duvar saati → tick dönüşümü L0 zamanlayıcıda.
+- **Durum:** hedef ofset tabanlı, işaretçisiz durum bölgesi (prototip görevi); o zamana dek anlık görüntü yalnız "aynı derleme +
+  aynı taban adres" şartıyla geçerli. Eşleşmede "sim ABI hash'i" (derleme özeti + sürüm) karşılaştırılır.
 
 ## Bekleyen öneriler (karar verilmedi)
 
