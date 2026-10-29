@@ -497,6 +497,45 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   içinde silinen yoğun dizi yuvaları, serbest liste ve ertelenmiş komut tamponu sıfırlanarak arena belleğinin
   geçmiş çöp veriden bağımsız kalması sağlandı.
 
+## O. Fizik v2 (P1_0)
+
+### D-111 — Fizik motoru `src/phys2/`: SamurayBalgami/Matoki'den izinle taşıma, uyarlama, düzeltilen hatalar
+**KABUL** · 2026-10-29 · P1_0
+- **Kaynak:** arkadaşın motorunun `src/phys/*` fiziği (~6,6 k satır; sahibi kodun alınmasına izin verdi). Dosya başlarında
+  "SamurayBalgami/Matoki'den uyarlandı (izinle)" notu var; testleri `tests/test_phys2_*.c` olarak taşındı (92 test, 12 dosya +
+  `test_phys2_port.c` eklentileri). Yeni dizin: M16_A `src/phys`'e dokunuyor, çakışma olmasın; **`src/phys` ile geçiş sonraki adım**.
+- **İçerik:** dünya + SI / soft step çözücü, adalar / uyku, kısıt grafiği renklendirme + SIMD (wasm simd128) temas çözücüsü, dinamik
+  BVH geniş faz (kanonik çift sırası) ↔ SAP, şekiller + GJK/EPA + CCD + mesh, eklemler, XPBD yumuşak cisimler (kumaş, jöle), araç,
+  karakter, DEM, okyanus, sorgular. Eski tasarım kararları kaynak deponun D14–D35 girdilerindedir (özet: C'de yazılır, soft step
+  varsayılan, "çekirdek + yarıçap" şekiller, adım sonu CCD, XPBD ayrı çözücü, renk sırası ⇒ SIMD = skaler bit-bit).
+- **Adlandırma:** küresel semboller `phys2_*` / `Phys2*` / `PHYS2_*` (`src/phys`, `scene/transform.h` ve `anim/skeleton.h`'deki `Quat`,
+  `quat_*` ile çakışmaz). Matematik bizim `core/math.h` (`vec3_*`, `m_*`); kalanı (`Phys2Quat`, `phys2_v3_norm`, belirleyici
+  xorshift `phys2_rng_*`) `phys2/pmath.h` içinde. Bellek `arena_push` / `ARENA_PUSH_*` (malloc yok), zaman `plat_time_ms`,
+  `sys_panic` → `PANIC`. Bizim `core/`a dokunulmadı.
+- **Paralellik (`phys2/par.h`, `job_parallel_for`):** özgün motorda iş sistemi yoktu. Eklenenler, hepsinde **seri yol = paralel yol
+  bit-bit** (dilim sınırı sonucu etkilemez; `threads == 1` her zaman seri): (1) dar faz: çift başına manifold paralel hesaplanır
+  (`par_out` geçici tamponu, 512'lik kümeler), manifold yazımı / warm start / istatistik / mesh çiftleri kanonik sırayla seri
+  tüketilir; (2) kumaş / jöle: `phys2_soft_set_colored` ile açgözlü kısıt renklendirmesi (aynı renk parçacık paylaşmaz), renk
+  grupları ≥ 1024 kısıtta dilimlenir, parçacık tahmin / hız döngüleri paralel; kapalıyken dizi sırası (özgün davranış) korunur;
+  (3) okyanus: spektrum + FFT satır / sütunları (n ≥ 128). Temas çözücüsünün kendisi paralel DEĞİL: renk grupları (~100–200
+  manifold) dağıtım maliyetini karşılamıyor; çok büyük sahneler (≥ 10 k manifold) için ileride denenebilir.
+- **Düzeltilen hatalar** (her biri `test_phys2_port.c`'de ayrı regresyon testli):
+  1. *Uyandırılan ada o adımda düzlem çifti almıyordu* (`broadphase`: düzlem çiftleri uyandırmadan önce ekleniyordu). Düzlem çiftleri
+     artık uyandırmadan sonra eklenir; ayrıca her uyandırma turundan sonra çiftler yeniden toplanır (uyanan gövdenin statik
+     komşularıyla çifti de aynı adımda doğar; özgün kodda uyuyan-statik çiftler hiç oluşmadığından yayılım turları boşa dönüyordu).
+  2. *Karakter kontrolcüsü mesh ile çarpışmıyordu ve tüm gövdeleri O(N) tarıyordu.* `phys2_collide` mesh için 0 döner; artık mesh
+     `phys2_collide_mesh` ile (en derin üçgen, tur başına) çözülür, adaylar `phys2_query_aabb` (BVH / SAP) + düzlem listesinden gelir
+     (`Phys2Character.last_tests`: dar fazda sınanan gövde sayısı, testle sınırlı). Mesh sorgusu gövdenin AABB'sini kullanır; AABB
+     verilmezse yalnızca orijindeki üçgenler bulunurdu (zeminde fark edilmez, duvarda karakter içinden geçerdi).
+  3. *Çift anahtarı 16 bit (`a·2¹⁶+b`):* 65 536'dan fazla gövdede çiftler karışıyordu, `phys2_query_aabb` sonucunu 2 radix geçişiyle
+     sıralıyordu (indeks ≥ 65 536'da bozulur). Kalıcı çift kümesi `u64` (32+32 bit) anahtara, kanonik çift sıralaması (a, b) üzerinde
+     kararlı radix'e, sorgu sıralaması indeks genişliğine göre geçiş sayısına çevrildi; gövde sayısı sınırı kalktı (test: 65 600+ gövde).
+- **Diğer sertleştirmeler:** `soft.c` genel dizileri (aday gövde kopyaları, yollar, sorgu tamponu) dünya arena'sına taşındı (iki
+  yumuşak dünya birbirini ezemez, thread güvenli); birim küp çekirdeği (`hull_unit_cube`, tembel kurulum) worker'larda
+  yarışmasın diye `phys2_world_init`'te ısıtılır.
+- **Doğrulama:** `make check` (host, ASan + UBSan) + `node tests/test_phys2_wasm.mjs test` (wasm simd128 + 8 gerçek worker: SIMD ↔ skaler
+  ve 1T ↔ 8T bit-bit). Ölçüm tablosu: `tasks/P1_0_phys_port.md` Notlar, `node tests/test_phys2_wasm.mjs bench`.
+
 ### D-112 — Belirlenimcilik sınıfları; durum bölgesi ve tick modeli (ARCH_V2_REVIEW A-01..A-06)
 **KABUL** · 2026-10-29 · yönetici (F0_F kırmızı takım bulgularıyla)
 - **Sim-kritik** sınıf (ECS sim sistemleri, fizik, oyun mantığı, durum hash'ine giren her şey): non-relaxed wasm, GPU yok,
