@@ -354,25 +354,35 @@ TEST(gfx3d_transform_positions_exact) {
     CHECK(bad == 0);
 }
 
-/* Gölge haritası: güneş neredeyse tepede, (0,2,0)'da 2 birimlik küp. Küpün altındaki zemin noktası
- * gölgede, uzaktaki nokta aydınlık; kodlama gidiş-dönüşü 24 bit hassasiyetinde. */
+/* Gölge haritası (D-107): güneş neredeyse tepede, (0,2,0)'da 2 birimlik küp. Küpün altındaki zemin noktası
+ * gölgede, uzaktaki nokta aydınlık; tex.px doğrudan fb.depth (f32*) dizisini gösterir ve
+ * önceki 24-bit RGB kodlamayla 24-bit niceleme farkına (1 / (2^24-1)) kadar eşdeğerdir. */
+static f32 legacy_rgb24_roundtrip(f32 d) {
+    if (!(d > 0.0f)) d = 0.0f;
+    if (d > 1.0f) d = 1.0f;
+    u32 q = (u32)(d * 16777215.0f + 0.5f);
+    if (q > 0xFFFFFFu) q = 0xFFFFFFu;
+    return (f32)q * (1.0f / 16777215.0f);
+}
+
 static f32 shadow_lookup(const ShadowMap* s, Vec3 p, f32* recv_z) {
     Vec4 t = mat4_mul_vec4(s->world_to_tex, vec4(p.x, p.y, p.z, 1.0f));
     *recv_z = t.z;
     i32 x = (i32)(t.x * (f32)s->size), y = (i32)(t.y * (f32)s->size);
     if (x < 0 || y < 0 || x >= (i32)s->size || y >= (i32)s->size) return 0.0f;
-    return shadow_decode_texel(s->tex.px[(u32)y * s->size + (u32)x]);
+    const f32* dpx = (const f32*)s->tex.px;
+    return dpx[(u32)y * s->size + (u32)x];
 }
 
 TEST(gfx3d_shadow_map) {
     Env e;
     env_init(&e, 64, 64);
-    for (u32 i = 0; i <= 1000; i++) {
-        f32 d = (f32)i / 1000.0f;
-        CHECK_NEAR(shadow_decode_texel(shadow_encode_depth(d)), d, 2.0 / 16777215.0);
-    }
     ShadowMap sm;
     shadow_init(&sm, &e.perm, 256);
+    CHECK(sm.tex.px == (u32*)sm.fb.depth);
+    CHECK((sm.tex.flags & TEX_FLAG_F32) != 0u);
+    CHECK((sm.tex.flags & TEX_FLAG_CLAMP) != 0u);
+
     Mesh* cube = mesh_cube(&e.perm, 1.0f);
     Vec3 sun = vec3_norm(vec3(0.2f, 1.0f, 0.1f));
     shadow_fit(&sm, sun, vec3(0.0f, 0.0f, 0.0f), 10.0f, 10.0f);
@@ -384,6 +394,17 @@ TEST(gfx3d_shadow_map) {
     CHECK(g3d_draw(&ctx, cube, &model, &m));
     shadow_end(&sm, &e.r);
     CHECK(ctx.stats.tris_out > 0);
+
+    /* Doğrudan f32 doku okumasının önceki 24-bit RGB kodlamayla 24-bit niceleme farkına kadar eşdeğerliği */
+    const f32* tex_f32 = (const f32*)sm.tex.px;
+    u32 non_zero = 0;
+    for (u32 i = 0; i < sm.size * sm.size; i++) {
+        f32 d = tex_f32[i];
+        CHECK(d == sm.fb.depth[i]);
+        if (d > 0.0f) non_zero++;
+        CHECK_NEAR(d, legacy_rgb24_roundtrip(d), 1.0 / 16777215.0);
+    }
+    CHECK(non_zero > 100);
 
     f32 zr, zs;
     /* Küpün tam altı: kayıtlı derinlik (küpün ışığa uzak alt yüzü, ön yüzler ayıklandığı için) alıcıdan büyük */

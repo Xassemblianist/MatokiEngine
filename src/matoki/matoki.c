@@ -90,10 +90,11 @@ const char* mtk_type_name(MtkType t) {
     case MTK_TYPE_IVEC2:     return "ivec2";
     case MTK_TYPE_IVEC3:     return "ivec3";
     case MTK_TYPE_IVEC4:     return "ivec4";
-    case MTK_TYPE_MAT3:      return "mat3";
-    case MTK_TYPE_MAT4:      return "mat4";
-    case MTK_TYPE_TEXTURE2D: return "texture2d";
-    default:                 return "?";
+    case MTK_TYPE_MAT3:          return "mat3";
+    case MTK_TYPE_MAT4:          return "mat4";
+    case MTK_TYPE_TEXTURE2D:     return "texture2d";
+    case MTK_TYPE_TEXTURE2D_F32: return "texture2d_f32";
+    default:                     return "?";
     }
 }
 
@@ -103,7 +104,8 @@ u32 mtk_type_components(MtkType t) {
     case MTK_TYPE_I32:
     case MTK_TYPE_U32:
     case MTK_TYPE_BOOL:
-    case MTK_TYPE_TEXTURE2D: return 1;
+    case MTK_TYPE_TEXTURE2D:
+    case MTK_TYPE_TEXTURE2D_F32: return 1;
     case MTK_TYPE_VEC2:
     case MTK_TYPE_IVEC2:     return 2;
     case MTK_TYPE_VEC3:
@@ -132,6 +134,10 @@ b32 mtk_type_is_vector(MtkType t) {
 
 b32 mtk_type_is_matrix(MtkType t) {
     return t == MTK_TYPE_MAT3 || t == MTK_TYPE_MAT4;
+}
+
+b32 mtk_type_is_texture(MtkType t) {
+    return t == MTK_TYPE_TEXTURE2D || t == MTK_TYPE_TEXTURE2D_F32;
 }
 
 MtkType mtk_type_scalar_base(MtkType t) {
