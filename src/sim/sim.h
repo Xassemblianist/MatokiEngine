@@ -9,6 +9,7 @@
 
 #include "core/types.h"
 #include "core/arena.h"
+#include "plat/platform.h"
 #include "phys/world.h"
 #include "scene/ecs.h"
 
@@ -263,5 +264,33 @@ b32             sim_replay_load(SimReplay* rep, Arena* a, const u8* buf, u32 len
 
 /* Kaydedilmiş tüm kareleri sim üzerinde baştan sona oynatır; her karenin özetini out_hashes'e yazar */
 b32             sim_replay_run(Sim* sim, const SimReplay* rep, u64* out_hashes, u32 max_hashes);
+
+/* ----------------------------------------------------------------------------
+ * Belirlenimcilik (Determinism) Doğrulama Sahnesi (F0_G, D-112)
+ * 10.000 tick 3D fizik + ECS + simülasyon sahnesi
+ * ---------------------------------------------------------------------------- */
+
+#define SIM_DET_DEFAULT_TICKS 10000u
+#define SIM_DET_DEFAULT_SEED  0x20261029u
+
+typedef struct {
+    u32 total_ticks;
+    u64 initial_hash;
+    u64 final_hash;
+    u64 combined_hash;         /* tüm tick hash'lerinin kümülatif FNV-1a karması */
+    u64 checkpoint_hashes[10]; /* her 1000 tick'te durum özeti: 1k, 2k, ..., 10k */
+    b32 has_nan;
+} SimDetResult;
+
+SimDetResult sim_det_run(u32 total_ticks, u32 seed, u64* out_hashes, u32 max_hashes);
+
+EXPORT(engine_sim_det_run)
+u32 engine_sim_det_run(u32 total_ticks, u32 seed, u32 num_threads);
+
+EXPORT(engine_sim_det_get_result)
+void engine_sim_det_get_result(SimDetResult* out_result);
+
+EXPORT(engine_sim_det_get_hashes)
+u64* engine_sim_det_get_hashes(void);
 
 #endif

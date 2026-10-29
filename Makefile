@@ -52,7 +52,7 @@ TOOL_SRC     := $(sort $(wildcard tools/host/tool_*.c))
 TOOL_BINS    := $(TOOL_SRC:tools/host/tool_%.c=build/host/%)
 HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_host.o
 
-.PHONY: all host test serve clean check status
+.PHONY: all host test serve clean check status detcheck
 .SECONDARY:
 
 all: web/engine.wasm web/engine_relaxed.wasm
@@ -73,13 +73,18 @@ web/engine_relaxed.wasm: build/engine_relaxed.wasm
 	@mkdir -p web
 	cp $< $@
 
+# D-112 / F0_G: Sim-kritik birimlerde determinizm için FMA daralmasını engelle
+build/%/src/sim/%.o: EXTRA_CFLAGS += -ffp-contract=off
+build/%/src/phys/%.o: EXTRA_CFLAGS += -ffp-contract=off
+build/%/src/scene/%.o: EXTRA_CFLAGS += -ffp-contract=off
+
 build/wasm/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(WASM_CFLAGS) -c $< -o $@
+	$(CC) $(WASM_CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
 build/wasm_relaxed/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(WASM_RELAXED_CFLAGS) -c $< -o $@
+	$(CC) $(WASM_RELAXED_CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
 host: build/host/test_runner $(TOOL_BINS)
 
@@ -93,13 +98,17 @@ build/host/%: build/host/tools/host/tool_%.o $(HOST_LIB_OBJ)
 
 build/host/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(HOST_CFLAGS) -c $< -o $@
+	$(CC) $(HOST_CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
 
 test: all host
 	wasm-validate --enable-all build/engine.wasm
 	wasm-validate --enable-all build/engine_relaxed.wasm
 	./build/host/test_runner
+
+# Belirlenimcilik denetimi (F0_G): host, Node wasm ve tarayıcı ortamlarında 10 000 tick hash doğrulaması
+detcheck: all host
+	node tools/host/det_check.mjs
 
 # Kural denetimi: src/ altında libc başlığı yasak (derleyici intrinsic başlığı wasm_simd128.h serbest).
 check: test
