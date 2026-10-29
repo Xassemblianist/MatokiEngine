@@ -8,7 +8,10 @@
 #include "gfx3d/pipeline.h"
 #include "gfx3d/camera.h"
 #include "gfx3d/mesh.h"
+#include "gpu/rhi.h"
+#include "gpu/gpu_ocean.h"
 #include "raster/texture.h"
+#include "core/embed.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "core/profiler.h"
@@ -108,6 +111,8 @@ typedef struct {
     f32       shade_ms;
     u32       tris_drawn;
     f32       debug_buf[12];
+    b32       gpu_spectrum_dirty;
+    b32       gpu_first_update;
 
     /* Önceki kare tuş durumları */
     u8        prev_keys[256];
@@ -525,6 +530,8 @@ static void reset_scene_params(OceanScene* sc) {
     sc->ocean.d.wind_speed = d.wind_speed;
     sc->ocean.d.choppy     = d.choppy;
     ocean_rebuild_spectrum(&sc->ocean);
+    sc->gpu_spectrum_dirty = TRUE;
+    sc->gpu_first_update   = TRUE;
 
     sc->sim_time   = 4.25;
     sc->time_scale = 1.0f;
@@ -569,6 +576,17 @@ void scene_ocean_init(Arena* perm, Arena* scratch) {
     reset_scene_params(&g_sc);
 }
 
+static const EmbeddedFile* find_embedded_mtk(const char* name) {
+    for (u32 i = 0; i < g_embedded_shader_count; i++) {
+        const char* a = g_embedded_shaders[i].name;
+        const char* b = name;
+        u32 k = 0;
+        while (a[k] && b[k] && a[k] == b[k]) k++;
+        if (a[k] == '\0' && b[k] == '\0') return &g_embedded_shaders[i];
+    }
+    return NULL;
+}
+
 /* ---------- Kare Güncelleme ve Çizim ---------- */
 
 void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const ShaderManager* sm,
@@ -602,6 +620,7 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
         if (m_abs(nw - g_sc.ocean.d.wind_speed) > 1e-4f) {
             g_sc.ocean.d.wind_speed = nw;
             ocean_rebuild_spectrum(&g_sc.ocean);
+            g_sc.gpu_spectrum_dirty = TRUE;
         }
     }
 
@@ -653,13 +672,18 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
     camera_update(&g_sc.cam, in, dt, look_enabled);
     Vec3 eye = camera_eye(&g_sc.cam);
 
-    /* (3) Kamera merkezli okyanus ızgara ağı güncellemesi */
-    PROF_BEGIN("ocean_mesh");
-    f64 t_mesh0 = plat_time_ms();
-    ocean_mesh_update(&g_sc.ocean, eye);
-    f64 t_mesh1 = plat_time_ms();
-    g_sc.mesh_ms = (f32)(t_mesh1 - t_mesh0);
-    PROF_END();
+    /* (3) Kamera merkezli okyanus ızgara ağı güncellemesi (CPU modunda veya tel kafes açıksa) */
+    b32 use_gpu = engine_gpu_available();
+    if (!use_gpu || g_sc.wireframe > 0u) {
+        PROF_BEGIN("ocean_mesh");
+        f64 t_mesh0 = plat_time_ms();
+        ocean_mesh_update(&g_sc.ocean, eye);
+        f64 t_mesh1 = plat_time_ms();
+        g_sc.mesh_ms = (f32)(t_mesh1 - t_mesh0);
+        PROF_END();
+    } else {
+        g_sc.mesh_ms = 0.0f;
+    }
 
     /* Güneş ve atmosfer renkleri (kamera bakış kongrüansı: -sin(azim), sin(elev), -cos(azim)) */
     f32 ce = m_cos(g_sc.sun_elev), se = m_sin(g_sc.sun_elev);
@@ -685,7 +709,83 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
                             m_sqrt(m_clamp(sky_horiz.z, 0.0f, 1.0f)));
     f32  fog_dens    = 1.0f / 340.0f;
 
-    /* (4) 3D Sahne Çizimi */
+    Mat4 boat_m = boat_world_matrix(&g_sc.boat);
+
+    if (use_gpu) {
+        u32 vp_w = engine_gpu_viewport_width();
+        u32 vp_h = engine_gpu_viewport_height();
+        f32 aspect = (vp_h > 0u) ? ((f32)vp_w / (f32)vp_h) : ((f32)fb->w / (f32)fb->h);
+        Mat4 view = camera_view(&g_sc.cam);
+        Mat4 proj = camera_proj(&g_sc.cam, aspect);
+
+        const EmbeddedFile* ef_ocean = find_embedded_mtk("ocean.mtk");
+        const EmbeddedFile* ef_sky   = find_embedded_mtk("sky.mtk");
+        const EmbeddedFile* ef_lit   = find_embedded_mtk("lit3d.mtk");
+        const EmbeddedFile* ef_unlit = find_embedded_mtk("unlit3d.mtk");
+
+        GpuOceanFrameParams gp;
+        __builtin_memset(&gp, 0, sizeof(gp));
+        gp.ocean          = &g_sc.ocean;
+        gp.sim_time       = g_sc.sim_time;
+        gp.eff_dt         = eff_dt;
+        gp.spectrum_dirty = g_sc.gpu_spectrum_dirty;
+        gp.first_update   = g_sc.gpu_first_update || (chop_delta != 0.0f);
+        gp.view           = view;
+        gp.proj           = proj;
+        gp.eye            = eye;
+        gp.boat_model     = boat_m;
+        gp.sun_dir        = sun_dir;
+        gp.sun_col        = sun_col;
+        gp.sky_zenith     = sky_zenith;
+        gp.sky_horiz      = sky_horiz;
+        gp.sea_deep       = sea_deep;
+        gp.sea_shallow    = sea_shallow;
+        gp.fog_srgb       = fog_srgb;
+        gp.fog_dens       = fog_dens;
+        gp.warm           = warm;
+        gp.wireframe      = g_sc.wireframe;
+        gp.sky_mesh       = g_sc.sky_mesh;
+        gp.hull_mesh      = g_sc.hull_mesh;
+        gp.main_sail_mesh = g_sc.main_sail_mesh;
+        gp.jib_sail_mesh  = g_sc.jib_sail_mesh;
+        gp.unit_cube      = g_sc.unit_cube;
+        gp.tex_hull       = &g_sc.tex_hull;
+        gp.tex_deck       = &g_sc.tex_deck;
+        gp.tex_sail       = &g_sc.tex_sail;
+        if (ef_ocean) { gp.ocean_mtk_src = ef_ocean->src; gp.ocean_mtk_len = ef_ocean->len; }
+        if (ef_sky)   { gp.sky_mtk_src   = ef_sky->src;   gp.sky_mtk_len   = ef_sky->len;   }
+        if (ef_lit)   { gp.lit_mtk_src   = ef_lit->src;   gp.lit_mtk_len   = ef_lit->len;   }
+        if (ef_unlit) { gp.unlit_mtk_src = ef_unlit->src; gp.unlit_mtk_len = ef_unlit->len; }
+
+        if (gpu_ocean_render(frame, &gp, &g_sc.tris_drawn)) {
+            g_sc.gpu_spectrum_dirty = FALSE;
+            g_sc.gpu_first_update   = FALSE;
+            g_sc.shade_ms = (f32)engine_gpu_frame_time_us() * 0.001f;
+
+            /* 2B HUD katmanı için arka planı saydam temizle (alttaki 1080p WebGPU tuvali görünsün) */
+            fb_clear(fb, 0u);
+            if (g_sc.wireframe > 0u) {
+                Mat4 proj_fb = camera_proj(&g_sc.cam, (f32)fb->w / (f32)fb->h);
+                draw_ocean_wireframe(&g_sc.ocean, fb, mat4_mul(proj_fb, view));
+            }
+
+            g_sc.debug_buf[0]  = g_sc.fft_ms;
+            g_sc.debug_buf[1]  = g_sc.mesh_ms;
+            g_sc.debug_buf[2]  = g_sc.shade_ms;
+            g_sc.debug_buf[3]  = g_sc.ocean.hs;
+            g_sc.debug_buf[4]  = g_sc.ocean.theory_hs;
+            g_sc.debug_buf[5]  = g_sc.ocean.d.wind_speed;
+            g_sc.debug_buf[6]  = g_sc.ocean.d.choppy;
+            g_sc.debug_buf[7]  = g_sc.paused ? 0.0f : g_sc.time_scale;
+            g_sc.debug_buf[8]  = g_sc.boat.pos.y;
+            g_sc.debug_buf[9]  = g_sc.boat.pitch;
+            g_sc.debug_buf[10] = g_sc.boat.roll;
+            g_sc.debug_buf[11] = (f32)g_sc.tris_drawn;
+            return;
+        }
+    }
+
+    /* (4) 3D Sahne Çizimi (CPU yedek yolu) */
     fb_clear(fb, FB_RGBA(12, 24, 42, 255));
     fb_clear_depth(fb, 0.0f);
 
@@ -726,7 +826,6 @@ void scene_ocean_frame(Rasterizer* r, Framebuffer* fb, Arena* frame, const Shade
     mat_em.depth_test  = TRUE;
     mat_em.depth_write = TRUE;
 
-    Mat4 boat_m = boat_world_matrix(&g_sc.boat);
     /* Gövde ve güverte */
     draw_boat_part(&ctx, frame, &mat_lit, g_sc.hull_mesh, boat_m,
                    vec3(0.0f, 0.0f, 0.0f), vec3(1.0f, 1.0f, 1.0f), 0.0f,
@@ -885,10 +984,21 @@ void scene_ocean_draw_hud(UiContext* ui, const Framebuffer* fb) {
     i32 y = (i32)fb->h - 24;
     ui_draw_rect(ui, 0, y - 14, (i32)fb->w, 38, FB_RGBA(10, 16, 28, 195));
 
-    fmt_format(line, sizeof(line),
-               "FFT %.2fms | Mesh %.2fms | Shade %.2fms | Hs=%.2fm (teo %.2fm) | Ucgen %u",
-               (f64)g_sc.fft_ms, (f64)g_sc.mesh_ms, (f64)g_sc.shade_ms,
-               (f64)g_sc.ocean.hs, (f64)g_sc.ocean.theory_hs, g_sc.tris_drawn);
+    if (engine_gpu_available()) {
+        u32 vp_w = engine_gpu_viewport_width();
+        u32 vp_h = engine_gpu_viewport_height();
+        f64 gpu_ms = (f64)engine_gpu_frame_time_us() * 0.001;
+        const char* ts_tag = engine_gpu_has_timestamp() ? "ts" : "sub";
+        fmt_format(line, sizeof(line),
+                   "GPU %ux%u | GPU %.2fms (%s) | Fizik %.2fms | Hs=%.2fm (teo %.2fm) | Ucgen %u",
+                   vp_w, vp_h, gpu_ms, ts_tag, (f64)g_sc.fft_ms,
+                   (f64)g_sc.ocean.hs, (f64)g_sc.ocean.theory_hs, g_sc.tris_drawn);
+    } else {
+        fmt_format(line, sizeof(line),
+                   "CPU %ux%u | FFT %.2fms | Mesh %.2fms | Shade %.2fms | Hs=%.2fm (teo %.2fm) | Ucgen %u",
+                   fb->w, fb->h, (f64)g_sc.fft_ms, (f64)g_sc.mesh_ms, (f64)g_sc.shade_ms,
+                   (f64)g_sc.ocean.hs, (f64)g_sc.ocean.theory_hs, g_sc.tris_drawn);
+    }
     ui_draw_text(ui, 5, y - 11, line, FB_RGBA(110, 230, 255, 255), 1);
 
     const char* wf_str = (g_sc.wireframe == 0u) ? "Kap" : (g_sc.wireframe == 1u) ? "Karma" : "Tel";
@@ -922,7 +1032,9 @@ void scene_ocean_debug_cmd(u32 cmd, f32 a, f32 b, f32 c) {
         }
         g_sc.sim_time = (f64)a;
         g_sc.paused   = TRUE;
-        g_sc.ocean.has_updated = FALSE;
+        g_sc.ocean.has_updated  = FALSE;
+        g_sc.gpu_spectrum_dirty = TRUE;
+        g_sc.gpu_first_update   = TRUE;
         ocean_update(&g_sc.ocean, g_sc.sim_time, 0.0f);
         reset_boat_to_water(&g_sc);
         g_sc.cam.target = vec3(g_sc.boat.pos.x, g_sc.boat.pos.y * 0.45f + 1.15f, g_sc.boat.pos.z);

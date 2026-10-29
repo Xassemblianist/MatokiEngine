@@ -1916,7 +1916,9 @@ u32 mtk_compile_wgsl(const char* src, u32 len, const char* filename, const MtkWg
 
     char err[256];
     err[0] = '\0';
-    u32 n = mtk_wgsl_frag(&ir, layout, o, out, out_cap, err, sizeof(err));
+    u32 n = ir.is_compute
+        ? mtk_wgsl_compute(&ir, layout, o, out, out_cap, err, sizeof(err))
+        : mtk_wgsl_frag(&ir, layout, o, out, out_cap, err, sizeof(err));
     if (n == 0 && diag) {
         mtk_diag_error(diag, filename, src, len, 1, 1, "WGSL codegen hatasi: %s", err);
     }

@@ -9,6 +9,10 @@
 
 static Rhi*         g_active_rhi;
 static b32          g_gpu_available;
+static u32          g_gpu_viewport_w = 1920u;
+static u32          g_gpu_viewport_h = 1080u;
+static u32          g_gpu_frame_time_us;
+static b32          g_gpu_has_timestamp;
 static RhiErrorRing g_fallback_errors = { 0, 0, RHI_ERROR_RING_CAP, 0, { { 0 } } };
 
 static void copy_entry_name(char dst[16], const char* src, const char* fallback) {
@@ -113,11 +117,12 @@ Rhi* rhi_active(void) {
 
 void rhi_begin_frame(Rhi* rhi) {
     if (!rhi || !rhi->stream_buf || rhi->stream_cap < sizeof(RhiStreamHeader)) return;
-    rhi->stream_used  = (u32)sizeof(RhiStreamHeader);
-    rhi->cmd_count    = 0u;
-    rhi->in_pass      = FALSE;
-    rhi->overflow     = FALSE;
-    rhi->dropped_cmds = 0u;
+    rhi->stream_used     = (u32)sizeof(RhiStreamHeader);
+    rhi->cmd_count       = 0u;
+    rhi->in_pass         = FALSE;
+    rhi->in_compute_pass = FALSE;
+    rhi->overflow        = FALSE;
+    rhi->dropped_cmds    = 0u;
     rhi_sync_header(rhi);
 }
 
@@ -296,7 +301,7 @@ RhiPipeline rhi_create_pipeline(Rhi* rhi, const RhiPipelineDesc* desc) {
     cmd->color_format    = (u32)desc->color_format;
     cmd->blend_mode      = (u32)desc->blend_mode;
     cmd->depth_format    = (u32)desc->depth_format;
-    cmd->depth_test      = desc->depth_test ? 1u : 0u;
+    cmd->depth_test      = (desc->depth_test ? 1u : 0u) | ((desc->sample_count & 0xFFu) << 8);
     cmd->depth_write     = desc->depth_write ? 1u : 0u;
     cmd->depth_compare   = (u32)desc->depth_compare;
 
@@ -306,21 +311,43 @@ RhiPipeline rhi_create_pipeline(Rhi* rhi, const RhiPipelineDesc* desc) {
     return h;
 }
 
+RhiComputePipeline rhi_create_compute_pipeline(Rhi* rhi, const RhiComputePipelineDesc* desc) {
+    if (!rhi || !desc || !rhi_handle_valid(rhi, desc->shader, RHI_RES_SHADER)) {
+        if (rhi) rhi->dropped_cmds++;
+        return RHI_INVALID_HANDLE;
+    }
+    u32 idx = 0u;
+    if (!rhi_find_free_slot(rhi, &idx)) {
+        rhi->dropped_cmds++;
+        return RHI_INVALID_HANDLE;
+    }
+    RhiCmdCreateComputePipeline* cmd = (RhiCmdCreateComputePipeline*)rhi_alloc_cmd(
+        rhi, RHI_CMD_CREATE_COMPUTE_PIPELINE, (u32)sizeof(RhiCmdCreateComputePipeline));
+    if (!cmd) return RHI_INVALID_HANDLE;
+
+    RhiComputePipeline h = rhi_commit_slot(rhi, idx, RHI_RES_COMPUTE_PIPELINE);
+    cmd->handle = h;
+    cmd->shader = desc->shader;
+    copy_entry_name(cmd->entry, desc->entry, "main");
+    return h;
+}
+
 RhiBindGroup rhi_create_bind_group(Rhi* rhi, const RhiBindGroupDesc* desc) {
     if (!rhi || !desc || desc->entry_count == 0u || desc->entry_count > RHI_MAX_BINDINGS ||
         desc->group_index > 3u) {
         if (rhi) rhi->dropped_cmds++;
         return RHI_INVALID_HANDLE;
     }
-    if (!rhi_handle_valid(rhi, desc->pipeline, RHI_RES_PIPELINE)) {
+    if (!rhi_handle_valid(rhi, desc->pipeline, RHI_RES_PIPELINE) &&
+        !rhi_handle_valid(rhi, desc->pipeline, RHI_RES_COMPUTE_PIPELINE)) {
         rhi->dropped_cmds++;
         return RHI_INVALID_HANDLE;
     }
     for (u32 i = 0u; i < desc->entry_count; i++) {
         const RhiBindEntry* e = &desc->entries[i];
         RhiResourceType expected = RHI_RES_NONE;
-        if (e->kind == RHI_BIND_BUFFER)       expected = RHI_RES_BUFFER;
-        else if (e->kind == RHI_BIND_TEXTURE) expected = RHI_RES_TEXTURE;
+        if (e->kind == RHI_BIND_BUFFER || e->kind == RHI_BIND_STORAGE_BUFFER) expected = RHI_RES_BUFFER;
+        else if (e->kind == RHI_BIND_TEXTURE || e->kind == RHI_BIND_STORAGE_TEXTURE) expected = RHI_RES_TEXTURE;
         else if (e->kind == RHI_BIND_SAMPLER) expected = RHI_RES_SAMPLER;
         else {
             rhi->dropped_cmds++;
@@ -415,7 +442,10 @@ b32 rhi_write_texture(Rhi* rhi, RhiTexture dst, u32 mip_level,
         rhi->dropped_cmds++;
         return FALSE;
     }
-    u32 min_row = width * 4u;
+    u32 bpp = 4u;
+    if (s->format == (u32)RHI_FMT_RGBA16_FLOAT) bpp = 8u;
+    else if (s->format == (u32)RHI_FMT_RGBA32_FLOAT) bpp = 16u;
+    u32 min_row = width * bpp;
     if (bytes_per_row < min_row) {
         rhi->dropped_cmds++;
         return FALSE;
@@ -445,7 +475,7 @@ b32 rhi_write_texture(Rhi* rhi, RhiTexture dst, u32 mip_level,
 }
 
 b32 rhi_begin_pass(Rhi* rhi, const RhiPassDesc* desc) {
-    if (!rhi || !desc || rhi->in_pass) {
+    if (!rhi || !desc || rhi->in_pass || rhi->in_compute_pass) {
         if (rhi) rhi->dropped_cmds++;
         return FALSE;
     }
@@ -463,7 +493,7 @@ b32 rhi_begin_pass(Rhi* rhi, const RhiPassDesc* desc) {
         rhi, RHI_CMD_BEGIN_PASS, (u32)sizeof(RhiCmdBeginPass));
     if (!cmd) return FALSE;
 
-    u32 flags = 0u;
+    u32 flags = (desc->sample_count & 0xFFu) << 8;
     if (desc->clear_color) flags |= RHI_PASS_CLEAR_COLOR;
     if (desc->clear_depth) flags |= RHI_PASS_CLEAR_DEPTH;
 
@@ -492,7 +522,7 @@ b32 rhi_set_pipeline(Rhi* rhi, RhiPipeline pipeline) {
 }
 
 b32 rhi_set_bind_group(Rhi* rhi, u32 group_index, RhiBindGroup bind_group) {
-    if (!rhi || !rhi->in_pass || group_index > 3u ||
+    if (!rhi || (!rhi->in_pass && !rhi->in_compute_pass) || group_index > 3u ||
         !rhi_handle_valid(rhi, bind_group, RHI_RES_BIND_GROUP)) {
         if (rhi) rhi->dropped_cmds++;
         return FALSE;
@@ -606,8 +636,59 @@ b32 rhi_end_pass(Rhi* rhi) {
     return TRUE;
 }
 
+b32 rhi_begin_compute_pass(Rhi* rhi) {
+    if (!rhi || rhi->in_pass || rhi->in_compute_pass) {
+        if (rhi) rhi->dropped_cmds++;
+        return FALSE;
+    }
+    RhiCmdBeginComputePass* cmd = (RhiCmdBeginComputePass*)rhi_alloc_cmd(
+        rhi, RHI_CMD_BEGIN_COMPUTE_PASS, (u32)sizeof(RhiCmdBeginComputePass));
+    if (!cmd) return FALSE;
+    rhi->in_compute_pass = TRUE;
+    return TRUE;
+}
+
+b32 rhi_set_compute_pipeline(Rhi* rhi, RhiComputePipeline pipeline) {
+    if (!rhi || !rhi->in_compute_pass ||
+        !rhi_handle_valid(rhi, pipeline, RHI_RES_COMPUTE_PIPELINE)) {
+        if (rhi) rhi->dropped_cmds++;
+        return FALSE;
+    }
+    RhiCmdSetComputePipeline* cmd = (RhiCmdSetComputePipeline*)rhi_alloc_cmd(
+        rhi, RHI_CMD_SET_COMPUTE_PIPELINE, (u32)sizeof(RhiCmdSetComputePipeline));
+    if (!cmd) return FALSE;
+    cmd->pipeline = pipeline;
+    return TRUE;
+}
+
+b32 rhi_dispatch(Rhi* rhi, u32 groups_x, u32 groups_y, u32 groups_z) {
+    if (!rhi || !rhi->in_compute_pass || groups_x == 0u || groups_y == 0u || groups_z == 0u) {
+        if (rhi) rhi->dropped_cmds++;
+        return FALSE;
+    }
+    RhiCmdDispatch* cmd = (RhiCmdDispatch*)rhi_alloc_cmd(
+        rhi, RHI_CMD_DISPATCH, (u32)sizeof(RhiCmdDispatch));
+    if (!cmd) return FALSE;
+    cmd->x = groups_x;
+    cmd->y = groups_y;
+    cmd->z = groups_z;
+    return TRUE;
+}
+
+b32 rhi_end_compute_pass(Rhi* rhi) {
+    if (!rhi || !rhi->in_compute_pass) {
+        if (rhi) rhi->dropped_cmds++;
+        return FALSE;
+    }
+    RhiCmdEndComputePass* cmd = (RhiCmdEndComputePass*)rhi_alloc_cmd(
+        rhi, RHI_CMD_END_COMPUTE_PASS, (u32)sizeof(RhiCmdEndComputePass));
+    if (!cmd) return FALSE;
+    rhi->in_compute_pass = FALSE;
+    return TRUE;
+}
+
 b32 rhi_present(Rhi* rhi) {
-    if (!rhi || rhi->in_pass) {
+    if (!rhi || rhi->in_pass || rhi->in_compute_pass) {
         if (rhi) rhi->dropped_cmds++;
         return FALSE;
     }
@@ -699,6 +780,10 @@ EXPORT(engine_gpu_cmd_bytes) u32 engine_gpu_cmd_bytes(void) {
     return g_active_rhi ? g_active_rhi->stream_used : 0u;
 }
 
+EXPORT(engine_gpu_clear_cmds) void engine_gpu_clear_cmds(void) {
+    if (g_active_rhi) rhi_begin_frame(g_active_rhi);
+}
+
 EXPORT(engine_gpu_error_ring) RhiErrorRing* engine_gpu_error_ring(void) {
     return g_active_rhi ? &g_active_rhi->errors : &g_fallback_errors;
 }
@@ -706,4 +791,35 @@ EXPORT(engine_gpu_error_ring) RhiErrorRing* engine_gpu_error_ring(void) {
 EXPORT(engine_gpu_push_error) b32 engine_gpu_push_error(
     u32 kind, u32 handle, u32 line, u32 col, const char* msg, u32 msg_len) {
     return rhi_push_error(g_active_rhi, (RhiErrorKind)kind, handle, line, col, msg, msg_len);
+}
+
+EXPORT(engine_gpu_set_viewport_size) void engine_gpu_set_viewport_size(u32 width, u32 height) {
+    if (width > 0u && height > 0u) {
+        g_gpu_viewport_w = width;
+        g_gpu_viewport_h = height;
+    }
+}
+
+EXPORT(engine_gpu_viewport_width) u32 engine_gpu_viewport_width(void) {
+    return g_gpu_viewport_w;
+}
+
+EXPORT(engine_gpu_viewport_height) u32 engine_gpu_viewport_height(void) {
+    return g_gpu_viewport_h;
+}
+
+EXPORT(engine_gpu_set_frame_time_us) void engine_gpu_set_frame_time_us(u32 us) {
+    g_gpu_frame_time_us = us;
+}
+
+EXPORT(engine_gpu_frame_time_us) u32 engine_gpu_frame_time_us(void) {
+    return g_gpu_frame_time_us;
+}
+
+EXPORT(engine_gpu_set_has_timestamp) void engine_gpu_set_has_timestamp(b32 has_ts) {
+    g_gpu_has_timestamp = has_ts ? TRUE : FALSE;
+}
+
+EXPORT(engine_gpu_has_timestamp) b32 engine_gpu_has_timestamp(void) {
+    return g_gpu_has_timestamp;
 }

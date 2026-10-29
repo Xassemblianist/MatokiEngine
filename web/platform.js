@@ -7,9 +7,11 @@
 import { detectCaps, applyCapsToEngine, CAP_WORKER_RENDER } from "./caps.js";
 import { createJitLoader } from "./jit.js";
 import { startThreads, startRenderWorker } from "./threads.js";
+import { initGpu } from "./gpu.js";
 
 const decoder = new TextDecoder("utf-8");
 const canvas = document.getElementById("screen");
+const gpuCanvas = document.getElementById("gpu-screen");
 const panicOverlay = document.getElementById("panic-overlay");
 
 let memory = null;
@@ -410,12 +412,12 @@ async function init() {
   const caps = await detectCaps();
   const mod = await fetchEngineModule(caps);
 
-  const forceMain =
-    typeof location !== "undefined" &&
-    new URLSearchParams(location.search).get("worker") === "0";
+  const urlParams = typeof location !== "undefined" ? new URLSearchParams(location.search) : null;
+  const forceWorker = urlParams && urlParams.get("worker") === "1";
 
   const canWorkerRender =
-    !forceMain &&
+    forceWorker &&
+    !caps.webgpu &&
     !caps.isSt &&
     caps.offscreenCanvas &&
     caps.sab &&
@@ -500,8 +502,8 @@ async function init() {
     }
   }
 
-  // 2) Yedek yol: Ana iş parçacığında render (OffscreenCanvas yoksa, ST moduysa veya ?worker=0 ise)
-  const ctx = canvas.getContext("2d", { alpha: false });
+  // 2) Ana iş parçacığında render + Worker thread havuzu + WebGPU hibrit yolu
+  const ctx = canvas.getContext("2d", { alpha: true });
   table = createTableForModule(mod);
 
   const isSt = Boolean(caps.isSt || !caps.sab);
@@ -578,7 +580,36 @@ async function init() {
   }
 
   applyCapsToEngine(exports, caps);
+
+  let gpu = null;
+  if (gpuCanvas) {
+    gpuCanvas.width = screenRes.sw;
+    gpuCanvas.height = screenRes.sh;
+    try {
+      gpu = await initGpu(gpuCanvas, exports, memory, {
+        width: screenRes.sw,
+        height: screenRes.sh,
+        enableTestReadback: false,
+      });
+    } catch (err) {
+      console.warn("[platform] WebGPU başlatılamadı, CPU yoluna düşülüyor:", err);
+      gpu = null;
+    }
+  }
+
   exports.engine_init(Date.now() >>> 0);
+
+  const sceneParam = urlParams ? urlParams.get("scene") : null;
+  if (sceneParam && typeof exports.engine_set_scene === "function") {
+    if (sceneParam === "ocean" || sceneParam === "okyanus") {
+      exports.engine_set_scene(8, 0, 0, 1);
+    } else {
+      const sn = parseInt(sceneParam, 10);
+      if (sn >= 1 && sn <= 9) {
+        exports.engine_set_scene(sn - 1, 0, 0, 1);
+      }
+    }
+  }
 
   if (typeof exports.engine_set_screen_size === "function") {
     exports.engine_set_screen_size(screenRes.sw, screenRes.sh);
@@ -592,12 +623,16 @@ async function init() {
     if (typeof exports.engine_set_screen_size === "function") {
       exports.engine_set_screen_size(s.sw, s.sh);
     }
+    if (gpu && typeof gpu.resize === "function") {
+      gpu.resize(s.sw, s.sh);
+    }
   });
 
   globalThis.matoki = {
     exports,
     memory,
     caps,
+    gpu,
     workerRender: false,
     callAsync: async (fn, ...args) => (typeof exports[fn] === "function" ? exports[fn](...args) : undefined),
     cycleResolution: () => (typeof exports.engine_cycle_resolution === "function" ? exports.engine_cycle_resolution() : undefined),
@@ -670,6 +705,9 @@ async function init() {
     try {
       if (isLocked() && !wantsLock()) document.exitPointerLock();
       if (typeof onNextFrame === "function") onNextFrame();
+      if (typeof exports.engine_gpu_clear_cmds === "function") {
+        exports.engine_gpu_clear_cmds();
+      }
       exports.engine_frame(now, dt);
     } catch (err) {
       if (running) {
@@ -679,6 +717,18 @@ async function init() {
     }
 
     if (!running) return;
+    const cmdBytes =
+      typeof exports.engine_gpu_cmd_bytes === "function"
+        ? exports.engine_gpu_cmd_bytes() >>> 0
+        : 0;
+    if (gpu && cmdBytes > 16) {
+      gpu.executeFrame();
+      if (gpuCanvas && gpuCanvas.style.display !== "block") {
+        gpuCanvas.style.display = "block";
+      }
+    } else if (gpuCanvas && gpuCanvas.style.display !== "none") {
+      gpuCanvas.style.display = "none";
+    }
     refreshFbViews();
     if (isShared) {
       localFbBuf.set(fbView);
