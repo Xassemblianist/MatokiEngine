@@ -704,3 +704,31 @@ TEST(gpu_rhi_compute_and_msaa) {
     CHECK(sum.op_counts[RHI_CMD_DRAW_INDEXED_INDIRECT]   == 1u);
 }
 
+
+/* --- Farklı Rhi örnekleri çakışmayan handle üretir (JS tüm kaynakları tek haritada tutar) --- */
+
+TEST(gpu_rhi_handles_unique_across_instances) {
+    static u8 mem_a[KB(32)];
+    static u8 mem_b[KB(32)];
+    static Rhi rhi_a;
+    static Rhi rhi_b;
+    Arena arena_a, arena_b;
+    arena_init(&arena_a, mem_a, sizeof(mem_a));
+    arena_init(&arena_b, mem_b, sizeof(mem_b));
+    CHECK(rhi_init(&rhi_a, &arena_a, 16u, KB(8)));
+    CHECK(rhi_init(&rhi_b, &arena_b, 16u, KB(8)));
+    CHECK(rhi_a.owner_id != rhi_b.owner_id);
+
+    RhiBuffer a = rhi_create_buffer(&rhi_a, 64u, RHI_BUF_VERTEX);
+    RhiBuffer b = rhi_create_buffer(&rhi_b, 64u, RHI_BUF_VERTEX);
+    CHECK(a != RHI_INVALID_HANDLE && b != RHI_INVALID_HANDLE);
+    CHECK(a != b);
+    CHECK(rhi_handle_valid(&rhi_a, a, RHI_RES_BUFFER));
+    CHECK(!rhi_handle_valid(&rhi_b, a, RHI_RES_BUFFER));
+
+    /* Yeniden ilklenen Rhi aynı sahip kimliğini korur */
+    u32 owner_a = rhi_a.owner_id;
+    arena_init(&arena_a, mem_a, sizeof(mem_a));
+    CHECK(rhi_init(&rhi_a, &arena_a, 16u, KB(8)));
+    CHECK(rhi_a.owner_id == owner_a);
+}

@@ -42,9 +42,13 @@ typedef enum {
     RHI_RES_COMPUTE_PIPELINE = 7
 } RhiResourceType;
 
+/* Handle: tip(8) | nesil(8) | sahip(4) | slot(12). JS tüm Rhi örneklerinin kaynaklarını tek
+ * haritada tutar; sahip alanı (Rhi.owner_id) farklı Rhi'lerin handle'larının çakışmasını önler. */
+#define RHI_MAX_SLOTS 0x0FFFu
 #define RHI_HANDLE_MAKE(type, gen, idx) \
     ((((u32)(type) & 0xFFu) << 24) | (((u32)(gen) & 0xFFu) << 16) | ((u32)(idx) & 0xFFFFu))
-#define RHI_HANDLE_INDEX(h) ((u32)((h) & 0xFFFFu))
+#define RHI_HANDLE_INDEX(h) ((u32)((h) & RHI_MAX_SLOTS))
+#define RHI_HANDLE_OWNER(h) ((u32)(((h) >> 12) & 0xFu))
 #define RHI_HANDLE_GEN(h)   ((u32)(((h) >> 16) & 0xFFu))
 #define RHI_HANDLE_TYPE(h)  ((RhiResourceType)(((h) >> 24) & 0xFFu))
 
@@ -564,6 +568,7 @@ typedef struct {
 typedef struct {
     RhiResourceSlot* slots;       /* [max_resources + 1], 1-tabanlı */
     u32              max_resources;
+    u32              owner_id;    /* handle'ların sahip alanı (0..15), Rhi nesnesi başına sabit */
     u32              live_count;
     u8*              stream_buf;  /* Komut akışı tamponu (Arena'dan, 16-bayt hizalı) */
     u32              stream_cap;  /* Tampon kapasitesi (bayt, >= sizeof(RhiStreamHeader)) */

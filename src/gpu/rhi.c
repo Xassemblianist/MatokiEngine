@@ -14,6 +14,21 @@ static u32          g_gpu_viewport_h = 1080u;
 static u32          g_gpu_frame_time_us;
 static b32          g_gpu_has_timestamp;
 static RhiErrorRing g_fallback_errors = { 0, 0, RHI_ERROR_RING_CAP, 0, { { 0 } } };
+static const Rhi*   g_rhi_owners[16];   /* sahip kimliği → Rhi nesnesi; [0] = tablo dolu yedeği */
+
+/* Aynı Rhi nesnesi (yeniden ilklense de) hep aynı sahip kimliğini alır */
+static u32 rhi_owner_for(const Rhi* rhi) {
+    for (u32 i = 1u; i < 16u; i++) {
+        if (g_rhi_owners[i] == rhi) return i;
+    }
+    for (u32 i = 1u; i < 16u; i++) {
+        if (g_rhi_owners[i] == NULL) {
+            g_rhi_owners[i] = rhi;
+            return i;
+        }
+    }
+    return 0u;
+}
 
 static void copy_entry_name(char dst[16], const char* src, const char* fallback) {
     const char* s = (src && src[0] != '\0') ? src : fallback;
@@ -77,13 +92,13 @@ static RhiHandle rhi_commit_slot(Rhi* rhi, u32 idx, RhiResourceType type) {
     s->gen   = next_gen;
     s->alive = TRUE;
     rhi->live_count++;
-    return RHI_HANDLE_MAKE(type, next_gen, idx);
+    return RHI_HANDLE_MAKE(type, next_gen, (rhi->owner_id << 12) | idx);
 }
 
 b32 rhi_init(Rhi* rhi, Arena* arena, u32 max_resources, u32 stream_cap) {
     if (!rhi || !arena) return FALSE;
     if (max_resources == 0u) max_resources = RHI_DEFAULT_MAX_RES;
-    if (max_resources > 0xFFFEu) max_resources = 0xFFFEu;
+    if (max_resources > RHI_MAX_SLOTS) max_resources = RHI_MAX_SLOTS;
     if (stream_cap < sizeof(RhiStreamHeader)) return FALSE;
     stream_cap = (u32)ALIGN_UP(stream_cap, 4u);
 
@@ -96,6 +111,7 @@ b32 rhi_init(Rhi* rhi, Arena* arena, u32 max_resources, u32 stream_cap) {
     __builtin_memset(rhi, 0, sizeof(*rhi));
     rhi->slots         = ARENA_PUSH_ARRAY(arena, RhiResourceSlot, max_resources + 1u);
     rhi->max_resources = max_resources;
+    rhi->owner_id      = rhi_owner_for(rhi);
     rhi->stream_buf    = (u8*)arena_push(arena, stream_cap, 16u);
     rhi->stream_cap    = stream_cap;
     rhi->errors.capacity = RHI_ERROR_RING_CAP;
@@ -144,6 +160,7 @@ b32 rhi_handle_valid(const Rhi* rhi, RhiHandle h, RhiResourceType expected_type)
     u32 gen = RHI_HANDLE_GEN(h);
     RhiResourceType type = RHI_HANDLE_TYPE(h);
     if (idx == 0u || idx > rhi->max_resources || gen == 0u) return FALSE;
+    if (RHI_HANDLE_OWNER(h) != rhi->owner_id) return FALSE;
     const RhiResourceSlot* s = &rhi->slots[idx];
     if (!s->alive || s->gen != gen || s->type != type) return FALSE;
     if (expected_type != RHI_RES_NONE && type != expected_type) return FALSE;
