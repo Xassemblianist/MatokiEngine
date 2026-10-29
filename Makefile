@@ -96,6 +96,13 @@ build/host/%: build/host/tools/host/tool_%.o $(HOST_LIB_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_LDFLAGS) $^ -o $@
 
+build/host/bench_memory: build/host/tools/host/bench_memory.o $(HOST_LIB_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_LDFLAGS) -lpthread $^ -o $@
+
+bench_mem: build/host/bench_memory
+	./build/host/bench_memory
+
 build/host/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
