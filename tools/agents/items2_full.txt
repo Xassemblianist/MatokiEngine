@@ -7,8 +7,8 @@ V1_sky_clouds gemini-4-argon-high G1_A_gpu_ocean
 G1_B_gpu_scene gemini-4-argon-high G1_A_gpu_ocean
 P1_B_solver_parallel gemini-4-argon-high P1_A_phys2_switch
 P1_E_phys_bench gemini-3.8-flash-high P1_A_phys2_switch
-T2_gpu_cpu_compare gemini-3.8-flash-high G1_A_gpu_ocean
+T2_gpu_cpu_compare gemini-3.8-flash-high
 V2_terrain gemini-4-argon-high G1_B_gpu_scene
-P1_F_gpu_fluid gemini-4-argon-high G1_B_gpu_scene
+P1_F_gpu_fluid gemini-4-argon-high G1_A_gpu_ocean
 Z1_next_wave gemini-4-argon-high V1_sky_clouds,P1_B_solver_parallel,V2_terrain,P1_F_gpu_fluid
-OYUN1_gelgit gemini-4-argon-high G1_A_gpu_ocean,V1_sky_clouds,G1_B_gpu_scene,P1_B_solver_parallel
+OYUN1_gelgit gemini-4-argon-high G1_A_gpu_ocean
