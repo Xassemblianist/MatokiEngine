@@ -13,15 +13,6 @@
 #include "gfx3d/mesh.h"
 #include "raster/texture.h"
 
-#define GPU_OCEAN_MAX_EXTRAS 28u
-
-typedef struct {
-    Mat4 model;
-    Vec4 color;
-    b32  is_unlit;
-    b32  use_hull_mesh; /* TRUE: hull_mesh, FALSE: unit_cube */
-} GpuOceanExtraDraw;
-
 typedef struct {
     const Ocean*   ocean;
     f64            sim_time;
@@ -34,13 +25,6 @@ typedef struct {
     Mat4           boat_model;
     Vec3           sun_dir;
     Vec3           sun_col;
-    Vec3           moon_dir;
-    f32            star_intensity;
-    f32            moon_intensity;
-    f32            cloud_coverage;
-    f32            cloud_wind_x;
-    f32            cloud_wind_z;
-    Mat4           prev_vp;
     Vec3           sky_zenith;
     Vec3           sky_horiz;
     Vec3           sea_deep;
@@ -65,12 +49,6 @@ typedef struct {
     u32            lit_mtk_len;
     const char*    unlit_mtk_src;
     u32            unlit_mtk_len;
-    /* İsteğe bağlı dinamik yelken, bulut ve ek 3D dünya nesneleri (Gelgit sahnesi için) */
-    b32               dynamic_sails;
-    f32               boom_angle;
-    f32               cloud_cover;
-    u32               extra_count;
-    GpuOceanExtraDraw extras[GPU_OCEAN_MAX_EXTRAS];
 } GpuOceanFrameParams;
 
 /* Tam çözünürlüklü GPU okyanus karesini RHI komut akışına kodlar.
@@ -81,9 +59,5 @@ b32 gpu_ocean_render(Arena* scratch, const GpuOceanFrameParams* p, u32* out_tris
  * derleyip ir_eval_compute ile koşturur ve CPU referans kademesiyle karşılaştırır. */
 b32 gpu_ocean_test_compute_fft(Arena* scratch, const Ocean* ref_ocean, u32 cascade_idx,
                                f64 sim_time, f32* out_max_err);
-
-/* Birim testi yardımcısı: V1 atmosfer + 3B bulut gürültüsü Matoki @compute çekirdeklerini
- * (transmittance, multiscatter, skyview, aerial, cloud_noise) derler ve fiziksel çıktılarını doğrular. */
-b32 gpu_ocean_test_atmos_compute(Arena* scratch);
 
 #endif /* GPU_OCEAN_H */

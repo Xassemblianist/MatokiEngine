@@ -193,7 +193,7 @@ const MtkVariant* mtk_variant_get(MtkVariantCache* cache, const MtkVariantKey* k
 
     ir_optimize(&ir);
 
-    u32 tmp_cap = 262144u;
+    u32 tmp_cap = 65536u;
     u8* tmp_wasm = ARENA_PUSH_ARRAY(scratch, u8, tmp_cap);
     char err[256];
     err[0] = '\0';
