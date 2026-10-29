@@ -346,7 +346,8 @@ static void gg_sync_ocean_to_state(const GelgitState* st, b32 force_rebuild) {
     f32 d_spd = m_abs(wspd - g_gg.last_ocean_wind_spd);
     f32 d_dir = m_abs(wx - g_gg.last_ocean_wind_x) + m_abs(wz - g_gg.last_ocean_wind_z);
     if (force_rebuild || d_spd > 0.65f || d_dir > 0.08f) {
-        ocean_set_wind(&g_gg.ocean, wspd, wx, wz, chop);
+        ocean_set_wind(&g_gg.ocean, wspd, wx, wz);
+        g_gg.ocean.d.choppy = chop;
         g_gg.last_ocean_wind_spd = wspd;
         g_gg.last_ocean_wind_x   = wx;
         g_gg.last_ocean_wind_z   = wz;
