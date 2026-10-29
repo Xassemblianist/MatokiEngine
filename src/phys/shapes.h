@@ -126,6 +126,7 @@ static inline Obb obb_make(Vec3 center, Vec3 half_extents, Mat3 axes) {
 
 static inline PhysShape shape_from_sphere(Sphere s) {
     PhysShape sh;
+    __builtin_memset(&sh, 0, sizeof(sh));
     sh.kind = SHAPE_SPHERE;
     sh.as.sphere = s;
     return sh;
@@ -133,6 +134,7 @@ static inline PhysShape shape_from_sphere(Sphere s) {
 
 static inline PhysShape shape_from_aabb(Aabb b) {
     PhysShape sh;
+    __builtin_memset(&sh, 0, sizeof(sh));
     sh.kind = SHAPE_AABB;
     sh.as.aabb = b;
     return sh;
@@ -140,6 +142,7 @@ static inline PhysShape shape_from_aabb(Aabb b) {
 
 static inline PhysShape shape_from_capsule(Capsule c) {
     PhysShape sh;
+    __builtin_memset(&sh, 0, sizeof(sh));
     sh.kind = SHAPE_CAPSULE;
     sh.as.capsule = c;
     return sh;
@@ -147,8 +150,17 @@ static inline PhysShape shape_from_capsule(Capsule c) {
 
 static inline PhysShape shape_from_plane(Plane p) {
     PhysShape sh;
+    __builtin_memset(&sh, 0, sizeof(sh));
     sh.kind = SHAPE_PLANE;
     sh.as.plane = p;
+    return sh;
+}
+
+static inline PhysShape shape_from_obb(Obb o) {
+    PhysShape sh;
+    __builtin_memset(&sh, 0, sizeof(sh));
+    sh.kind = SHAPE_OBB;
+    sh.as.obb = o;
     return sh;
 }
 

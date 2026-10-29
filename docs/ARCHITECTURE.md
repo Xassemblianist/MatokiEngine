@@ -34,6 +34,9 @@ src/  (C11 → engine.wasm)
  asset/   JSON (RFC 8259), base64, OBJ/MTL, glTF 2.0/GLB yükleyicileri — sıfırdan (M8_D)
  audio/   synth (osilatör, ADSR, sıralayıcı) + paylaşılan bellek ses halkası (M7_2)
  img/ ui/ PNG, prosedürel doku, font, immediate-mode UI (M7_0)
+ phys/    3D çarpışma (küre/AABB/kapsül/OBB/üçgen), SAH BVH, ışın izleme, sabit adımlı dünya (M9_B)
+ scene/   seyrek küme ECS, hiyerarşik Transform, yansıma tabanlı JSON sahne G/Ç (M10_B)
+ sim/     deterministik sabit adımlı simülasyon çekirdeği, durum anlık görüntüsü, rollback ve replay (M16_A)
  app/     demo uygulamaları, main.c
 
 tools/host/   native (Linux) test araçları — SADECE burada libc serbest

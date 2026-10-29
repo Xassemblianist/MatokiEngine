@@ -70,6 +70,12 @@ EcsWorld* ecs_world_create(Arena* a, u32 max_entities) {
 void ecs_world_clear(EcsWorld* w) {
     for (u32 c = 0u; c < w->comp_count; c++) {
         EcsStore* s = &w->stores[c];
+        if (s->count > 0u) {
+            __builtin_memset(s->dense_ent, 0, sizeof(EcsEntity) * (usize)s->count);
+            if (s->stride > 0u) {
+                __builtin_memset(s->data, 0, (usize)s->count * (usize)s->stride);
+            }
+        }
         s->count = 0u;
         __builtin_memset(s->sparse, 0xFF, sizeof(u32) * (usize)w->ent_cap);
     }
@@ -81,6 +87,12 @@ void ecs_world_clear(EcsWorld* w) {
     __builtin_memset(w->ent_handle, 0xFF, sizeof(EcsEntity) * (usize)w->ent_cap);
     __builtin_memset(w->ent_mask, 0, sizeof(u32) * (usize)w->ent_cap);
     __builtin_memset(w->ent_flags, 0, sizeof(u8) * (usize)w->ent_cap);
+    if (w->free_count > 0u) {
+        __builtin_memset(w->free_list, 0, sizeof(u32) * (usize)w->free_count);
+    }
+    if (w->cmd_count > 0u) {
+        __builtin_memset(w->cmds, 0, sizeof(EcsCmd) * (usize)w->cmd_count);
+    }
     w->ent_high_water = 0u;
     w->alive_count    = 0u;
     w->free_count     = 0u;
@@ -180,6 +192,7 @@ EcsEntity ecs_spawn(EcsWorld* w) {
     u32 idx;
     if (w->free_count > 0u) {
         idx = w->free_list[--w->free_count];
+        w->free_list[w->free_count] = 0u;
     } else {
         ASSERT(w->ent_high_water < w->ent_cap);
         idx = w->ent_high_water++;
@@ -212,8 +225,12 @@ static b32 ecs_store_remove_idx(EcsWorld* w, EcsCompId cid, u32 idx) {
         if (s->stride > 0u) {
             __builtin_memcpy(s->data + (usize)dense * (usize)s->stride,
                              s->data + (usize)last * (usize)s->stride,
-                             s->size);
+                             s->stride);
         }
+    }
+    s->dense_ent[last] = 0u;
+    if (s->stride > 0u) {
+        __builtin_memset(s->data + (usize)last * (usize)s->stride, 0, s->stride);
     }
     s->sparse[idx] = ECS_SPARSE_NIL;
     w->ent_mask[idx] &= ~(1u << cid);
@@ -298,9 +315,14 @@ void* ecs_set(EcsWorld* w, EcsEntity e, EcsCompId cid, const void* data) {
         w->ent_mask[idx] |= (1u << cid);
 
         u8* dst = s->data + (usize)dense * (usize)s->stride;
-        if (s->size > 0u) {
-            if (data) __builtin_memcpy(dst, data, s->size);
-            else      __builtin_memset(dst, 0, s->size);
+        if (s->stride > 0u) {
+            if (s->stride > s->size) {
+                __builtin_memset(dst + s->size, 0, s->stride - s->size);
+            }
+            if (s->size > 0u) {
+                if (data) __builtin_memcpy(dst, data, s->size);
+                else      __builtin_memset(dst, 0, s->size);
+            }
         }
         return dst;
     } else {
@@ -334,6 +356,7 @@ void ecs_flush(EcsWorld* w) {
     w->cmd_count = 0u;
     for (u32 i = 0u; i < n; i++) {
         EcsCmd cmd = w->cmds[i];
+        __builtin_memset(&w->cmds[i], 0, sizeof(EcsCmd));
         if (cmd.type == (u8)ECS_CMD_DESTROY) {
             ecs_destroy_immediate(w, cmd.entity);
         } else if (cmd.type == (u8)ECS_CMD_REMOVE) {
