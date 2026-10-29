@@ -15,6 +15,7 @@
 #define MTK_WGSL_UBO_BINDING      0u
 #define MTK_WGSL_TEX_BINDING(s)   (1u + (u32)(s) * 2u)
 #define MTK_WGSL_SAMP_BINDING(s)  (2u + (u32)(s) * 2u)
+#define MTK_WGSL_BUF_BINDING(s)   (1u + (u32)(s))
 
 #define MTK_WGSL_VERT_GROUP       1u
 #define MTK_WGSL_VERT_UBO_BINDING 0u
@@ -56,7 +57,12 @@ u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* o
 u32 mtk_wgsl_vert(const u8* attrs, u32 attr_count,
                   char* out, u32 out_cap, char* err, u32 err_cap);
 
-/* mtk_compile_ir + ir_optimize + mtk_wgsl_frag -> NUL sonlu WGSL fragment shader metni.
+/* Optimizasyon sonrası compute IrFunc'tan (@compute @workgroup_size(64)) NUL sonlu WGSL üretir.
+ * Başarıda yazılan karakter sayısını (NUL hariç) döner; hata durumunda 0 döner ve err doldurulur. */
+u32 mtk_wgsl_compute(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* opts,
+                     char* out, u32 out_cap, char* err, u32 err_cap);
+
+/* mtk_compile_ir + ir_optimize + mtk_wgsl_frag/compute -> NUL sonlu WGSL shader metni.
  * Başarıda yazılan karakter sayısını (NUL hariç) döner; hata durumunda 0 döner ve diag doldurulur. */
 u32 mtk_compile_wgsl(const char* src, u32 len, const char* filename, const MtkWgslOpts* o,
                      Arena* a, char* out, u32 out_cap, MtkLayout* layout, MtkDiag* diag);

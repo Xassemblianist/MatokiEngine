@@ -162,6 +162,12 @@ static Token lex_number(Lexer* l, u32 start_pos, u32 line, u32 col, b32 started_
         }
     }
 
+    /* Tam sayı literallerinde isteğe bağlı 'u'/'U' soneki (ör. 0u, 255u) */
+    if (!is_float && (lex_cur(l) == 'u' || lex_cur(l) == 'U') &&
+        !is_alpha(lex_peek_at(l, 1)) && !is_digit(lex_peek_at(l, 1))) {
+        lex_advance(l);
+    }
+
     /* Sayının hemen ardından harf veya ikinci bir nokta gelirse hata */
     if (is_alpha(lex_cur(l)) || (is_float && lex_cur(l) == '.' && lex_peek_at(l, 1) != '.')) {
         while (is_alpha(lex_cur(l)) || is_digit(lex_cur(l)) || lex_cur(l) == '.') {

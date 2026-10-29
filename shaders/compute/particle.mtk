@@ -1,0 +1,35 @@
+// Parçacık güncelleme compute çekirdeği (F0_A)
+// Her parçacık için yerçekimi, sönümleme, zemin sekmesi ve yaşam süresi entegrasyonu.
+
+uniform dt: f32;
+uniform gravity_y: f32;
+uniform damping: f32;
+uniform floor_y: f32;
+uniform bounce: f32;
+
+buffer pos: buffer<vec4>;
+buffer vel: buffer<vec4>;
+
+fn compute() {
+    let i: u32 = global_id;
+    let p: vec4 = pos[i];
+    let v: vec4 = vel[i];
+
+    var vx: f32 = v.x * damping;
+    var vy: f32 = (v.y + gravity_y * dt) * damping;
+    var vz: f32 = v.z * damping;
+
+    var px: f32 = p.x + vx * dt;
+    var py: f32 = p.y + vy * dt;
+    var pz: f32 = p.z + vz * dt;
+
+    if (py < floor_y) {
+        py = floor_y;
+        vy = abs(vy) * bounce;
+    }
+
+    let life: f32 = max(p.w - dt, 0.0);
+
+    pos[i] = vec4(px, py, pz, life);
+    vel[i] = vec4(vx, vy, vz, v.w);
+}

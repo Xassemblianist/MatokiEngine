@@ -122,6 +122,25 @@ typedef struct {
     /* 4x döngü açma (loop unrolling) durumu */
     u32 unroll_offset;
     u32 cached_var_idx;
+
+    /* Compute (F0_A) alanları */
+    u32 loc_gid;
+    u32 loc_end_gid;
+    u32 loc_fast_end;
+    u32 loc_buf_base[IR_MAX_BUFFERS];
+    u32 loc_buf_base_v[IR_MAX_BUFFERS];
+    u32 loc_v_gid;
+    u32 loc_v_end_gid;
+    u32 loc_v_step4;
+    u32 loc_vec4_load_cache[4];
+    u32 cached_vec4_load_slot;
+    u32 cached_vec4_load_idx;
+    u32 cached_vec4_load_reg;
+    b32 used_buf[IR_MAX_BUFFERS];
+    b32 has_vec4_buf;
+    b32 is_fast_body;
+    b32 vec4_store_head[CG_MAX_INSTS];
+    b32 vec4_store_skip[CG_MAX_INSTS];
 } CgCtx;
 
 static b32 cg_fail(char* err, u32 err_cap, const char* fmt, ...) {
@@ -174,7 +193,59 @@ static b32 is_all_ones_const(const IrInst* in) {
 static b32 can_inline_inst(const IrFunc* f, u32 idx) {
     const IrInst* in = &f->insts[idx];
     if (in->op == IR_NOP || in->type == IR_T_VOID) return FALSE;
+    if (in->op == IR_BUF_LOAD || in->op == IR_ATOMIC_ADD) return FALSE;
     return TRUE;
+}
+
+static b32 is_shr2_gid_index(const IrFunc* f, u32 idx_id) {
+    const IrInst* in = &f->insts[idx_id];
+    if ((in->op == IR_ISHR_U || in->op == IR_ISHR_S) &&
+        f->insts[in->a].op == IR_GLOBAL_ID &&
+        f->insts[in->b].op == IR_CONST_I32 &&
+        f->insts[in->b].imm.i == 2) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static b32 is_mul4_gid_inst(const IrFunc* f, u32 id) {
+    const IrInst* in = &f->insts[id];
+    if (in->op == IR_IMUL) {
+        if (f->insts[in->a].op == IR_GLOBAL_ID &&
+            f->insts[in->b].op == IR_CONST_I32 && f->insts[in->b].imm.i == 4) return TRUE;
+        if (f->insts[in->b].op == IR_GLOBAL_ID &&
+            f->insts[in->a].op == IR_CONST_I32 && f->insts[in->a].imm.i == 4) return TRUE;
+    }
+    if (in->op == IR_ISHL &&
+        f->insts[in->a].op == IR_GLOBAL_ID &&
+        f->insts[in->b].op == IR_CONST_I32 && f->insts[in->b].imm.i == 2) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static b32 is_strided4_gid_index(const IrFunc* f, u32 idx_id, u32* out_base_id, u32* out_comp) {
+    if (is_mul4_gid_inst(f, idx_id)) {
+        *out_base_id = idx_id;
+        *out_comp    = 0;
+        return TRUE;
+    }
+    const IrInst* in = &f->insts[idx_id];
+    if (in->op == IR_IADD) {
+        if (is_mul4_gid_inst(f, in->a) && f->insts[in->b].op == IR_CONST_I32 &&
+            f->insts[in->b].imm.i >= 0 && f->insts[in->b].imm.i < 4) {
+            *out_base_id = in->a;
+            *out_comp    = (u32)f->insts[in->b].imm.i;
+            return TRUE;
+        }
+        if (is_mul4_gid_inst(f, in->b) && f->insts[in->a].op == IR_CONST_I32 &&
+            f->insts[in->a].imm.i >= 0 && f->insts[in->a].imm.i < 4) {
+            *out_base_id = in->b;
+            *out_comp    = (u32)f->insts[in->a].imm.i;
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 /* Bir ifade ağacının (root) altında son kullanımı <= root olan farklı döngü-içi
@@ -226,6 +297,8 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
         ctx->select_fneg_mode[i] = 0;
         ctx->val_loc[i]          = IR_NONE;
         ctx->splat_loc[i]        = IR_NONE;
+        ctx->vec4_store_head[i]  = FALSE;
+        ctx->vec4_store_skip[i]  = FALSE;
     }
 
     /* 1. Bölge (IF/ELSE), varying IF derinliği, kullanılan özellikler ve preheader uygunluğunu belirle */
@@ -280,7 +353,8 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
          * türevlerden türeyen tüm mip seviyesi, boyut kaydırma ve taban ofset zinciri
          * döngü içinde skaler (i32/f32) olarak hesaplanır. */
         if (op == IR_DISCARD || op == IR_OUTPUT ||
-            op == IR_VARYING || op == IR_FRAG_X || op == IR_FRAG_Y) {
+            op == IR_VARYING || op == IR_FRAG_X || op == IR_FRAG_Y ||
+            op == IR_GLOBAL_ID || op == IR_BUF_LOAD || op == IR_BUF_STORE || op == IR_ATOMIC_ADD) {
             ctx->is_simd[i] = TRUE;
         } else if (op == IR_DERIV_X || op == IR_DERIV_Y) {
             ctx->is_simd[i] = FALSE;
@@ -316,6 +390,19 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
         } else if (op == IR_DISCARD) {
             ctx->has_discard = TRUE;
             if (stk_d > 0) ctx->has_discard_in_if = TRUE;
+        } else if (op == IR_BUF_LOAD || op == IR_BUF_STORE) {
+            u32 slot = IR_BUF_SLOT(in->imm.u);
+            if (slot < IR_MAX_BUFFERS) ctx->used_buf[slot] = TRUE;
+            if (IR_BUF_IS_VEC4(in->imm.u)) ctx->has_vec4_buf = TRUE;
+            if (op == IR_BUF_STORE && (stk_d > 0 || in->c != IR_NONE)) {
+                ctx->has_discard_in_if = TRUE;
+            }
+        } else if (op == IR_ATOMIC_ADD) {
+            if (in->imm.u < IR_MAX_BUFFERS) ctx->used_buf[in->imm.u] = TRUE;
+            ctx->use_count[i]++; /* yan etkili komut: sonucu kullanılmasa da silinmez */
+            if (stk_d > 0 || in->c != IR_NONE) {
+                ctx->has_discard_in_if = TRUE;
+            }
         }
 
         /* Preheader uygunluğu:
@@ -327,7 +414,8 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
                 op == IR_TEX_W || op == IR_TEX_H || op == IR_TEX_FLAGS || op == IR_TEX_LEVELS) {
                 ctx->is_preheader[i] = TRUE;
             } else if ((stk_d == 0 || (in->flags & IR_FLAG_HOISTED)) &&
-                       (op != IR_TEXEL_LOAD || stk_d == 0)) {
+                       (op != IR_TEXEL_LOAD || stk_d == 0) &&
+                       op != IR_BUF_LOAD && op != IR_ATOMIC_ADD) {
                 b32 ok = TRUE;
                 if (in->a != IR_NONE && !ctx->is_preheader[in->a]) ok = FALSE;
                 if (in->b != IR_NONE && !ctx->is_preheader[in->b]) ok = FALSE;
@@ -356,6 +444,7 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
 
         b32 consumer_is_var = ctx->is_simd[i];
         if (op == IR_DISCARD || op == IR_OUTPUT ||
+            op == IR_BUF_LOAD || op == IR_BUF_STORE || op == IR_ATOMIC_ADD ||
             ((op == IR_DERIV_X || op == IR_DERIV_Y) && (in->flags & IR_FLAG_VARYING))) {
             consumer_is_var = TRUE;
         }
@@ -555,6 +644,58 @@ static void analyze_liveness_and_trees(CgCtx* ctx) {
             }
         }
     }
+
+    /* 6. Compute vec4 (veya skaler gid*4+0..3) ardışık 4-bileşen store gruplarını tespit et */
+    for (u32 i = 0; i + 3 < n; i++) {
+        const IrInst* i0 = &f->insts[i];
+        const IrInst* i1 = &f->insts[i + 1];
+        const IrInst* i2 = &f->insts[i + 2];
+        const IrInst* i3 = &f->insts[i + 3];
+        if (i0->op == IR_BUF_STORE && i1->op == IR_BUF_STORE &&
+            i2->op == IR_BUF_STORE && i3->op == IR_BUF_STORE &&
+            i0->c == IR_NONE && i1->c == IR_NONE && i2->c == IR_NONE && i3->c == IR_NONE &&
+            ctx->inst_region[i] == ctx->inst_region[i + 3]) {
+            u32 slot = IR_BUF_SLOT(i0->imm.u);
+            if (IR_BUF_SLOT(i1->imm.u) != slot ||
+                IR_BUF_SLOT(i2->imm.u) != slot ||
+                IR_BUF_SLOT(i3->imm.u) != slot) {
+                continue;
+            }
+            b32 matched = FALSE;
+            if (IR_BUF_IS_VEC4(i0->imm.u) && IR_BUF_IS_VEC4(i1->imm.u) &&
+                IR_BUF_IS_VEC4(i2->imm.u) && IR_BUF_IS_VEC4(i3->imm.u) &&
+                i0->a == i1->a && i0->a == i2->a && i0->a == i3->a &&
+                IR_BUF_COMP(i0->imm.u) == 0 && IR_BUF_COMP(i1->imm.u) == 1 &&
+                IR_BUF_COMP(i2->imm.u) == 2 && IR_BUF_COMP(i3->imm.u) == 3) {
+                matched = TRUE;
+            } else if (!IR_BUF_IS_VEC4(i0->imm.u) && !IR_BUF_IS_VEC4(i1->imm.u) &&
+                       !IR_BUF_IS_VEC4(i2->imm.u) && !IR_BUF_IS_VEC4(i3->imm.u)) {
+                u32 b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+                u32 c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+                if (is_strided4_gid_index(f, i0->a, &b0, &c0) &&
+                    is_strided4_gid_index(f, i1->a, &b1, &c1) &&
+                    is_strided4_gid_index(f, i2->a, &b2, &c2) &&
+                    is_strided4_gid_index(f, i3->a, &b3, &c3) &&
+                    b0 == b1 && b0 == b2 && b0 == b3 &&
+                    c0 == 0 && c1 == 1 && c2 == 2 && c3 == 3) {
+                    matched = TRUE;
+                }
+            }
+            if (matched) {
+                ctx->vec4_store_head[i]     = TRUE;
+                ctx->vec4_store_skip[i + 1] = TRUE;
+                ctx->vec4_store_skip[i + 2] = TRUE;
+                ctx->vec4_store_skip[i + 3] = TRUE;
+                u32 end_step = i + 3;
+                if (ctx->last_use[i0->a] < end_step) ctx->last_use[i0->a] = end_step;
+                if (ctx->last_use[i0->b] < end_step) ctx->last_use[i0->b] = end_step;
+                if (ctx->last_use[i1->b] < end_step) ctx->last_use[i1->b] = end_step;
+                if (ctx->last_use[i2->b] < end_step) ctx->last_use[i2->b] = end_step;
+                if (ctx->last_use[i3->b] < end_step) ctx->last_use[i3->b] = end_step;
+                i += 3;
+            }
+        }
+    }
 }
 
 typedef struct {
@@ -729,6 +870,12 @@ static void allocate_locals(CgCtx* ctx) {
     for (u32 t = 0; t < SHADE_MAX_TEXTURES; t++) {
         if (ctx->used_tex_load_u[t]) fixed_i32++;
     }
+    if (f->is_compute) {
+        fixed_i32 += 3; /* loc_gid, loc_end_gid, loc_fast_end */
+        for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+            if (ctx->used_buf[b]) fixed_i32++;
+        }
+    }
 
     u32 base_i32 = mb_local(mf, MB_VAL_I32, fixed_i32 + pool_i32);
     u32 cur_i32  = base_i32;
@@ -761,6 +908,14 @@ static void allocate_locals(CgCtx* ctx) {
     for (u32 t = 0; t < SHADE_MAX_TEXTURES; t++) {
         ctx->loc_tex_px[t] = ctx->used_tex_load_u[t] ? cur_i32++ : IR_NONE;
     }
+    if (f->is_compute) {
+        ctx->loc_gid      = cur_i32++;
+        ctx->loc_end_gid  = cur_i32++;
+        ctx->loc_fast_end = cur_i32++;
+        for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+            ctx->loc_buf_base[b] = ctx->used_buf[b] ? cur_i32++ : IR_NONE;
+        }
+    }
     u32 next_i32 = cur_i32;
 
     /* 2. Grup: tüm f32 local'ler */
@@ -779,6 +934,12 @@ static void allocate_locals(CgCtx* ctx) {
         fixed_v128 += 9; /* zero, one, 255, half, fb_dst, out_ch[0..3] */
         if (ctx->opts->fuse_blend == MTK_FUSE_ALPHA || ctx->opts->fuse_blend == MTK_FUSE_ADD) {
             fixed_v128 += 2; /* inv255, ff */
+        }
+    }
+    if (f->is_compute) {
+        fixed_v128 += 7; /* loc_v_gid, loc_v_end_gid, loc_v_step4, loc_vec4_load_cache[0..3] */
+        for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+            if (ctx->used_buf[b]) fixed_v128++;
         }
     }
 
@@ -821,6 +982,17 @@ static void allocate_locals(CgCtx* ctx) {
             ctx->loc_v_ff     = cur_v128++;
         }
     }
+    if (f->is_compute) {
+        ctx->loc_v_gid     = cur_v128++;
+        ctx->loc_v_end_gid = cur_v128++;
+        ctx->loc_v_step4   = cur_v128++;
+        for (u32 c = 0; c < 4; c++) {
+            ctx->loc_vec4_load_cache[c] = cur_v128++;
+        }
+        for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+            ctx->loc_buf_base_v[b] = ctx->used_buf[b] ? cur_v128++ : IR_NONE;
+        }
+    }
     u32 next_v128 = cur_v128;
 
     /* Havuz slotlarına gerçek wasm local indekslerini ata */
@@ -844,6 +1016,95 @@ static void allocate_locals(CgCtx* ctx) {
 }
 
 static void emit_inst_expr(CgCtx* ctx, u32 idx);
+
+static inline void cg_i32_atomic_rmw_add(MbFunc* f, u32 align, u32 offset) {
+    mb_u8(&f->code, 0xFEu);
+    mb_uleb(&f->code, 0x1Eu);
+    mb_uleb(&f->code, (u64)align);
+    mb_uleb(&f->code, (u64)offset);
+}
+
+static b32 is_contiguous_gid_index(const CgCtx* ctx, u32 idx_id) {
+    const IrFunc* f = ctx->f;
+    const IrInst* in = &f->insts[idx_id];
+    if (in->op == IR_GLOBAL_ID) {
+        return TRUE;
+    }
+    if (in->op == IR_IADD) {
+        if (f->insts[in->a].op == IR_GLOBAL_ID && !ctx->is_simd[in->b]) {
+            return TRUE;
+        }
+        if (f->insts[in->b].op == IR_GLOBAL_ID && !ctx->is_simd[in->a]) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* 4 adet v128 yerel değişkeni (loc0..loc3) loc_tmp_v0 ve loc_tmp_v1 kullanarak yerinde 4x4 transpoze eder */
+static void emit_transpose_4x4(CgCtx* ctx, u32 loc0, u32 loc1, u32 loc2, u32 loc3) {
+    MbFunc* mf = ctx->mf;
+    static const u8 shuf_32_lo[16] = {
+        0, 1, 2, 3,   16, 17, 18, 19,
+        4, 5, 6, 7,   20, 21, 22, 23
+    };
+    static const u8 shuf_32_hi[16] = {
+        8,  9,  10, 11,  24, 25, 26, 27,
+        12, 13, 14, 15,  28, 29, 30, 31
+    };
+    static const u8 shuf_64_lo[16] = {
+        0,  1,  2,  3,   4,  5,  6,  7,
+        16, 17, 18, 19,  20, 21, 22, 23
+    };
+    static const u8 shuf_64_hi[16] = {
+        8,  9,  10, 11,  12, 13, 14, 15,
+        24, 25, 26, 27,  28, 29, 30, 31
+    };
+
+    /* tmp_v0 = shuffle(loc0, loc1, shuf_32_lo); tmp_v1 = shuffle(loc0, loc1, shuf_32_hi) */
+    mb_local_get(mf, loc0);
+    mb_local_get(mf, loc1);
+    mb_i8x16_shuffle(mf, shuf_32_lo);
+    mb_local_set(mf, ctx->loc_tmp_v0);
+
+    mb_local_get(mf, loc0);
+    mb_local_get(mf, loc1);
+    mb_i8x16_shuffle(mf, shuf_32_hi);
+    mb_local_set(mf, ctx->loc_tmp_v1);
+
+    /* loc0 = T2 = shuffle(loc2, loc3, shuf_32_lo); loc1 = T3 = shuffle(loc2, loc3, shuf_32_hi) */
+    mb_local_get(mf, loc2);
+    mb_local_get(mf, loc3);
+    mb_i8x16_shuffle(mf, shuf_32_lo);
+    mb_local_set(mf, loc0);
+
+    mb_local_get(mf, loc2);
+    mb_local_get(mf, loc3);
+    mb_i8x16_shuffle(mf, shuf_32_hi);
+    mb_local_set(mf, loc1);
+
+    /* loc2 = shuffle(tmp_v1, loc1, shuf_64_lo); loc3 = shuffle(tmp_v1, loc1, shuf_64_hi) */
+    mb_local_get(mf, ctx->loc_tmp_v1);
+    mb_local_get(mf, loc1);
+    mb_i8x16_shuffle(mf, shuf_64_lo);
+    mb_local_set(mf, loc2);
+
+    mb_local_get(mf, ctx->loc_tmp_v1);
+    mb_local_get(mf, loc1);
+    mb_i8x16_shuffle(mf, shuf_64_hi);
+    mb_local_set(mf, loc3);
+
+    /* loc1 = shuffle(tmp_v0, loc0, shuf_64_hi); loc0 = shuffle(tmp_v0, loc0, shuf_64_lo) */
+    mb_local_get(mf, ctx->loc_tmp_v0);
+    mb_local_get(mf, loc0);
+    mb_i8x16_shuffle(mf, shuf_64_hi);
+    mb_local_set(mf, loc1);
+
+    mb_local_get(mf, ctx->loc_tmp_v0);
+    mb_local_get(mf, loc0);
+    mb_i8x16_shuffle(mf, shuf_64_lo);
+    mb_local_set(mf, loc0);
+}
 
 /* Bir operandın değerini yığına iter.
  * Eğer operand tek kullanımlı ve inline edilmişse ifadesini özyinelemeli olarak doğrudan yığında üretir;
@@ -1305,6 +1566,221 @@ static void emit_inst_expr(CgCtx* ctx, u32 idx) {
         }
     } break;
 
+    case IR_GLOBAL_ID:
+        mb_local_get(mf, ctx->loc_v_gid);
+        break;
+
+    case IR_BUF_LOAD: {
+        u32 slot    = IR_BUF_SLOT(in->imm.u);
+        u32 comp    = IR_BUF_COMP(in->imm.u);
+        b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+
+        if (!is_var) {
+            mb_local_get(mf, ctx->loc_buf_base[slot]);
+            emit_push_operand(ctx, in->a, FALSE);
+            mb_i32_const(mf, is_vec4 ? 4 : 2);
+            mb_i32_shl(mf);
+            mb_i32_add(mf);
+            if (in->type == IR_T_F32) {
+                mb_f32_load(mf, 2, comp * 4u);
+            } else {
+                mb_i32_load(mf, 2, comp * 4u);
+            }
+        } else if (ctx->is_fast_body && ctx->if_depth == 0) {
+            u32 strided_base = 0, strided_comp = 0;
+            if (!is_vec4 && is_strided4_gid_index(f, in->a, &strided_base, &strided_comp)) {
+                if (ctx->cached_vec4_load_slot != slot || ctx->cached_vec4_load_idx != strided_base) {
+                    mb_local_get(mf, ctx->loc_buf_base[slot]);
+                    mb_local_get(mf, ctx->loc_gid);
+                    mb_i32_const(mf, 4);
+                    mb_i32_shl(mf);
+                    mb_i32_add(mf);
+                    mb_local_set(mf, ctx->loc_tmp_i32);
+                    for (u32 lane = 0; lane < 4; lane++) {
+                        mb_local_get(mf, ctx->loc_tmp_i32);
+                        mb_v128_load(mf, 2, lane * 16u);
+                        mb_local_set(mf, ctx->loc_vec4_load_cache[lane]);
+                    }
+                    emit_transpose_4x4(ctx,
+                                       ctx->loc_vec4_load_cache[0],
+                                       ctx->loc_vec4_load_cache[1],
+                                       ctx->loc_vec4_load_cache[2],
+                                       ctx->loc_vec4_load_cache[3]);
+                    ctx->cached_vec4_load_slot = slot;
+                    ctx->cached_vec4_load_idx  = strided_base;
+                }
+                mb_local_get(mf, ctx->loc_vec4_load_cache[strided_comp]);
+            } else if (!is_vec4) {
+                if (is_contiguous_gid_index(ctx, in->a)) {
+                    mb_local_get(mf, ctx->loc_buf_base[slot]);
+                    if (f->insts[in->a].op == IR_GLOBAL_ID) {
+                        mb_local_get(mf, ctx->loc_gid);
+                    } else {
+                        emit_push_operand(ctx, in->a, TRUE);
+                        mb_i32x4_extract_lane(mf, 0);
+                    }
+                    mb_i32_const(mf, 2);
+                    mb_i32_shl(mf);
+                    mb_i32_add(mf);
+                    mb_v128_load(mf, 2, 0);
+                } else if (is_shr2_gid_index(f, in->a)) {
+                    mb_local_get(mf, ctx->loc_buf_base[slot]);
+                    mb_local_get(mf, ctx->loc_gid);
+                    mb_i32_add(mf);
+                    mb_v128_load32_splat(mf, 2, 0);
+                } else {
+                    emit_push_operand(ctx, in->a, TRUE);
+                    mb_i32_const(mf, 2);
+                    mb_i32x4_shl(mf);
+                    mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+                    mb_i32x4_add(mf);
+                    mb_local_tee(mf, ctx->loc_tmp_v0);
+
+                    mb_i32x4_extract_lane(mf, 0);
+                    mb_v128_load32_zero(mf, 2, 0);
+
+                    for (u8 lane = 1; lane < 4; lane++) {
+                        mb_local_get(mf, ctx->loc_tmp_v0);
+                        mb_i32x4_extract_lane(mf, lane);
+                        mb_i32_load(mf, 2, 0);
+                        mb_i32x4_replace_lane(mf, lane);
+                    }
+                }
+            } else {
+                if (ctx->cached_vec4_load_slot != slot || ctx->cached_vec4_load_idx != in->a) {
+                    if (is_contiguous_gid_index(ctx, in->a)) {
+                        mb_local_get(mf, ctx->loc_buf_base[slot]);
+                        if (f->insts[in->a].op == IR_GLOBAL_ID) {
+                            mb_local_get(mf, ctx->loc_gid);
+                        } else {
+                            emit_push_operand(ctx, in->a, TRUE);
+                            mb_i32x4_extract_lane(mf, 0);
+                        }
+                        mb_i32_const(mf, 4);
+                        mb_i32_shl(mf);
+                        mb_i32_add(mf);
+                        mb_local_set(mf, ctx->loc_tmp_i32);
+                        for (u32 lane = 0; lane < 4; lane++) {
+                            mb_local_get(mf, ctx->loc_tmp_i32);
+                            mb_v128_load(mf, 2, lane * 16u);
+                            mb_local_set(mf, ctx->loc_vec4_load_cache[lane]);
+                        }
+                    } else {
+                        emit_push_operand(ctx, in->a, TRUE);
+                        mb_i32_const(mf, 4);
+                        mb_i32x4_shl(mf);
+                        mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+                        mb_i32x4_add(mf);
+                        mb_local_set(mf, ctx->loc_tmp_v0);
+                        for (u8 lane = 0; lane < 4; lane++) {
+                            mb_local_get(mf, ctx->loc_tmp_v0);
+                            mb_i32x4_extract_lane(mf, lane);
+                            mb_v128_load(mf, 2, 0);
+                            mb_local_set(mf, ctx->loc_vec4_load_cache[lane]);
+                        }
+                    }
+                    emit_transpose_4x4(ctx,
+                                       ctx->loc_vec4_load_cache[0],
+                                       ctx->loc_vec4_load_cache[1],
+                                       ctx->loc_vec4_load_cache[2],
+                                       ctx->loc_vec4_load_cache[3]);
+                    ctx->cached_vec4_load_slot = slot;
+                    ctx->cached_vec4_load_idx  = in->a;
+                }
+                mb_local_get(mf, ctx->loc_vec4_load_cache[comp]);
+            }
+        } else {
+            /* Maskeli (kuyruk veya koşullu IF içi) 4-lane yükleme */
+            emit_push_operand(ctx, in->a, TRUE);
+            mb_i32_const(mf, is_vec4 ? 4 : 2);
+            mb_i32x4_shl(mf);
+            mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+            mb_i32x4_add(mf);
+            mb_local_set(mf, ctx->loc_tmp_v0);
+
+            mb_local_get(mf, ctx->loc_active);
+            mb_i32x4_bitmask(mf);
+            mb_local_set(mf, ctx->loc_tmp_i32);
+
+            mb_i32x4_const(mf, 0, 0, 0, 0);
+            mb_local_set(mf, ctx->loc_tmp_v1);
+
+            for (u8 lane = 0; lane < 4; lane++) {
+                mb_local_get(mf, ctx->loc_tmp_i32);
+                mb_i32_const(mf, 1 << lane);
+                mb_i32_and(mf);
+                mb_if(mf, MB_BLOCK_VOID);
+                mb_local_get(mf, ctx->loc_tmp_v1);
+                mb_local_get(mf, ctx->loc_tmp_v0);
+                mb_i32x4_extract_lane(mf, lane);
+                mb_i32_load(mf, 2, comp * 4u);
+                mb_i32x4_replace_lane(mf, lane);
+                mb_local_set(mf, ctx->loc_tmp_v1);
+                mb_end(mf);
+            }
+            mb_local_get(mf, ctx->loc_tmp_v1);
+        }
+    } break;
+
+    case IR_ATOMIC_ADD: {
+        u32 slot = in->imm.u;
+        ctx->cached_vec4_load_slot = IR_NONE;
+        ctx->cached_vec4_load_idx  = IR_NONE;
+
+        emit_push_operand(ctx, in->a, TRUE);
+        mb_i32_const(mf, 2);
+        mb_i32x4_shl(mf);
+        mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+        mb_i32x4_add(mf);
+        emit_push_operand(ctx, in->b, TRUE);
+        mb_local_set(mf, ctx->loc_tmp_v1);
+        mb_local_set(mf, ctx->loc_tmp_v0);
+
+        if (ctx->is_fast_body && ctx->if_depth == 0 && in->c == IR_NONE) {
+            mb_i32x4_const(mf, 0, 0, 0, 0);
+            for (u8 lane = 0; lane < 4; lane++) {
+                mb_local_get(mf, ctx->loc_tmp_v0);
+                mb_i32x4_extract_lane(mf, lane);
+                mb_local_get(mf, ctx->loc_tmp_v1);
+                mb_i32x4_extract_lane(mf, lane);
+                cg_i32_atomic_rmw_add(mf, 2, 0);
+                mb_i32x4_replace_lane(mf, lane);
+            }
+        } else {
+            if (ctx->is_fast_body && ctx->if_depth == 0) {
+                emit_push_operand(ctx, in->c, TRUE);
+            } else {
+                mb_local_get(mf, ctx->loc_active);
+                if (in->c != IR_NONE) {
+                    emit_push_operand(ctx, in->c, TRUE);
+                    mb_v128_and(mf);
+                }
+            }
+            mb_i32x4_bitmask(mf);
+            mb_local_set(mf, ctx->loc_tmp_i32);
+
+            mb_i32x4_const(mf, 0, 0, 0, 0);
+            mb_local_set(mf, ctx->loc_vec4_load_cache[0]);
+
+            for (u8 lane = 0; lane < 4; lane++) {
+                mb_local_get(mf, ctx->loc_tmp_i32);
+                mb_i32_const(mf, 1 << lane);
+                mb_i32_and(mf);
+                mb_if(mf, MB_BLOCK_VOID);
+                mb_local_get(mf, ctx->loc_vec4_load_cache[0]);
+                mb_local_get(mf, ctx->loc_tmp_v0);
+                mb_i32x4_extract_lane(mf, lane);
+                mb_local_get(mf, ctx->loc_tmp_v1);
+                mb_i32x4_extract_lane(mf, lane);
+                cg_i32_atomic_rmw_add(mf, 2, 0);
+                mb_i32x4_replace_lane(mf, lane);
+                mb_local_set(mf, ctx->loc_vec4_load_cache[0]);
+                mb_end(mf);
+            }
+            mb_local_get(mf, ctx->loc_vec4_load_cache[0]);
+        }
+    } break;
+
     default:
         PANIC("emit_inst_expr: unhandled op %u", (u32)op);
     }
@@ -1365,6 +1841,8 @@ static void emit_inst(CgCtx* ctx, u32 idx) {
     if (ctx->inlined[idx]) return;
 
     if (op == IR_IF_BEGIN) {
+        ctx->cached_vec4_load_slot = IR_NONE;
+        ctx->cached_vec4_load_idx  = IR_NONE;
         ASSERT(ctx->if_depth < CG_MAX_IF);
         u32 d = ctx->if_depth++;
         ctx->if_stk[d].is_varying = is_var;
@@ -1400,6 +1878,8 @@ static void emit_inst(CgCtx* ctx, u32 idx) {
     }
 
     if (op == IR_ELSE) {
+        ctx->cached_vec4_load_slot = IR_NONE;
+        ctx->cached_vec4_load_idx  = IR_NONE;
         ASSERT(ctx->if_depth > 0);
         u32 d = ctx->if_depth - 1;
         ctx->if_stk[d].has_else = TRUE;
@@ -1424,12 +1904,142 @@ static void emit_inst(CgCtx* ctx, u32 idx) {
     }
 
     if (op == IR_IF_END) {
+        ctx->cached_vec4_load_slot = IR_NONE;
+        ctx->cached_vec4_load_idx  = IR_NONE;
         ASSERT(ctx->if_depth > 0);
         u32 d = --ctx->if_depth;
         mb_end(mf);
         if (ctx->if_stk[d].is_varying) {
             mb_local_get(mf, ctx->if_stk[d].saved_mask_loc);
             mb_local_set(mf, ctx->loc_active);
+        }
+        return;
+    }
+
+    if (op == IR_BUF_STORE) {
+        u32 slot    = IR_BUF_SLOT(in->imm.u);
+        u32 comp    = IR_BUF_COMP(in->imm.u);
+        b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+        if (ctx->cached_vec4_load_slot == slot) {
+            ctx->cached_vec4_load_slot = IR_NONE;
+            ctx->cached_vec4_load_idx  = IR_NONE;
+        }
+
+        if (ctx->is_fast_body && ctx->if_depth == 0 && in->c == IR_NONE) {
+            if (ctx->vec4_store_skip[idx]) {
+                return;
+            }
+            if (ctx->vec4_store_head[idx]) {
+                for (u32 c = 0; c < 4; c++) {
+                    emit_push_operand(ctx, f->insts[idx + c].b, TRUE);
+                    mb_local_set(mf, ctx->loc_vec4_load_cache[c]);
+                }
+                emit_transpose_4x4(ctx,
+                                   ctx->loc_vec4_load_cache[0],
+                                   ctx->loc_vec4_load_cache[1],
+                                   ctx->loc_vec4_load_cache[2],
+                                   ctx->loc_vec4_load_cache[3]);
+                ctx->cached_vec4_load_slot = IR_NONE;
+                ctx->cached_vec4_load_idx  = IR_NONE;
+
+                if (!is_vec4 || is_contiguous_gid_index(ctx, in->a)) {
+                    mb_local_get(mf, ctx->loc_buf_base[slot]);
+                    if (!is_vec4 || f->insts[in->a].op == IR_GLOBAL_ID) {
+                        mb_local_get(mf, ctx->loc_gid);
+                    } else {
+                        emit_push_operand(ctx, in->a, TRUE);
+                        mb_i32x4_extract_lane(mf, 0);
+                    }
+                    mb_i32_const(mf, 4);
+                    mb_i32_shl(mf);
+                    mb_i32_add(mf);
+                    mb_local_set(mf, ctx->loc_tmp_i32);
+                    for (u32 lane = 0; lane < 4; lane++) {
+                        mb_local_get(mf, ctx->loc_tmp_i32);
+                        mb_local_get(mf, ctx->loc_vec4_load_cache[lane]);
+                        mb_v128_store(mf, 2, lane * 16u);
+                    }
+                } else {
+                    emit_push_operand(ctx, in->a, TRUE);
+                    mb_i32_const(mf, 4);
+                    mb_i32x4_shl(mf);
+                    mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+                    mb_i32x4_add(mf);
+                    mb_local_set(mf, ctx->loc_tmp_v0);
+                    for (u8 lane = 0; lane < 4; lane++) {
+                        mb_local_get(mf, ctx->loc_tmp_v0);
+                        mb_i32x4_extract_lane(mf, lane);
+                        mb_local_get(mf, ctx->loc_vec4_load_cache[lane]);
+                        mb_v128_store(mf, 2, 0);
+                    }
+                }
+                return;
+            }
+            if (!is_vec4 && is_contiguous_gid_index(ctx, in->a)) {
+                mb_local_get(mf, ctx->loc_buf_base[slot]);
+                if (f->insts[in->a].op == IR_GLOBAL_ID) {
+                    mb_local_get(mf, ctx->loc_gid);
+                } else {
+                    emit_push_operand(ctx, in->a, TRUE);
+                    mb_i32x4_extract_lane(mf, 0);
+                }
+                mb_i32_const(mf, 2);
+                mb_i32_shl(mf);
+                mb_i32_add(mf);
+                emit_push_operand(ctx, in->b, TRUE);
+                mb_v128_store(mf, 2, 0);
+                return;
+            }
+            /* Dağınık (scatter) veya tek-bileşenli vec4 yazımı (4 lane'in tamamı aktif) */
+            emit_push_operand(ctx, in->a, TRUE);
+            mb_i32_const(mf, is_vec4 ? 4 : 2);
+            mb_i32x4_shl(mf);
+            mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+            mb_i32x4_add(mf);
+            emit_push_operand(ctx, in->b, TRUE);
+            mb_local_set(mf, ctx->loc_tmp_v1);
+            mb_local_set(mf, ctx->loc_tmp_v0);
+            for (u8 lane = 0; lane < 4; lane++) {
+                mb_local_get(mf, ctx->loc_tmp_v0);
+                mb_i32x4_extract_lane(mf, lane);
+                mb_local_get(mf, ctx->loc_tmp_v1);
+                mb_v128_store32_lane(mf, 2, comp * 4u, lane);
+            }
+            return;
+        }
+
+        /* Maskeli (kuyruk, koşullu IF içi veya erken return maskeli) yazım */
+        emit_push_operand(ctx, in->a, TRUE);
+        mb_i32_const(mf, is_vec4 ? 4 : 2);
+        mb_i32x4_shl(mf);
+        mb_local_get(mf, ctx->loc_buf_base_v[slot]);
+        mb_i32x4_add(mf);
+        emit_push_operand(ctx, in->b, TRUE);
+        mb_local_set(mf, ctx->loc_tmp_v1);
+        mb_local_set(mf, ctx->loc_tmp_v0);
+
+        if (ctx->is_fast_body && ctx->if_depth == 0) {
+            emit_push_operand(ctx, in->c, TRUE);
+        } else {
+            mb_local_get(mf, ctx->loc_active);
+            if (in->c != IR_NONE) {
+                emit_push_operand(ctx, in->c, TRUE);
+                mb_v128_and(mf);
+            }
+        }
+        mb_i32x4_bitmask(mf);
+        mb_local_set(mf, ctx->loc_tmp_i32);
+
+        for (u8 lane = 0; lane < 4; lane++) {
+            mb_local_get(mf, ctx->loc_tmp_i32);
+            mb_i32_const(mf, 1 << lane);
+            mb_i32_and(mf);
+            mb_if(mf, MB_BLOCK_VOID);
+            mb_local_get(mf, ctx->loc_tmp_v0);
+            mb_i32x4_extract_lane(mf, lane);
+            mb_local_get(mf, ctx->loc_tmp_v1);
+            mb_v128_store32_lane(mf, 2, comp * 4u, lane);
+            mb_end(mf);
         }
         return;
     }
@@ -1708,8 +2318,203 @@ static void emit_fused_blend_epilogue(CgCtx* ctx) {
     mb_v128_store64_lane(mf, 3, 0, 1);
 }
 
+u32 mtk_codegen_compute(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
+                        u8* out, u32 out_cap, char* err, u32 err_cap) {
+    if (err && err_cap > 0) err[0] = '\0';
+    if (!f || !scratch || !out || out_cap == 0) {
+        cg_fail(err, err_cap, "invalid arguments to mtk_codegen_compute");
+        return 0;
+    }
+    if (f->count > CG_MAX_INSTS) {
+        cg_fail(err, err_cap, "IR instruction count %u exceeds maximum %u", f->count, (u32)CG_MAX_INSTS);
+        return 0;
+    }
+    if (!ir_verify(f, err, err_cap)) {
+        return 0;
+    }
+
+    MtkCodegenOpts default_opts = { FALSE, FALSE, MTK_FUSE_NONE };
+    if (!opts) opts = &default_opts;
+
+    usize mark = arena_mark(scratch);
+    CgCtx* ctx = ARENA_PUSH_STRUCT(scratch, CgCtx);
+    ctx->f    = f;
+    ctx->opts = opts;
+
+    usize rem = scratch->cap - scratch->used;
+    if (rem < 65536) {
+        arena_pop_to(scratch, mark);
+        cg_fail(err, err_cap, "insufficient scratch arena space (%zu bytes)", rem);
+        return 0;
+    }
+    u32 work_cap = (rem > (usize)MB(4)) ? (u32)MB(4) : (u32)(rem & ~15u);
+    u8* work_mem = ARENA_PUSH_ARRAY(scratch, u8, work_cap);
+
+    MbModule mod;
+    mb_module_init(&mod, work_mem, work_cap);
+
+    if (opts->own_memory) {
+        mb_memory(&mod, 64, 64, FALSE);
+    } else {
+        u32 max_pages = opts->shared_memory ? 16384u : 0u;
+        mb_import_memory(&mod, "env", "memory", 1, max_pages, opts->shared_memory);
+    }
+
+    const u8 comp_params[1] = { MB_VAL_I32 };
+    u32 t_comp = mb_type(&mod, comp_params, 1, NULL, 0);
+    MbFunc* mf = mb_func_begin(&mod, t_comp);
+    ctx->mf = mf;
+
+    analyze_liveness_and_trees(ctx);
+    allocate_locals(ctx);
+
+    /* 1. gid = batch->start; end_gid = gid + batch->count; if (count == 0) return; */
+    mb_local_get(mf, ctx->loc_batch);
+    mb_i32_load(mf, 2, COMPUTE_OFF_START);
+    mb_local_set(mf, ctx->loc_gid);
+
+    mb_local_get(mf, ctx->loc_batch);
+    mb_i32_load(mf, 2, COMPUTE_OFF_COUNT);
+    mb_local_tee(mf, ctx->loc_end_gid);
+    mb_i32_eqz(mf);
+    mb_if(mf, MB_BLOCK_VOID);
+    mb_return(mf);
+    mb_end(mf);
+
+    mb_local_get(mf, ctx->loc_gid);
+    mb_local_get(mf, ctx->loc_end_gid);
+    mb_i32_add(mf);
+    mb_local_set(mf, ctx->loc_end_gid);
+
+    /* 2. Uniform ve buffer taban adreslerini yükle */
+    if (ctx->has_any_uniform) {
+        mb_local_get(mf, ctx->loc_batch);
+        mb_i32_load(mf, 2, COMPUTE_OFF_UNIFORMS);
+        mb_local_set(mf, ctx->loc_uniforms);
+    }
+    for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+        if (!ctx->used_buf[b]) continue;
+        mb_local_get(mf, ctx->loc_batch);
+        mb_i32_load(mf, 2, COMPUTE_OFF_BUFFERS + b * 4u);
+        mb_local_tee(mf, ctx->loc_buf_base[b]);
+        mb_i32x4_splat(mf);
+        mb_local_set(mf, ctx->loc_buf_base_v[b]);
+    }
+
+    if (ctx->need_sign_mask) {
+        mb_f32x4_const(mf, -0.0f, -0.0f, -0.0f, -0.0f);
+        mb_local_set(mf, ctx->loc_v_sign_mask);
+    }
+
+    /* 3. SIMD global_id indüksiyon vektörlerini ve fast_end sınırını hazırla */
+    mb_local_get(mf, ctx->loc_gid);
+    mb_i32x4_splat(mf);
+    mb_i32x4_const(mf, 0, 1, 2, 3);
+    mb_i32x4_add(mf);
+    mb_local_set(mf, ctx->loc_v_gid);
+
+    mb_local_get(mf, ctx->loc_end_gid);
+    mb_i32x4_splat(mf);
+    mb_local_set(mf, ctx->loc_v_end_gid);
+
+    mb_i32x4_const(mf, 4, 4, 4, 4);
+    mb_local_set(mf, ctx->loc_v_step4);
+
+    mb_i32x4_const(mf, -1, -1, -1, -1);
+    mb_local_set(mf, ctx->loc_active);
+
+    mb_local_get(mf, ctx->loc_gid);
+    mb_local_get(mf, ctx->loc_end_gid);
+    mb_local_get(mf, ctx->loc_gid);
+    mb_i32_sub(mf);
+    mb_i32_const(mf, -4);
+    mb_i32_and(mf);
+    mb_i32_add(mf);
+    mb_local_set(mf, ctx->loc_fast_end);
+
+    emit_preheader_insts(ctx);
+
+    /* 4. Hızlı 4-lane tam grup döngüsü: while (gid < fast_end) */
+    mb_local_get(mf, ctx->loc_gid);
+    mb_local_get(mf, ctx->loc_fast_end);
+    mb_i32_lt_u(mf);
+    mb_if(mf, MB_BLOCK_VOID);
+    mb_loop(mf, MB_BLOCK_VOID);
+
+    ctx->is_fast_body          = TRUE;
+    ctx->cached_vec4_load_slot = IR_NONE;
+    ctx->cached_vec4_load_idx  = IR_NONE;
+    ctx->cached_vec4_load_reg  = IR_NONE;
+    for (u32 i = 0; i < f->count; i++) {
+        if (ctx->is_preheader[i]) continue;
+        emit_inst(ctx, i);
+    }
+
+    mb_local_get(mf, ctx->loc_v_gid);
+    mb_local_get(mf, ctx->loc_v_step4);
+    mb_i32x4_add(mf);
+    mb_local_set(mf, ctx->loc_v_gid);
+
+    mb_local_get(mf, ctx->loc_gid);
+    mb_i32_const(mf, 4);
+    mb_i32_add(mf);
+    mb_local_tee(mf, ctx->loc_gid);
+    mb_local_get(mf, ctx->loc_fast_end);
+    mb_i32_ne(mf);
+    mb_br_if(mf, 0);
+
+    mb_end(mf); /* loop sonu */
+    mb_end(mf); /* if (gid < fast_end) sonu */
+
+    /* 5. Kalan (end_gid - fast_end) eleman için maskeli 1x kuyruk bloğu */
+    mb_local_get(mf, ctx->loc_gid);
+    mb_local_get(mf, ctx->loc_end_gid);
+    mb_i32_lt_u(mf);
+    mb_if(mf, MB_BLOCK_VOID);
+
+    mb_local_get(mf, ctx->loc_v_gid);
+    mb_local_get(mf, ctx->loc_v_end_gid);
+    mb_i32x4_lt_u(mf);
+    mb_local_set(mf, ctx->loc_active);
+
+    ctx->is_fast_body          = FALSE;
+    ctx->cached_vec4_load_slot = IR_NONE;
+    ctx->cached_vec4_load_idx  = IR_NONE;
+    ctx->cached_vec4_load_reg  = IR_NONE;
+    for (u32 i = 0; i < f->count; i++) {
+        if (ctx->is_preheader[i]) continue;
+        emit_inst(ctx, i);
+    }
+
+    mb_end(mf); /* if (gid < end_gid) sonu */
+
+    mb_func_end(mf);
+    mb_export_func(&mod, "compute", mf->func_idx);
+    mb_export_func(&mod, "shade", mf->func_idx);
+
+    if (opts->own_memory) {
+        MbExport* exp = &mod.exports[mod.export_count++];
+        exp->name[0] = 'm'; exp->name[1] = 'e'; exp->name[2] = 'm';
+        exp->name[3] = 'o'; exp->name[4] = 'r'; exp->name[5] = 'y';
+        exp->name[6] = '\0';
+        exp->name_len = 6;
+        exp->kind     = MB_EXT_MEMORY;
+        exp->index    = 0;
+    }
+
+    MbBuf out_buf;
+    mb_buf_init(&out_buf, out, out_cap);
+    u32 total_bytes = mb_module_finish(&mod, &out_buf);
+
+    arena_pop_to(scratch, mark);
+    return total_bytes;
+}
+
 u32 mtk_codegen(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
                 u8* out, u32 out_cap, char* err, u32 err_cap) {
+    if (f && f->is_compute) {
+        return mtk_codegen_compute(f, opts, scratch, out, out_cap, err, err_cap);
+    }
     if (err && err_cap > 0) err[0] = '\0';
     if (!f || !scratch || !out || out_cap == 0) {
         cg_fail(err, err_cap, "invalid arguments to mtk_codegen");

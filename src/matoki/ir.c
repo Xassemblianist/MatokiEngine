@@ -30,12 +30,16 @@ static const IrInst* ir_get(const IrFunc* f, u32 id) {
 
 void ir_init(IrFunc* f, Arena* arena, u32 cap) {
     ASSERT(f != NULL && arena != NULL && cap > 0);
-    f->insts         = ARENA_PUSH_ARRAY(arena, IrInst, cap);
-    f->count         = 0;
-    f->cap           = cap;
-    f->uniform_bytes = 0;
-    f->varying_count = 0;
-    f->texture_count = 0;
+    f->insts              = ARENA_PUSH_ARRAY(arena, IrInst, cap);
+    f->count              = 0;
+    f->cap                = cap;
+    f->uniform_bytes      = 0;
+    f->varying_count      = 0;
+    f->texture_count      = 0;
+    f->buffer_count       = 0;
+    f->buffer_atomic_mask = 0;
+    f->is_compute         = FALSE;
+    for (u32 i = 0; i < IR_MAX_BUFFERS; i++) f->buffer_elem_types[i] = 0;
 }
 
 u32 ir_const_f32(IrFunc* f, f32 v) {
@@ -378,6 +382,97 @@ void ir_output(IrFunc* f, u32 channel, u32 value) {
     inst.c     = IR_NONE;
     inst.imm.u = channel;
     ir_push(f, inst);
+}
+
+u32 ir_global_id(IrFunc* f) {
+    IrInst inst = {0};
+    inst.op    = IR_GLOBAL_ID;
+    inst.type  = IR_T_I32;
+    inst.flags = IR_FLAG_VARYING;
+    inst.a     = IR_NONE;
+    inst.b     = IR_NONE;
+    inst.c     = IR_NONE;
+    return ir_push(f, inst);
+}
+
+u32 ir_buf_load(IrFunc* f, IrType t, u32 slot, u32 index, u32 comp, b32 is_vec4) {
+    if (slot >= IR_MAX_BUFFERS) {
+        PANIC("ir_buf_load: slot %u >= IR_MAX_BUFFERS", slot);
+    }
+    if (t != IR_T_F32 && t != IR_T_I32) {
+        PANIC("ir_buf_load: invalid type %u", (u32)t);
+    }
+    const IrInst* ii = ir_get(f, index);
+    if (ii->type != IR_T_I32) {
+        PANIC("ir_buf_load: index must be I32, got %u", (u32)ii->type);
+    }
+    IrInst inst = {0};
+    inst.op    = IR_BUF_LOAD;
+    inst.type  = (u8)t;
+    inst.flags = IR_FLAG_VARYING;
+    inst.a     = index;
+    inst.b     = IR_NONE;
+    inst.c     = IR_NONE;
+    inst.imm.u = IR_BUF_IMM(slot, comp, is_vec4);
+    return ir_push(f, inst);
+}
+
+void ir_buf_store(IrFunc* f, u32 slot, u32 index, u32 val, u32 mask, u32 comp, b32 is_vec4) {
+    if (slot >= IR_MAX_BUFFERS) {
+        PANIC("ir_buf_store: slot %u >= IR_MAX_BUFFERS", slot);
+    }
+    const IrInst* ii = ir_get(f, index);
+    const IrInst* iv = ir_get(f, val);
+    if (ii->type != IR_T_I32) {
+        PANIC("ir_buf_store: index must be I32, got %u", (u32)ii->type);
+    }
+    if (iv->type != IR_T_F32 && iv->type != IR_T_I32) {
+        PANIC("ir_buf_store: val must be F32 or I32, got %u", (u32)iv->type);
+    }
+    u8 flags = (ii->flags | iv->flags) & IR_FLAG_VARYING;
+    if (mask != IR_NONE) {
+        const IrInst* im = ir_get(f, mask);
+        if (im->type != IR_T_BOOL) {
+            PANIC("ir_buf_store: mask must be BOOL, got %u", (u32)im->type);
+        }
+        flags |= (im->flags & IR_FLAG_VARYING);
+    }
+    IrInst inst = {0};
+    inst.op    = IR_BUF_STORE;
+    inst.type  = IR_T_VOID;
+    inst.flags = flags;
+    inst.a     = index;
+    inst.b     = val;
+    inst.c     = mask;
+    inst.imm.u = IR_BUF_IMM(slot, comp, is_vec4);
+    ir_push(f, inst);
+}
+
+u32 ir_atomic_add(IrFunc* f, u32 slot, u32 index, u32 val, u32 mask) {
+    if (slot >= IR_MAX_BUFFERS) {
+        PANIC("ir_atomic_add: slot %u >= IR_MAX_BUFFERS", slot);
+    }
+    const IrInst* ii = ir_get(f, index);
+    const IrInst* iv = ir_get(f, val);
+    if (ii->type != IR_T_I32 || iv->type != IR_T_I32) {
+        PANIC("ir_atomic_add: index and val must be I32");
+    }
+    if (mask != IR_NONE) {
+        const IrInst* im = ir_get(f, mask);
+        if (im->type != IR_T_BOOL) {
+            PANIC("ir_atomic_add: mask must be BOOL, got %u", (u32)im->type);
+        }
+    }
+    f->buffer_atomic_mask |= (1u << slot);
+    IrInst inst = {0};
+    inst.op    = IR_ATOMIC_ADD;
+    inst.type  = IR_T_I32;
+    inst.flags = IR_FLAG_VARYING;
+    inst.a     = index;
+    inst.b     = val;
+    inst.c     = mask;
+    inst.imm.u = slot;
+    return ir_push(f, inst);
 }
 
 /* Yardımcı: tek bir (tx, ty) koordinat çiftini wrap veya clamp ile sarıp texel yükler ve RGBA açar */
@@ -835,6 +930,47 @@ b32 ir_verify(const IrFunc* f, char* err, u32 err_cap) {
             exp_var = f->insts[in->a].flags & IR_FLAG_VARYING;
             break;
 
+        case IR_GLOBAL_ID:
+            exp_t   = IR_T_I32;
+            exp_var = IR_FLAG_VARYING;
+            break;
+
+        case IR_BUF_LOAD:
+            if (IR_BUF_SLOT(in->imm.u) >= IR_MAX_BUFFERS) {
+                return verify_fail(err, err_cap, "inst %%%u: buffer slot %u out of range", i, IR_BUF_SLOT(in->imm.u));
+            }
+            if (!check_operand(f, i, in->a, IR_T_I32, err, err_cap)) return FALSE;
+            if ((IrType)in->type != IR_T_F32 && (IrType)in->type != IR_T_I32) {
+                return verify_fail(err, err_cap, "inst %%%u: invalid IR_BUF_LOAD type %u", i, (u32)in->type);
+            }
+            exp_t   = (IrType)in->type;
+            exp_var = IR_FLAG_VARYING;
+            break;
+
+        case IR_BUF_STORE:
+            if (IR_BUF_SLOT(in->imm.u) >= IR_MAX_BUFFERS) {
+                return verify_fail(err, err_cap, "inst %%%u: buffer slot %u out of range", i, IR_BUF_SLOT(in->imm.u));
+            }
+            if (!check_operand(f, i, in->a, IR_T_I32, err, err_cap)) return FALSE;
+            if (!check_operand(f, i, in->b, IR_T_VOID, err, err_cap)) return FALSE;
+            if ((IrType)f->insts[in->b].type != IR_T_F32 && (IrType)f->insts[in->b].type != IR_T_I32) {
+                return verify_fail(err, err_cap, "inst %%%u: invalid IR_BUF_STORE value type", i);
+            }
+            if (in->c != IR_NONE && !check_operand(f, i, in->c, IR_T_BOOL, err, err_cap)) return FALSE;
+            exp_t = IR_T_VOID;
+            break;
+
+        case IR_ATOMIC_ADD:
+            if (in->imm.u >= IR_MAX_BUFFERS) {
+                return verify_fail(err, err_cap, "inst %%%u: buffer slot %u out of range", i, in->imm.u);
+            }
+            if (!check_operand(f, i, in->a, IR_T_I32, err, err_cap)) return FALSE;
+            if (!check_operand(f, i, in->b, IR_T_I32, err, err_cap)) return FALSE;
+            if (in->c != IR_NONE && !check_operand(f, i, in->c, IR_T_BOOL, err, err_cap)) return FALSE;
+            exp_t   = IR_T_I32;
+            exp_var = IR_FLAG_VARYING;
+            break;
+
         default:
             return verify_fail(err, err_cap, "inst %%%u: unknown opcode %u", i, (u32)op);
         }
@@ -852,7 +988,7 @@ b32 ir_verify(const IrFunc* f, char* err, u32 err_cap) {
     if (if_depth != 0) {
         return verify_fail(err, err_cap, "unclosed IF_BEGIN (depth=%u)", if_depth);
     }
-    if (out_mask != 0xFu) {
+    if (!f->is_compute && out_mask != 0xFu) {
         return verify_fail(err, err_cap, "incomplete OUTPUT channels (mask=0x%x, expected 0xf)", out_mask);
     }
     return TRUE;
@@ -925,6 +1061,10 @@ static const char* ir_op_name(IrOp op) {
     case IR_IF_END:      return "endif";
     case IR_DISCARD:     return "discard";
     case IR_OUTPUT:      return "output";
+    case IR_GLOBAL_ID:   return "global_id";
+    case IR_BUF_LOAD:    return "buf_load";
+    case IR_BUF_STORE:   return "buf_store";
+    case IR_ATOMIC_ADD:  return "atomic_add";
     default:             return "unknown";
     }
 }
@@ -983,6 +1123,7 @@ u32 ir_print(const IrFunc* f, char* buf, u32 cap) {
             break;
         case IR_FRAG_X:
         case IR_FRAG_Y:
+        case IR_GLOBAL_ID:
             print_append(buf, cap, &pos, "%%%u = %s%s\n", i, name, uv);
             break;
         case IR_FNEG:
@@ -1003,6 +1144,18 @@ u32 ir_print(const IrFunc* f, char* buf, u32 cap) {
             break;
         case IR_TEXEL_LOAD:
             print_append(buf, cap, &pos, "%%%u = %s%s %u, %%%u\n", i, name, uv, in->imm.u, in->a);
+            break;
+        case IR_BUF_LOAD:
+            print_append(buf, cap, &pos, "%%%u = %s%s %u.%u, %%%u\n",
+                         i, name, uv, IR_BUF_SLOT(in->imm.u), IR_BUF_COMP(in->imm.u), in->a);
+            break;
+        case IR_BUF_STORE:
+            print_append(buf, cap, &pos, "%s %u.%u, %%%u, %%%u\n",
+                         name, IR_BUF_SLOT(in->imm.u), IR_BUF_COMP(in->imm.u), in->a, in->b);
+            break;
+        case IR_ATOMIC_ADD:
+            print_append(buf, cap, &pos, "%%%u = %s%s %u, %%%u, %%%u\n",
+                         i, name, uv, in->imm.u, in->a, in->b);
             break;
         case IR_SELECT:
             print_append(buf, cap, &pos, "%%%u = %s%s %%%u, %%%u, %%%u\n", i, name, uv, in->a, in->b, in->c);

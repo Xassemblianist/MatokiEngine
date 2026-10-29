@@ -175,8 +175,16 @@ static void remap_inst_operands(const IrFunc* f, IrInst* in, const u32* remap) {
     case IR_VARYING:
     case IR_FRAG_X:
     case IR_FRAG_Y:
+    case IR_GLOBAL_ID:
+    case IR_BUF_LOAD:
+    case IR_ATOMIC_ADD:
         in->flags |= IR_FLAG_VARYING;
         break;
+    case IR_BUF_STORE: {
+        u8 v = (f->insts[in->a].flags | f->insts[in->b].flags) & IR_FLAG_VARYING;
+        if (in->c != IR_NONE) v |= f->insts[in->c].flags & IR_FLAG_VARYING;
+        in->flags = (in->flags & ~IR_FLAG_VARYING) | v;
+    } break;
     case IR_SELECT: {
         u8 v = (f->insts[in->a].flags | f->insts[in->b].flags | f->insts[in->c].flags) & IR_FLAG_VARYING;
         in->flags = (in->flags & ~IR_FLAG_VARYING) | v;
@@ -730,6 +738,8 @@ static b32 is_pure_value_op(IrOp op) {
     case IR_IF_END:
     case IR_DISCARD:
     case IR_OUTPUT:
+    case IR_BUF_STORE:
+    case IR_ATOMIC_ADD:
         return FALSE;
     default:
         return TRUE;
@@ -758,8 +768,10 @@ static b32 insts_equal(const IrInst* x, const IrInst* y) {
         return x->imm.u == y->imm.u;
     case IR_FRAG_X:
     case IR_FRAG_Y:
+    case IR_GLOBAL_ID:
         return TRUE;
     case IR_TEXEL_LOAD:
+    case IR_BUF_LOAD:
         return x->imm.u == y->imm.u && x->a == y->a;
     case IR_SELECT:
         return x->a == y->a && x->b == y->b && x->c == y->c;
@@ -851,6 +863,19 @@ void ir_opt_cse(IrFunc* f) {
             if (prev->op == IR_NOP) continue;
             if (remap[j] != j) continue;
             if (insts_equal(in, prev) && region_dominates(inst_reg[j], cur_reg, reg_parent)) {
+                if (op == IR_BUF_LOAD) {
+                    u32 slot = IR_BUF_SLOT(in->imm.u);
+                    b32 clobbered = FALSE;
+                    for (u32 k = j + 1; k < i; k++) {
+                        IrOp kop = (IrOp)f->insts[k].op;
+                        if ((kop == IR_BUF_STORE && IR_BUF_SLOT(f->insts[k].imm.u) == slot) ||
+                            (kop == IR_ATOMIC_ADD && f->insts[k].imm.u == slot)) {
+                            clobbered = TRUE;
+                            break;
+                        }
+                    }
+                    if (clobbered) continue;
+                }
                 remap[i] = j;
                 break;
             }
@@ -887,10 +912,10 @@ void ir_opt_dce(IrFunc* f) {
         }
     }
 
-    /* Kökleri işaretle: OUTPUT ve DISCARD */
+    /* Kökleri işaretle: OUTPUT, DISCARD, BUF_STORE ve ATOMIC_ADD */
     for (u32 i = 0; i < f->count; i++) {
         IrOp op = (IrOp)f->insts[i].op;
-        if (op == IR_OUTPUT || op == IR_DISCARD) {
+        if (op == IR_OUTPUT || op == IR_DISCARD || op == IR_BUF_STORE || op == IR_ATOMIC_ADD) {
             f->insts[i].flags |= IR_FLAG_LIVE;
         }
     }
@@ -1094,7 +1119,8 @@ static void ir_opt_schedule_accum(IrFunc* f) {
         for (u32 k = max_op; k <= i; k++) {
             IrOp kop = (IrOp)f->insts[k].op;
             if (kop == IR_IF_BEGIN || kop == IR_ELSE || kop == IR_IF_END ||
-                kop == IR_DISCARD  || kop == IR_OUTPUT) {
+                kop == IR_DISCARD  || kop == IR_OUTPUT ||
+                kop == IR_BUF_STORE || kop == IR_ATOMIC_ADD) {
                 safe = FALSE;
                 break;
             }
