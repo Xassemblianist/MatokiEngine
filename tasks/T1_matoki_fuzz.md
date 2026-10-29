@@ -1,6 +1,6 @@
 # T1 — Matoki diferansiyel fuzz testi (ir_eval kahin)
 
-DURUM: DONE
+Durum: DONE
 
 ## Amaç
 Rastgele ama geçerli Matoki programları (pixel + compute) üreten tohumlu üreteç; her programı `ir_eval` (kahin) ile wasm

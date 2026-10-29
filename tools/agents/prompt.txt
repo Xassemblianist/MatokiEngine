@@ -3,6 +3,7 @@ Sen MATOKI projesinde (WebGPU + WebAssembly oyun motoru) tam yetkili bir ajansı
 Kurallar:
 - Görev dosyasındaki Durum'u 'IN_PROGRESS (agy __M__)' yap. Yalnızca 'Dosyalar' bölümündeki dosyalara dokun; zorunlu ek dosya gerekirse dokun ve Notlar'a gerekçesini yaz.
 - src/ altında libc include yok, malloc yok, mevcut stil (Türkçe yorumlar, modul_fonksiyon, dosya başı açıklama). Uyarıyı pragma ile susturma. Testi zayıflatma/silme.
+- Uzun komutları (make check, testler, fuzz) ön planda çalıştır ve sonucunu bekle; arka plana atıp "bekliyorum" deme (oturum 30 dk boşta kalınca kapanıyor).
 - Sık sık 'make check' çalıştır; hatasız ve uyarısız geçmeli. Geçici dosyalar worktree içindeki build/ dizinine (/tmp değil).
 - Gerçek GPU/tarayıcı doğrulaması: 'make gpucheck' ve tools/host/webgpu_check.mjs (headless Chrome + Vulkan, RTX 2060). Ekran görüntüsünü build/ altına al ve gerçekten bak.
 - Optimizasyon iddiası = ölçüm. Makine başka ajanlarla paylaşılıyor: ölçümde 'uptime' yükünü not et. Uydurma yok; gözlemediğini yazma.
