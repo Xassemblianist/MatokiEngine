@@ -430,6 +430,18 @@ Hedeften göze `phys_world_raycast`; engel varsa kamera anında öne çekilir, e
   olarak kalır; GPU çıktısı CPU çıktısıyla tolerans içinde karşılaştırılarak test edilir.
 - `gfx3d` arka uçtan bağımsız kalır (mesh + materyal + çizim listesi); WebGPU arka ucu ikinci tüketicidir.
 
+### D-109 — Platform sınırlarını zorla: en yeni web özellikleri, tespit + yedek
+**KABUL** · 2026-10-29, kullanıcı kararı ("katı web prensiplerini esnetebildiğimiz kadar esnet; CPU da GPU da çok iyi")
+- Motor, tarayıcının sunduğu en yeni ve en hızlı özellikleri varsayılan olarak kullanır: SharedArrayBuffer + wasm
+  thread'leri (COOP/COEP zorunlu), SIMD128 ve **relaxed SIMD**, bulk memory, WebGPU (compute, timestamp-query,
+  subgroups, f16 — varsa), OffscreenCanvas ile worker'da render, Atomics.waitAsync, WebCodecs/WebTransport/WebRTC.
+- Her özellik açılışta **tespit edilir** (yetenek raporu wasm'a verilir); yoksa bir alt basamağa düşülür (ör. relaxed
+  SIMD yoksa SIMD128 derlemesi, WebGPU yoksa CPU raster). "En düşük ortak payda" için tasarım yapılmaz; tavan hedeflenir,
+  taban yalnız çalışır kalır.
+- Birden çok wasm derlemesi (ör. `engine.wasm` + `engine_relaxed.wasm`) kabul edilir; JS yükleyici yeteneğe göre seçer
+  (seçim kuralı ARCHITECTURE §2'de, JS'te başka mantık yok).
+- CPU ve GPU yolları birinci sınıftır: CPU yolu yalnız "yedek" değil, kendi başına en hızlı hale getirilir.
+
 ## Bekleyen öneriler (karar verilmedi)
 
 - **Ö-1** `fb_clear`'da paylaşımlı bellekte `memory.fill` yerine her zaman `v128.store` döngüsü
