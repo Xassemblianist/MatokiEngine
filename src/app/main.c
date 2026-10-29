@@ -35,6 +35,7 @@
 #include "masm/masm.h"
 #include "jit/jit.h"
 #include "bench/asm_sources.h"
+#include "spec/spec.h"
 
 #define FB_DEFAULT_W 640
 #define FB_DEFAULT_H 360
@@ -1013,4 +1014,36 @@ EXPORT(engine_kuyu_debug) const f32* engine_kuyu_debug(void) {
 
 EXPORT(engine_kuyu_cmd) void engine_kuyu_cmd(u32 cmd, f32 a, f32 b, f32 c) {
     scene_kuyu_debug_cmd(cmd, a, b, c);
+}
+
+/* F0_B (ARCH_V2 H1): Çalışma anı özelleştirme (arketip başına JIT ECS döngüsü) benchmark dışa aktarımları */
+static void ensure_spec_arena(void) {
+    if (g_frame_arena.base == NULL) {
+        u8* heap = &__heap_base;
+        arena_init(&g_frame_arena, heap + MB(64), MB(128));
+    }
+}
+
+EXPORT(engine_spec_verify) i32 engine_spec_verify(void) {
+    ensure_spec_arena();
+    arena_reset(&g_frame_arena);
+    i32 rc = spec_bench_verify(&g_frame_arena);
+    arena_reset(&g_frame_arena);
+    return rc;
+}
+
+EXPORT(engine_spec_bench_run) i32 engine_spec_bench_run(u32 entity_count) {
+    ensure_spec_arena();
+    arena_reset(&g_frame_arena);
+    i32 rc = spec_bench_run(&g_frame_arena, entity_count);
+    arena_reset(&g_frame_arena);
+    return rc;
+}
+
+EXPORT(engine_spec_report_ptr) const char* engine_spec_report_ptr(void) {
+    return spec_bench_report_ptr();
+}
+
+EXPORT(engine_spec_report_len) u32 engine_spec_report_len(void) {
+    return spec_bench_report_len();
 }
