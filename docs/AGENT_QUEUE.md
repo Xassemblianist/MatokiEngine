@@ -7,7 +7,7 @@ Yönetici olmadan çalışır: her ajan kendi dalında işi bitirir, `merge.sh` 
 ```bash
 nohup /home/ostriquetrum/matoki-wt/queue/run2.sh > /home/ostriquetrum/matoki-wt/logs/run2.log 2>&1 &
 ```
-- Aynı anda en çok 4 ajan (`MAX=6 run2.sh` ile değişir). Bağımlılığı olan görev, bağımlı olduğu görev main'de DONE olunca başlar.
+- Aynı anda en çok 4 ajan (`MAX=7 run2.sh` → 6 ajan). Bağımlılığı olan görev, bağımlı olduğu görev main'de DONE olunca başlar.
 - İzleme: `tail -f /home/ostriquetrum/matoki-wt/logs/run2.log`, ajan logları `logs/<görev>.log` (sonunda `BITTI <görev> MERGED` ya da `MERGE_EDILMEDI`).
 - Sonuçlar: `make status`, görev dosyalarının "Notlar" bölümü, `git log main`.
 - Durdurmak: `pkill -f run2.sh` (çalışan ajanlar bitene kadar sürer).
@@ -62,13 +62,13 @@ Bitiş (zorunlu, sırayla):
 #!/bin/bash
 # Özerk kuyruk: items2.txt satırları "görev model [bağımlılık,...]". Bağımlılıklar main'de DONE olunca başlar.
 # Her ajan kendi worktree'sinde çalışır ve merge.sh ile kendisi main'e alır + yayınlar. Aynı anda en çok MAX ajan.
-MAX=${MAX:-4}; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
+MAX=${MAX:-5}  # agy hub süreci de sayılır → 4 ajan; W=/home/ostriquetrum/matoki-wt; MAIN=/home/ostriquetrum/WEBASSEMBLY; cd $W
 done_in_main() { grep -q '^Durum: DONE' "$MAIN/tasks/$1.md" 2>/dev/null; }
 while read -r t m d; do
   [ -z "$t" ] || [[ $t == \#* ]] && continue
   done_in_main "$t" && { echo "atla $t (DONE)"; continue; }
   for x in ${d//,/ }; do until done_in_main "$x"; do sleep 60; done; done
-  while [ "$(pgrep -fc "^agy -p")" -ge "$MAX" ]; do sleep 30; done
+  while [ "$(pgrep -x agy | wc -l)" -ge "$MAX" ]; do sleep 30; done
   git -C $MAIN worktree add -q -b "$t" "$W/$t" main 2>/dev/null || git -C $MAIN worktree add -q "$W/$t" "$t"
   P=$(sed "s/__T__/$t/g; s/__M__/$m/g" queue/prompt.txt)
   ( cd $W/$t && agy -p "$P" --model "$m" --dangerously-skip-permissions > $W/logs/$t.log 2>&1
