@@ -418,7 +418,7 @@ TEST(jpeg_wasm_simd_bit_exact) {
         "    if (!outPtr) throw new Error(`wasm decode failed: ${name}`);\n"
         "    const w = inst.exports.get_w(), h = inst.exports.get_h();\n"
         "    const outBytes = Buffer.from(inst.exports.memory.buffer, outPtr, w * h * 4);\n"
-        "    fs.writeFileSync(`/tmp/matoki_jpeg_wasm_${name}.bin`, outBytes);\n"
+        "    fs.writeFileSync(`build/jpeg_wasm_${name}.bin`, outBytes);\n"
         "  }\n"
         "} finally {\n"
         "  fs.rmSync(tmp, { recursive: true, force: true });\n"
@@ -430,7 +430,7 @@ TEST(jpeg_wasm_simd_bit_exact) {
     for (u32 ci = 0; ci < ARRAY_LEN(k_cases); ci++) {
         char jpg_path[128], bin_path[128];
         snprintf(jpg_path, sizeof(jpg_path), "tests/assets/%s.jpg", k_cases[ci].name);
-        snprintf(bin_path, sizeof(bin_path), "/tmp/matoki_jpeg_wasm_%s.bin", k_cases[ci].name);
+        snprintf(bin_path, sizeof(bin_path), "build/jpeg_wasm_%s.bin", k_cases[ci].name);
 
         usize jpg_len = load_bin_file(jpg_path, g_file_buf, sizeof(g_file_buf));
         usize bin_len = load_bin_file(bin_path, g_ppm_buf, sizeof(g_ppm_buf));
@@ -465,14 +465,14 @@ TEST(jpeg_bench_1024_420) {
     Arena a;
     arena_init(&a, g_arena_mem, sizeof(g_arena_mem));
 
-    int rc = system("python3 tests/assets/make_jpeg.py --bench /tmp/matoki_jpeg_bench");
+    int rc = system("python3 tests/assets/make_jpeg.py --bench build/jpeg_bench");
     CHECK(rc == 0);
     if (rc != 0) return;
 
-    usize len_base = load_bin_file("/tmp/matoki_jpeg_bench/bench_1024_base.jpg", g_file_buf, MB(1));
-    usize len_prog = load_bin_file("/tmp/matoki_jpeg_bench/bench_1024_prog.jpg", g_ppm_buf, MB(1));
-    remove("/tmp/matoki_jpeg_bench/bench_1024_base.jpg");
-    remove("/tmp/matoki_jpeg_bench/bench_1024_prog.jpg");
+    usize len_base = load_bin_file("build/jpeg_bench/bench_1024_base.jpg", g_file_buf, MB(1));
+    usize len_prog = load_bin_file("build/jpeg_bench/bench_1024_prog.jpg", g_ppm_buf, MB(1));
+    remove("build/jpeg_bench/bench_1024_base.jpg");
+    remove("build/jpeg_bench/bench_1024_prog.jpg");
     CHECK(len_base > 0 && len_prog > 0);
     if (!len_base || !len_prog) return;
 
