@@ -1,6 +1,6 @@
 # P1_F — GPU akışkan / parçacık fiziği (PBF)
 
-Durum: TODO
+Durum: IN_PROGRESS (agy gemini-4-argon-high)
 
 ## Amaç
 Matoki compute ile Position Based Fluids (Macklin 2013): uzaysal hash ızgarası (sayma sıralaması, atomic_add), yoğunluk
