@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "core/profiler.h"
 #include "core/embed.h"
+#include "core/simd.h"
 #include "plat/platform.h"
 #include "plat/input.h"
 #include "raster/framebuffer.h"
@@ -94,6 +95,9 @@ static DemoScene     g_scene;
 static b32           g_use_jit;
 static b32           g_show_debug;
 static b32           g_pointer_locked;   /* JS fare kilidi durumu (engine_set_pointer_lock) */
+static u32           g_caps_mask;        /* Platform yetenek bit maskesi (engine_set_caps) */
+static u32           g_caps_gpu_max_tex2d;
+static u32           g_caps_gpu_max_buf_mb;
 
 /* Canlı editör önizleme shader durumu */
 static ManagedShader    g_live_shader;
@@ -515,9 +519,9 @@ static void draw_top_bar(void) {
 
 static void draw_debug_overlay(void) {
     i32 pw = 316;
-    i32 ph = 324;
+    i32 ph = 334;
     i32 px = (i32)g_fb.w - pw - 6;
-    i32 py = 24;
+    i32 py = 22;
 
     ui_panel_begin(&g_ui, "MATOKI DEBUG OVERLAY (F1)", px, py, pw, ph);
 
@@ -527,6 +531,19 @@ static void draw_debug_overlay(void) {
                (f64)fps, (f64)g_cur_frame_ms, thread_count(),
                g_use_jit ? "Matoki JIT" : "C Referans",
                blend_mode_name(g_blend_mode));
+    ui_label(&g_ui, line);
+
+    fmt_format(line, sizeof(line), "Caps:%s%s%s%s%s%s%s[%s/%s] tex:%u",
+               (g_caps_mask & CAP_SAB)          ? "SAB "  : "",
+               (g_caps_mask & CAP_SIMD128)      ? "SIMD " : "",
+               (g_caps_mask & CAP_RELAXED_SIMD) ? "RLX "  : "",
+               (g_caps_mask & CAP_THREADS)      ? "THR "  : "",
+               (g_caps_mask & CAP_OFFSCREEN)    ? "OFFS " : "",
+               (g_caps_mask & CAP_WAIT_ASYNC)   ? "WA "   : "",
+               (g_caps_mask & CAP_WEBGPU)       ? "GPU "  : "",
+               SIMD_RELAXED ? "rlx" : "std",
+               (g_caps_mask & CAP_WORKER_RENDER) ? "wrk" : "main",
+               g_caps_gpu_max_tex2d);
     ui_label(&g_ui, line);
 
     ui_frame_graph(&g_ui, "Kare Suresi", 33.3f);
@@ -1013,4 +1030,19 @@ EXPORT(engine_kuyu_debug) const f32* engine_kuyu_debug(void) {
 
 EXPORT(engine_kuyu_cmd) void engine_kuyu_cmd(u32 cmd, f32 a, f32 b, f32 c) {
     scene_kuyu_debug_cmd(cmd, a, b, c);
+}
+
+/* Platform yetenek bildirimi (ARCHITECTURE §2, D-109): web/caps.js sonuçlarını alır */
+EXPORT(engine_set_caps) void engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u32 gpu_max_buf_mb) {
+#if SIMD_RELAXED
+    caps_mask |= CAP_RELAXED_BUILD;
+#endif
+    g_caps_mask           = caps_mask;
+    g_caps_gpu_max_tex2d  = gpu_max_tex2d;
+    g_caps_gpu_max_buf_mb = gpu_max_buf_mb;
+    LOG("Platform caps: mask=0x%04x (%s, render=%s) gpu_tex2d=%u gpu_buf=%uMB",
+        g_caps_mask,
+        SIMD_RELAXED ? "engine_relaxed.wasm" : "engine.wasm",
+        (g_caps_mask & CAP_WORKER_RENDER) ? "worker" : "main",
+        g_caps_gpu_max_tex2d, g_caps_gpu_max_buf_mb);
 }

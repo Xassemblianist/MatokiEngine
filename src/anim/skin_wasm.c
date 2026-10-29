@@ -1,9 +1,10 @@
-/* anim/skin_wasm.c — skin_vertices'in wasm SIMD128 uygulaması.
- * Mat4 sütunlarını f32x4 vektörleri olarak ağırlıklandırır; toplama ağacı sırası
- * skaler sürüm (skin.c) ile aynı olduğundan bit-bit aynı sonuç üretir.
+/* anim/skin_wasm.c — skin_vertices'in wasm SIMD128 ve Relaxed SIMD uygulaması.
+ * Mat4 sütunlarını f32x4 vektörleri olarak ağırlıklandırır; normal SIMD derlemesinde toplama
+ * ağacı sırası skaler sürüm (skin.c) ile aynıdır (bit-bit aynı), relaxed SIMD derlemesinde
+ * (-mrelaxed-simd) simd_madd ile f32x4.relaxed_madd (FMA) kullanır.
  */
 #include "anim/skin.h"
-#include <wasm_simd128.h>
+#include "core/simd.h"
 
 static b32 mat4_is_finite_wasm(const Mat4* m) {
     for (u32 i = 0; i < 16; i++) {
@@ -14,10 +15,10 @@ static b32 mat4_is_finite_wasm(const Mat4* m) {
 
 static inline v128_t blend_col(const f32* m0, const f32* m1, const f32* m2, const f32* m3,
                                u32 off, v128_t vw0, v128_t vw1, v128_t vw2, v128_t vw3) {
-    v128_t a = wasm_f32x4_add(wasm_f32x4_mul(wasm_v128_load(m0 + off), vw0),
-                              wasm_f32x4_mul(wasm_v128_load(m1 + off), vw1));
-    v128_t b = wasm_f32x4_add(wasm_f32x4_mul(wasm_v128_load(m2 + off), vw2),
-                              wasm_f32x4_mul(wasm_v128_load(m3 + off), vw3));
+    v128_t a = simd_madd(wasm_v128_load(m0 + off), vw0,
+                         wasm_f32x4_mul(wasm_v128_load(m1 + off), vw1));
+    v128_t b = simd_madd(wasm_v128_load(m2 + off), vw2,
+                         wasm_f32x4_mul(wasm_v128_load(m3 + off), vw3));
     return wasm_f32x4_add(a, b);
 }
 
@@ -93,9 +94,8 @@ void skin_vertices(const Mat4* skin_mats, u32 joint_count,
             px = 0.0f; py = 0.0f; pz = 0.0f;
         }
         v128_t vp = wasm_f32x4_add(
-            wasm_f32x4_add(wasm_f32x4_mul(c0, wasm_f32x4_splat(px)),
-                           wasm_f32x4_mul(c1, wasm_f32x4_splat(py))),
-            wasm_f32x4_add(wasm_f32x4_mul(c2, wasm_f32x4_splat(pz)), c3));
+            simd_madd(c0, wasm_f32x4_splat(px), wasm_f32x4_mul(c1, wasm_f32x4_splat(py))),
+            simd_madd(c2, wasm_f32x4_splat(pz), c3));
 
         out_px[i] = wasm_f32x4_extract_lane(vp, 0);
         out_py[i] = wasm_f32x4_extract_lane(vp, 1);
@@ -106,10 +106,8 @@ void skin_vertices(const Mat4* skin_mats, u32 joint_count,
             if (!(anim_f32_finite(nx) && anim_f32_finite(ny) && anim_f32_finite(nz))) {
                 nx = 0.0f; ny = 1.0f; nz = 0.0f;
             }
-            v128_t vn = wasm_f32x4_add(
-                wasm_f32x4_add(wasm_f32x4_mul(c0, wasm_f32x4_splat(nx)),
-                               wasm_f32x4_mul(c1, wasm_f32x4_splat(ny))),
-                wasm_f32x4_mul(c2, wasm_f32x4_splat(nz)));
+            v128_t vn = simd_madd(c2, wasm_f32x4_splat(nz),
+                simd_madd(c0, wasm_f32x4_splat(nx), wasm_f32x4_mul(c1, wasm_f32x4_splat(ny))));
 
             f32 rnx = wasm_f32x4_extract_lane(vn, 0);
             f32 rny = wasm_f32x4_extract_lane(vn, 1);

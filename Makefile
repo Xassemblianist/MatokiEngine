@@ -1,7 +1,7 @@
 # MATOKI Makefile
-#  make        -> build/engine.wasm (+ web/engine.wasm kopyası)
+#  make        -> build/engine.wasm + build/engine_relaxed.wasm (+ web/ kopyaları)
 #  make host   -> build/host/test_runner (native)
-#  make test   -> native testler + wasm-validate
+#  make test   -> native testler + wasm-validate (engine.wasm + engine_relaxed.wasm)
 #  make serve  -> tools/serve.py
 #  make check  -> test + kural denetimi (src/ altında libc include yok)
 #  make status -> görev durum tablosu (tasks/*.md DURUM satırları)
@@ -18,6 +18,7 @@ WASM_CFLAGS := --target=wasm32 -std=c11 -O2 -ffreestanding -fno-builtin -nostdli
                -msimd128 -matomics -mbulk-memory -mnontrapping-fptoint -msign-ext \
                -DPLAT_SHARED_MEMORY=1 \
                -Wall -Wextra -Werror -Isrc -MMD -MP
+WASM_RELAXED_CFLAGS := $(WASM_CFLAGS) -mrelaxed-simd
 WASM_LDFLAGS := --target=wasm32 -nostdlib \
                -Wl,--no-entry -Wl,--shared-memory -Wl,--import-memory -Wl,--import-table -Wl,--growable-table \
                -Wl,--initial-memory=268435456 -Wl,--max-memory=1073741824 \
@@ -27,13 +28,15 @@ HOST_CFLAGS := -std=c11 -O1 -g -Wall -Wextra -Werror -Isrc -Itests -MMD -MP \
                -fsanitize=address,undefined -fno-omit-frame-pointer
 HOST_LDFLAGS := -fsanitize=address,undefined
 
-SRC      := $(shell find src -name '*.c' | sort)
-WASM_OBJ := $(SRC:%.c=build/wasm/%.o)
+SRC              := $(shell find src -name '*.c' | sort)
+WASM_OBJ         := $(SRC:%.c=build/wasm/%.o)
+WASM_RELAXED_OBJ := $(SRC:%.c=build/wasm_relaxed/%.o)
 
 # shaders/*.mtk -> build/gen/embed_shaders.c (sadece wasm; bkz. src/core/embed.h)
 .DEFAULT_GOAL := all
 SHADERS  := $(sort $(wildcard shaders/*.mtk))
-WASM_OBJ += build/wasm/build/gen/embed_shaders.o
+WASM_OBJ         += build/wasm/build/gen/embed_shaders.o
+WASM_RELAXED_OBJ += build/wasm_relaxed/build/gen/embed_shaders.o
 
 build/gen/embed_shaders.c: $(SHADERS) tools/embed.py
 	@mkdir -p $(dir $@)
@@ -52,7 +55,7 @@ HOST_LIB_OBJ := $(HOST_LIB_SRC:%.c=build/host/%.o) build/host/tools/host/plat_ho
 .PHONY: all host test serve clean check status
 .SECONDARY:
 
-all: web/engine.wasm
+all: web/engine.wasm web/engine_relaxed.wasm
 
 build/engine.wasm: $(WASM_OBJ)
 	@mkdir -p $(dir $@)
@@ -62,9 +65,21 @@ web/engine.wasm: build/engine.wasm
 	@mkdir -p web
 	cp $< $@
 
+build/engine_relaxed.wasm: $(WASM_RELAXED_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(WASM_LDFLAGS) $(WASM_RELAXED_OBJ) -o $@
+
+web/engine_relaxed.wasm: build/engine_relaxed.wasm
+	@mkdir -p web
+	cp $< $@
+
 build/wasm/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(WASM_CFLAGS) -c $< -o $@
+
+build/wasm_relaxed/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(WASM_RELAXED_CFLAGS) -c $< -o $@
 
 host: build/host/test_runner $(TOOL_BINS)
 
@@ -83,6 +98,7 @@ build/host/%.o: %.c
 
 test: all host
 	wasm-validate --enable-all build/engine.wasm
+	wasm-validate --enable-all build/engine_relaxed.wasm
 	./build/host/test_runner
 
 # Kural denetimi: src/ altında libc başlığı yasak (derleyici intrinsic başlığı wasm_simd128.h serbest).
@@ -100,6 +116,6 @@ serve: all
 	python3 tools/serve.py
 
 clean:
-	rm -rf build web/engine.wasm
+	rm -rf build web/engine.wasm web/engine_relaxed.wasm
 
--include $(WASM_OBJ:.o=.d) $(HOST_OBJ:.o=.d)
+-include $(WASM_OBJ:.o=.d) $(WASM_RELAXED_OBJ:.o=.d) $(HOST_OBJ:.o=.d)

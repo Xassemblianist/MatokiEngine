@@ -69,7 +69,18 @@ RhiErrorRing* engine_gpu_error_ring(void);       // JS → C hata geri bildirim 
 b32           engine_gpu_push_error(u32 kind, u32 handle, u32 line, u32 col,
                                     const char* msg, u32 msg_len);
 u32           engine_gpu_test_frame(f64 now_ms, f32 dt); // bağımsız WebGPU RHI demosu (gpu_test.html)
+
+// Platform yetenek bildirimi (D-109, web/caps.js): açılışta tespit edilen yetenek bit maskesi
+// (CAP_SAB, CAP_SIMD128, CAP_RELAXED_SIMD, CAP_THREADS, CAP_BULK_MEMORY, CAP_MEMORY64,
+// CAP_WEBGPU, CAP_GPU_TIMESTAMP, CAP_GPU_SUBGROUPS, CAP_GPU_F16, CAP_OFFSCREEN, CAP_WAIT_ASYNC,
+// CAP_WEBCODECS, CAP_WEBTRANSPORT, CAP_WORKER_RENDER, CAP_RELAXED_BUILD) ve WebGPU limitleri.
+void  engine_set_caps(u32 caps_mask, u32 gpu_max_tex2d, u32 gpu_max_buf_mb);
 ```
+
+### Yükleyici seçim kuralı ve Worker'da render (D-109)
+- `web/caps.js` açılışta tarayıcı ve Wasm yeteneklerini `WebAssembly.validate` probları ve API denetimleriyle tespit eder.
+- **İkili seçimi**: `relaxedSimd` destekleniyorsa `engine_relaxed.wasm` (`-mrelaxed-simd`), aksi halde `engine.wasm` yüklenir (`?relaxed=0|1` ile zorlanabilir).
+- **Worker'da render**: `OffscreenCanvas` (`transferControlToOffscreen`) ve `SharedArrayBuffer` mevcutsa motor döngüsü (`engine_init`, `engine_frame`, `putImageData`) ve alt raster worker havuzu bir render worker'da (`tid=0`) çalışır; ana iş parçacığı yalnızca girdi (`InputState`), ses (`AudioWorklet`), sürükle-bırak ve DOM olaylarını köprüler. Desteklenmezse (veya `?worker=0` verilirse) ana iş parçacığı `requestAnimationFrame` döngüsüne düşülür.
 
 ### Imports (`src/plat/platform.h`, modül `env`)
 ```c

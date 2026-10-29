@@ -7,3 +7,4 @@ out/
 *.swp
 .DS_Store
 __pycache__/
+web/engine_relaxed.wasm
