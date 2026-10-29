@@ -116,4 +116,12 @@ void synth_song_stop(Synth* s);
 /* parça ekle (pattern synth_parse_pattern ile çözülür) */
 b32  synth_song_add_track(Synth* s, const char* pattern, const SynthSfx* instrument);
 
+/* Denizcilik / Gelgit prosedürel ses sentez yardımcıları */
+void synth_sfx_sea_wind(f32 app_wind_speed, f32 app_angle_rad, SynthSfx* out);
+void synth_sfx_hull_water(f32 boat_speed, b32 is_surfing, SynthSfx* out);
+void synth_sfx_sail_flap(f32 luffing, SynthSfx* out);
+void synth_sfx_rope_creak(f32 heel_norm, SynthSfx* out);
+void synth_sfx_thunder(f32 intensity, SynthSfx* out);
+void synth_sfx_buoy_bell(b32 major_chime, SynthSfx* out);
+
 #endif

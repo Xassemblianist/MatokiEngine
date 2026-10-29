@@ -395,9 +395,18 @@ typedef struct {
     RhiBuffer          boat_fs_ub[GPU_OCEAN_BOAT_PARTS];
     RhiBindGroup       boat_vs_bg[GPU_OCEAN_BOAT_PARTS];
     RhiBindGroup       boat_fs_bg[GPU_OCEAN_BOAT_PARTS];
+
+    /* Ek 3D dünya nesneleri (adalar, iskele, deniz fenerleri, şamandıralar, hayalet tekne) */
+    RhiBuffer          extra_vs_ub[GPU_OCEAN_MAX_EXTRAS];
+    RhiBuffer          extra_lit_fs_ub[GPU_OCEAN_MAX_EXTRAS];
+    RhiBuffer          extra_unlit_fs_ub[GPU_OCEAN_MAX_EXTRAS];
+    RhiBindGroup       extra_lit_vs_bg[GPU_OCEAN_MAX_EXTRAS];
+    RhiBindGroup       extra_lit_fs_bg[GPU_OCEAN_MAX_EXTRAS];
+    RhiBindGroup       extra_unlit_vs_bg[GPU_OCEAN_MAX_EXTRAS];
+    RhiBindGroup       extra_unlit_fs_bg[GPU_OCEAN_MAX_EXTRAS];
 } GpuOceanState;
 
-static u8            g_gpu_ocean_mem[MB(6)];
+static u8            g_gpu_ocean_mem[MB(8)];
 static GpuOceanState g_gpu_ocean;
 
 /* ---------- Yardımcı Fonksiyonlar ---------- */
@@ -476,6 +485,25 @@ static void upload_mesh_3d(Rhi* rhi, Arena* scratch, const Mesh* m, GpuMeshRes* 
     out->index_count = ic;
     rhi_write_buffer(rhi, out->vb, 0u, verts, vb_bytes);
     rhi_write_buffer(rhi, out->ib, 0u, m->indices, ib_bytes);
+    arena_pop_to(scratch, mark);
+}
+
+static void update_mesh_3d_vb(Rhi* rhi, Arena* scratch, const Mesh* m, const GpuMeshRes* res) {
+    if (!m || !res || res->vb == RHI_INVALID_HANDLE) return;
+    usize mark = arena_mark(scratch);
+    u32 vc = m->vertex_count;
+    GpuVertex3d* verts = ARENA_PUSH_ARRAY(scratch, GpuVertex3d, vc);
+    for (u32 i = 0u; i < vc; i++) {
+        verts[i].px = m->px[i];
+        verts[i].py = m->py[i];
+        verts[i].pz = m->pz[i];
+        verts[i].nx = m->nx ? m->nx[i] : 0.0f;
+        verts[i].ny = m->ny ? m->ny[i] : 1.0f;
+        verts[i].nz = m->nz ? m->nz[i] : 0.0f;
+        verts[i].u  = m->u  ? m->u[i]  : 0.0f;
+        verts[i].v  = m->v  ? m->v[i]  : 0.0f;
+    }
+    rhi_write_buffer(rhi, res->vb, 0u, verts, vc * (u32)sizeof(GpuVertex3d));
     arena_pop_to(scratch, mark);
 }
 
@@ -985,6 +1013,55 @@ static b32 gpu_ocean_init_resources(GpuOceanState* st, Arena* scratch, const Gpu
         }
     }
 
+    /* Ek 3D dünya nesneleri için uniform tamponları ve bind group'lar */
+    for (u32 i = 0u; i < GPU_OCEAN_MAX_EXTRAS; i++) {
+        st->extra_vs_ub[i]       = rhi_create_buffer(rhi, (u32)sizeof(GpuVsUniforms),      RHI_BUF_UNIFORM | RHI_BUF_COPY_DST);
+        st->extra_lit_fs_ub[i]   = rhi_create_buffer(rhi, (u32)sizeof(GpuLitFsUniforms),   RHI_BUF_UNIFORM | RHI_BUF_COPY_DST);
+        st->extra_unlit_fs_ub[i] = rhi_create_buffer(rhi, (u32)sizeof(GpuUnlitFsUniforms), RHI_BUF_UNIFORM | RHI_BUF_COPY_DST);
+
+        RhiBindGroupDesc lvs_bgd = {
+            .pipeline    = st->pipe_lit_back,
+            .group_index = MTK_WGSL_VERT_GROUP,
+            .entries = {
+                { .binding = 0u, .kind = RHI_BIND_BUFFER, .resource = st->extra_vs_ub[i], .size = (u32)sizeof(GpuVsUniforms) }
+            },
+            .entry_count = 1u
+        };
+        st->extra_lit_vs_bg[i] = rhi_create_bind_group(rhi, &lvs_bgd);
+
+        RhiBindGroupDesc lfs_bgd = {
+            .pipeline    = st->pipe_lit_back,
+            .group_index = MTK_WGSL_FRAG_GROUP,
+            .entries = {
+                { .binding = 0u, .kind = RHI_BIND_BUFFER,  .resource = st->extra_lit_fs_ub[i], .size = (u32)sizeof(GpuLitFsUniforms) },
+                { .binding = 1u, .kind = RHI_BIND_TEXTURE, .resource = st->tex_deck },
+                { .binding = 2u, .kind = RHI_BIND_SAMPLER, .resource = st->lin_sampler }
+            },
+            .entry_count = 3u
+        };
+        st->extra_lit_fs_bg[i] = rhi_create_bind_group(rhi, &lfs_bgd);
+
+        RhiBindGroupDesc uvs_bgd = {
+            .pipeline    = st->pipe_unlit,
+            .group_index = MTK_WGSL_VERT_GROUP,
+            .entries = {
+                { .binding = 0u, .kind = RHI_BIND_BUFFER, .resource = st->extra_vs_ub[i], .size = (u32)sizeof(GpuVsUniforms) }
+            },
+            .entry_count = 1u
+        };
+        st->extra_unlit_vs_bg[i] = rhi_create_bind_group(rhi, &uvs_bgd);
+
+        RhiBindGroupDesc ufs_bgd = {
+            .pipeline    = st->pipe_unlit,
+            .group_index = MTK_WGSL_FRAG_GROUP,
+            .entries = {
+                { .binding = 0u, .kind = RHI_BIND_BUFFER, .resource = st->extra_unlit_fs_ub[i], .size = (u32)sizeof(GpuUnlitFsUniforms) }
+            },
+            .entry_count = 1u
+        };
+        st->extra_unlit_fs_bg[i] = rhi_create_bind_group(rhi, &ufs_bgd);
+    }
+
     st->initialized = TRUE;
     return !rhi->overflow && rhi->dropped_cmds == 0u;
 }
@@ -1164,8 +1241,15 @@ b32 gpu_ocean_render(Arena* scratch, const GpuOceanFrameParams* p, u32* out_tris
     sfsu.sun_col     = vec4(p->sun_col.x, p->sun_col.y, p->sun_col.z, 0.0f);
     sfsu.sky_zenith  = vec4(p->sky_zenith.x, p->sky_zenith.y, p->sky_zenith.z, 0.0f);
     sfsu.sky_horizon = vec4(p->sky_horiz.x, p->sky_horiz.y, p->sky_horiz.z, 0.0f);
-    sfsu.params      = vec4((f32)p->sim_time, 0.42f, 1.0f, 0.35f + 0.65f * p->warm);
+    f32 cloud_val    = (p->cloud_cover > 0.0f) ? p->cloud_cover : 0.42f;
+    sfsu.params      = vec4((f32)p->sim_time, cloud_val, 1.0f, 0.35f + 0.65f * p->warm);
     rhi_write_buffer(rhi, st->sky_fs_ub, 0u, &sfsu, sizeof(sfsu));
+
+    /* XPBD yelken ağları dinamikse köşe tamponlarını güncelle */
+    if (p->dynamic_sails) {
+        update_mesh_3d_vb(rhi, scratch, p->main_sail_mesh, &st->main_sail_mesh);
+        update_mesh_3d_vb(rhi, scratch, p->jib_sail_mesh,  &st->jib_sail_mesh);
+    }
 
     /* 3. Render Pass (MSAA 4x, Reverse-Z clear_depth = 0.0) */
     RhiPassDesc pass = {
@@ -1206,9 +1290,14 @@ b32 gpu_ocean_render(Arena* scratch, const GpuOceanFrameParams* p, u32* out_tris
     emit_boat_part_draw(st, 4u, &st->cube_mesh, st->pipe_lit_back, vp, bm,
                         vec3(0.0f, 3.15f, -0.25f), vec3(0.14f, 5.60f, 0.14f), 0.0f,
                         vec4(0.88f, 0.74f, 0.55f, 1.0f), sd, fg, fd, FALSE, &tris);
-    emit_boat_part_draw(st, 5u, &st->cube_mesh, st->pipe_lit_back, vp, bm,
-                        vec3(0.0f, 1.32f, -1.72f), vec3(0.10f, 0.10f, 2.95f), 0.0f,
-                        vec4(0.85f, 0.70f, 0.52f, 1.0f), sd, fg, fd, FALSE, &tris);
+    {
+        /* Bumba direk etrafında boom_angle kadar döner */
+        Mat4 boom_pivot = mat4_mul(bm, mat4_mul(mat4_translate(vec3(0.0f, 0.0f, -0.25f)),
+                                   mat4_mul(mat4_rotate_y(p->boom_angle), mat4_translate(vec3(0.0f, 0.0f, 0.25f)))));
+        emit_boat_part_draw(st, 5u, &st->cube_mesh, st->pipe_lit_back, vp, boom_pivot,
+                            vec3(0.0f, 1.32f, -1.72f), vec3(0.10f, 0.10f, 2.95f), 0.0f,
+                            vec4(0.85f, 0.70f, 0.52f, 1.0f), sd, fg, fd, FALSE, &tris);
+    }
     emit_boat_part_draw(st, 6u, &st->cube_mesh, st->pipe_lit_back, vp, bm,
                         vec3(0.0f, 1.02f, 4.15f), vec3(0.10f, 0.10f, 1.75f), -0.18f,
                         vec4(0.85f, 0.70f, 0.52f, 1.0f), sd, fg, fd, FALSE, &tris);
@@ -1221,6 +1310,45 @@ b32 gpu_ocean_render(Arena* scratch, const GpuOceanFrameParams* p, u32* out_tris
     emit_boat_part_draw(st, 9u, &st->jib_sail_mesh, st->pipe_lit_none, vp, bm,
                         vec3(0.0f, 0.0f, 0.0f), vec3(1.0f, 1.0f, 1.0f), 0.0f,
                         vec4(0.98f, 0.94f, 0.88f, 1.0f), sd, fg, fd, FALSE, &tris);
+
+    /* (a2) Ek 3D dünya nesneleri (adalar, iskele, deniz fenerleri, şamandıralar, hayalet tekne) */
+    u32 n_extra = p->extra_count;
+    if (n_extra > GPU_OCEAN_MAX_EXTRAS) n_extra = GPU_OCEAN_MAX_EXTRAS;
+    for (u32 i = 0u; i < n_extra; i++) {
+        const GpuOceanExtraDraw* ed = &p->extras[i];
+        const GpuMeshRes* mesh = ed->use_hull_mesh ? &st->hull_mesh : &st->cube_mesh;
+
+        GpuVsUniforms vsu;
+        vsu.mvp        = mat4_mul(vp, ed->model);
+        vsu.model      = ed->model;
+        vsu.normal_mat = gpu_mat4_transpose(mat4_inverse(ed->model));
+        vsu.shadow_mat = mat4_identity();
+        rhi_write_buffer(rhi, st->extra_vs_ub[i], 0u, &vsu, sizeof(vsu));
+
+        if (ed->is_unlit) {
+            GpuUnlitFsUniforms fsu;
+            fsu.color = ed->color;
+            fsu.fog   = vec4(fg.x, fg.y, fg.z, fd);
+            rhi_write_buffer(rhi, st->extra_unlit_fs_ub[i], 0u, &fsu, sizeof(fsu));
+            rhi_set_pipeline(rhi, st->pipe_unlit);
+            rhi_set_bind_group(rhi, MTK_WGSL_FRAG_GROUP, st->extra_unlit_fs_bg[i]);
+            rhi_set_bind_group(rhi, MTK_WGSL_VERT_GROUP, st->extra_unlit_vs_bg[i]);
+        } else {
+            GpuLitFsUniforms fsu;
+            fsu.light_dir = vec4(sd.x, sd.y, sd.z, 0.0f);
+            fsu.base      = ed->color;
+            fsu.fog       = vec4(fg.x, fg.y, fg.z, fd);
+            rhi_write_buffer(rhi, st->extra_lit_fs_ub[i], 0u, &fsu, sizeof(fsu));
+            rhi_set_pipeline(rhi, st->pipe_lit_back);
+            rhi_set_bind_group(rhi, MTK_WGSL_FRAG_GROUP, st->extra_lit_fs_bg[i]);
+            rhi_set_bind_group(rhi, MTK_WGSL_VERT_GROUP, st->extra_lit_vs_bg[i]);
+        }
+
+        rhi_set_vertex_buffer(rhi, 0u, mesh->vb, 0u, 0u);
+        rhi_set_index_buffer(rhi, mesh->ib, RHI_INDEX_UINT32, 0u, 0u);
+        rhi_draw_indexed(rhi, mesh->index_count, 1u, 0u, 0, 0u);
+        tris += mesh->index_count / 3u;
+    }
 
     /* (b) Kamera merkezli geometrik okyanus yüzeyi */
     if (p->wireframe != 2u) {

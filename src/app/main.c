@@ -31,6 +31,7 @@
 #include "app/scene_ocak.h"
 #include "app/scene_kuyu.h"
 #include "app/scene_ocean.h"
+#include "app/scene_gelgit.h"
 #include "audio/audio.h"
 #include "thread/thread.h"
 #include "thread/job.h"
@@ -67,7 +68,8 @@ typedef enum {
     SCENE_OCAK    = 6,
     SCENE_KUYU    = 7,
     SCENE_OKYANUS = 8,
-    SCENE_COUNT   = 9
+    SCENE_GELGIT  = 9,
+    SCENE_COUNT   = 10
 } DemoScene;
 
 typedef struct {
@@ -159,6 +161,7 @@ static const char* scene_name(DemoScene s) {
     case SCENE_OCAK:    return "7:Ocak";
     case SCENE_KUYU:    return "8:Kuyu";
     case SCENE_OKYANUS: return "9:Okyanus";
+    case SCENE_GELGIT:  return "0:Gelgit";
     default:            return "?";
     }
 }

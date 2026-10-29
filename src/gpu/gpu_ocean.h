@@ -13,6 +13,15 @@
 #include "gfx3d/mesh.h"
 #include "raster/texture.h"
 
+#define GPU_OCEAN_MAX_EXTRAS 28u
+
+typedef struct {
+    Mat4 model;
+    Vec4 color;
+    b32  is_unlit;
+    b32  use_hull_mesh; /* TRUE: hull_mesh, FALSE: unit_cube */
+} GpuOceanExtraDraw;
+
 typedef struct {
     const Ocean*   ocean;
     f64            sim_time;
@@ -49,6 +58,12 @@ typedef struct {
     u32            lit_mtk_len;
     const char*    unlit_mtk_src;
     u32            unlit_mtk_len;
+    /* İsteğe bağlı dinamik yelken, bulut ve ek 3D dünya nesneleri (Gelgit sahnesi için) */
+    b32               dynamic_sails;
+    f32               boom_angle;
+    f32               cloud_cover;
+    u32               extra_count;
+    GpuOceanExtraDraw extras[GPU_OCEAN_MAX_EXTRAS];
 } GpuOceanFrameParams;
 
 /* Tam çözünürlüklü GPU okyanus karesini RHI komut akışına kodlar.
