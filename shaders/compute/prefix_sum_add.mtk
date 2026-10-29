@@ -1,0 +1,10 @@
+// İki geçişli paralel prefix-sum — 2. geçiş: taranmış blok tabanlarını elemanlara ekleme (F0_A)
+
+buffer out_data: buffer<u32>;
+buffer block_offsets: buffer<u32>;
+
+fn compute() {
+    let i: u32 = global_id;
+    let blk: u32 = i >> 2u;
+    out_data[i] = out_data[i] + block_offsets[blk];
+}

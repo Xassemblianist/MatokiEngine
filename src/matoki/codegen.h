@@ -31,9 +31,44 @@ typedef struct {
 u32 mtk_codegen(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
                 u8* out, u32 out_cap, char* err, u32 err_cap);
 
+/* ---------- Compute ABI (F0_A) ---------- */
+#define COMPUTE_MAX_BUFFERS 16u
+
+typedef struct {
+    u32       start;                     /* başlangıç eleman indeksi (global_id tabanı) */
+    u32       count;                     /* bu çağrıda işlenecek eleman sayısı */
+    u32       total_count;               /* toplam eleman sayısı N (sınır kontrolü için) */
+    u32       buffer_count;              /* kullanılan buffer sayısı */
+    const u8* uniforms;                  /* 16-byte hizalı uniform bloğu */
+    void*     buffers[COMPUTE_MAX_BUFFERS]; /* buffer taban işaretçileri (f32* / u32* / vec4*) */
+} MtkComputeBatch;
+
+typedef void (*MtkComputeFn)(MtkComputeBatch* batch);   /* wasm tipi: (i32) -> () */
+
+/* wasm32 ofsetleri — compute JIT bunları kullanır */
+#define COMPUTE_OFF_START        0u
+#define COMPUTE_OFF_COUNT        4u
+#define COMPUTE_OFF_TOTAL_COUNT  8u
+#define COMPUTE_OFF_BUFFER_COUNT 12u
+#define COMPUTE_OFF_UNIFORMS     16u
+#define COMPUTE_OFF_BUFFERS      20u
+
+#if defined(__wasm32__)
+_Static_assert(__builtin_offsetof(MtkComputeBatch, start)        == COMPUTE_OFF_START, "compute_abi");
+_Static_assert(__builtin_offsetof(MtkComputeBatch, count)        == COMPUTE_OFF_COUNT, "compute_abi");
+_Static_assert(__builtin_offsetof(MtkComputeBatch, total_count)  == COMPUTE_OFF_TOTAL_COUNT, "compute_abi");
+_Static_assert(__builtin_offsetof(MtkComputeBatch, buffer_count) == COMPUTE_OFF_BUFFER_COUNT, "compute_abi");
+_Static_assert(__builtin_offsetof(MtkComputeBatch, uniforms)     == COMPUTE_OFF_UNIFORMS, "compute_abi");
+_Static_assert(__builtin_offsetof(MtkComputeBatch, buffers)      == COMPUTE_OFF_BUFFERS, "compute_abi");
+#endif
+
+u32 mtk_codegen_compute(const IrFunc* f, const MtkCodegenOpts* opts, Arena* scratch,
+                        u8* out, u32 out_cap, char* err, u32 err_cap);
+
 /* Referans yorumlayıcı (ir_eval.c): IR'ı skaler C ile, lane lane çalıştırır.
  * JIT çıktısının ve ön ucun doğruluk kâhini. Davranışı codegen ile BİREBİR aynı olmalı
  * (maskeli IF, discard → quads[q].mask bitini temizler, OUTPUT → out_rgba). */
 void ir_eval(const IrFunc* f, ShadeBatch* batch);
+void ir_eval_compute(const IrFunc* f, MtkComputeBatch* batch);
 
 #endif

@@ -1,0 +1,39 @@
+// Doğrusal karışımlı iskelet animasyonu (Linear Blend Skinning — köşe × eklem matrisi) (F0_A)
+// Her köşe 4 eklem ağırlığı (in_weights) ve paketlenmiş 4 eklem indeksi (in_joints) ile
+// 4x4 eklem matrisleri (bone_mats: eklem başına 3 satır vec4, 3x4 afin dönüşüm) üzerinden dönüştürülür.
+
+buffer in_pos: buffer<vec4>;
+buffer in_norm: buffer<vec4>;
+buffer in_joints: buffer<u32>;
+buffer in_weights: buffer<vec4>;
+buffer bone_mats: buffer<vec4>;
+buffer out_pos: buffer<vec4>;
+buffer out_norm: buffer<vec4>;
+
+fn compute() {
+    let i: u32 = global_id;
+    let p: vec4 = in_pos[i];
+    let n: vec4 = in_norm[i];
+    let packed_j: u32 = in_joints[i];
+    let w: vec4 = in_weights[i];
+
+    let j0: u32 = (packed_j & 255u) * 3u;
+    let j1: u32 = ((packed_j >> 8u) & 255u) * 3u;
+    let j2: u32 = ((packed_j >> 16u) & 255u) * 3u;
+    let j3: u32 = ((packed_j >> 24u) & 255u) * 3u;
+
+    let r0: vec4 = bone_mats[j0]      * w.x + bone_mats[j1]      * w.y + bone_mats[j2]      * w.z + bone_mats[j3]      * w.w;
+    let r1: vec4 = bone_mats[j0 + 1u] * w.x + bone_mats[j1 + 1u] * w.y + bone_mats[j2 + 1u] * w.z + bone_mats[j3 + 1u] * w.w;
+    let r2: vec4 = bone_mats[j0 + 2u] * w.x + bone_mats[j1 + 2u] * w.y + bone_mats[j2 + 2u] * w.z + bone_mats[j3 + 2u] * w.w;
+
+    let px: f32 = r0.x * p.x + r0.y * p.y + r0.z * p.z + r0.w;
+    let py: f32 = r1.x * p.x + r1.y * p.y + r1.z * p.z + r1.w;
+    let pz: f32 = r2.x * p.x + r2.y * p.y + r2.z * p.z + r2.w;
+
+    let nx: f32 = r0.x * n.x + r0.y * n.y + r0.z * n.z;
+    let ny: f32 = r1.x * n.x + r1.y * n.y + r1.z * n.z;
+    let nz: f32 = r2.x * n.x + r2.y * n.y + r2.z * n.z;
+
+    out_pos[i]  = vec4(px, py, pz, 1.0);
+    out_norm[i] = vec4(nx, ny, nz, 0.0);
+}

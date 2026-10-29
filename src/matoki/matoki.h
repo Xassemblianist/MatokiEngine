@@ -16,6 +16,7 @@ typedef enum {
     MTK_SYM_UNIFORM = 0,
     MTK_SYM_VARYING = 1,
     MTK_SYM_TEXTURE = 2,
+    MTK_SYM_BUFFER  = 3,
 } MtkSymKind;
 
 /* Matoki dil tipleri (MtkSymbol.type ve AST/sema tip sistemi) */
@@ -35,14 +36,17 @@ typedef enum {
     MTK_TYPE_MAT4,
     MTK_TYPE_TEXTURE2D,
     MTK_TYPE_TEXTURE2D_F32,
+    MTK_TYPE_BUF_F32,
+    MTK_TYPE_BUF_U32,
+    MTK_TYPE_BUF_VEC4,
     MTK_TYPE_COUNT
 } MtkType;
 
 typedef struct {
     char name[32];
-    u32  kind;             /* 0 uniform, 1 varying, 2 texture */
+    u32  kind;             /* 0 uniform, 1 varying, 2 texture, 3 buffer */
     u32  type;             /* MtkType */
-    u32  offset_or_index;  /* uniform: byte ofseti, varying: skaler indeks, texture: slot */
+    u32  offset_or_index;  /* uniform: byte ofseti, varying: skaler indeks, texture/buffer: slot */
     u32  components;       /* skaler bileşen sayısı (f32=1, vec3=3, mat4=16) */
 } MtkSymbol;
 
@@ -52,6 +56,8 @@ typedef struct {
     u32       uniform_bytes;
     u32       varying_count;
     u32       texture_count;
+    u32       buffer_count;
+    b32       is_compute;
 } MtkLayout;
 
 #define MTK_MAX_ERRORS 20
@@ -75,6 +81,8 @@ b32         mtk_type_is_int(MtkType t);
 b32         mtk_type_is_vector(MtkType t);
 b32         mtk_type_is_matrix(MtkType t);
 b32         mtk_type_is_texture(MtkType t);
+b32         mtk_type_is_buffer(MtkType t);
+MtkType     mtk_type_buffer_elem(MtkType t);
 MtkType     mtk_type_scalar_base(MtkType t);
 MtkType     mtk_type_make_vector(MtkType scalar_base, u32 comps);
 
@@ -85,6 +93,9 @@ b32 mtk_compile_ir(const char* src, u32 len, const char* filename, Arena* a,
 /* mtk_compile_ir + ir_optimize + mtk_codegen -> wasm byte'ları. Hata durumunda 0 döner. */
 u32 mtk_compile_wasm(const char* src, u32 len, const char* filename, const MtkCodegenOpts* o,
                      Arena* a, u8* out, u32 out_cap, MtkLayout* layout, MtkDiag* diag);
+
+/* Compute çekirdeğini N eleman üzerinde job_parallel_for + 4-lane SIMD bloklarıyla çalıştırır. */
+void mtk_compute_dispatch(MtkComputeFn fn, const MtkComputeBatch* batch, u32 total_count, u32 grain);
 
 #include "matoki/wgsl.h"
 

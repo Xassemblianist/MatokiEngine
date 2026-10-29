@@ -22,6 +22,7 @@ typedef enum {
     AST_EXPR_BINARY,
     AST_EXPR_SWIZZLE,
     AST_EXPR_CALL,
+    AST_EXPR_INDEX,
 } AstExprKind;
 
 struct AstExpr {
@@ -59,6 +60,10 @@ struct AstExpr {
             AstExpr* args[8];
             u32      arg_count;
         } call;
+        struct {
+            AstExpr* base;
+            AstExpr* index;
+        } index;
     } as;
 };
 
@@ -130,6 +135,7 @@ typedef enum {
     AST_DECL_IN,
     AST_DECL_CONST,
     AST_DECL_FN,
+    AST_DECL_BUFFER,
 } AstDeclKind;
 
 struct AstDecl {
@@ -159,6 +165,9 @@ struct AstDecl {
             u32      param_count;
             AstStmt* body;
         } fn_decl;
+        struct {
+            u32 slot;           /* sema doldurur */
+        } buffer_decl;
     } as;
 };
 

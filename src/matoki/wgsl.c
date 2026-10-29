@@ -321,6 +321,9 @@ static WgslFragCtx g_wgsl_ctx;
 
 u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* opts,
                   char* out, u32 out_cap, char* err, u32 err_cap) {
+    if (f && f->is_compute) {
+        return mtk_wgsl_compute(f, layout, opts, out, out_cap, err, err_cap);
+    }
     if (err && err_cap > 0) err[0] = '\0';
     if (!out || out_cap == 0) {
         wgsl_fail(err, err_cap, "cikti tamponu gecersiz");
@@ -1057,6 +1060,724 @@ u32 mtk_wgsl_frag(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* o
 
     if (wb.overflow) {
         wgsl_fail(err, err_cap, "WGSL cikti tamponu kapasitesi (%u bayt) yetersiz", out_cap);
+        out[0] = '\0';
+        return 0;
+    }
+
+    return wb.len;
+}
+
+u32 mtk_wgsl_compute(const IrFunc* f, const MtkLayout* layout, const MtkWgslOpts* opts,
+                     char* out, u32 out_cap, char* err, u32 err_cap) {
+    if (err && err_cap > 0) err[0] = '\0';
+    if (!out || out_cap == 0) {
+        wgsl_fail(err, err_cap, "cikti tamponu gecersiz");
+        return 0;
+    }
+    out[0] = '\0';
+
+    if (!f || f->count == 0 || !f->insts) {
+        wgsl_fail(err, err_cap, "bos veya gecersiz IrFunc");
+        return 0;
+    }
+    if (f->count > WGSL_MAX_INSTS) {
+        wgsl_fail(err, err_cap, "IrFunc komut sayisi siniri asildi (%u > %u)", f->count, WGSL_MAX_INSTS);
+        return 0;
+    }
+
+    if (!ir_verify(f, err, err_cap)) {
+        return 0;
+    }
+
+    WgslFragCtx* ctx = &g_wgsl_ctx;
+    __builtin_memset(ctx, 0, sizeof(*ctx));
+
+    u32 u_bytes     = f->uniform_bytes;
+    u32 buf_count   = f->buffer_count;
+    u32 atomic_mask = f->buffer_atomic_mask;
+    u8  elem_types[IR_MAX_BUFFERS];
+    for (u32 b = 0; b < IR_MAX_BUFFERS; b++) {
+        elem_types[b] = f->buffer_elem_types[b];
+    }
+
+    if (layout) {
+        if (layout->uniform_bytes > u_bytes)  u_bytes   = layout->uniform_bytes;
+        if (layout->buffer_count > buf_count) buf_count = layout->buffer_count;
+        for (u32 s = 0; s < layout->sym_count; s++) {
+            const MtkSymbol* sym = &layout->syms[s];
+            if (sym->kind == MTK_SYM_BUFFER && sym->offset_or_index < IR_MAX_BUFFERS) {
+                elem_types[sym->offset_or_index] = (u8)mtk_type_buffer_elem((MtkType)sym->type);
+            }
+        }
+    }
+
+    /* Sınır, hizalama ve desteklenen opcode denetimi */
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (op == IR_NOP) continue;
+
+        switch (op) {
+        case IR_UNIFORM_F32:
+        case IR_UNIFORM_I32:
+            if ((in->imm.u & 3u) != 0 || in->imm.u >= 65536u) {
+                wgsl_fail(err, err_cap, "inst %%%u: hizasiz veya gecersiz uniform ofseti %u", i, in->imm.u);
+                return 0;
+            }
+            if (f->uniform_bytes > 0 && in->imm.u + 4u > f->uniform_bytes) {
+                wgsl_fail(err, err_cap, "inst %%%u: uniform ofseti %u sinir disi (%u)", i, in->imm.u, f->uniform_bytes);
+                return 0;
+            }
+            if (in->imm.u + 4u > u_bytes) {
+                u_bytes = in->imm.u + 4u;
+            }
+            break;
+
+        case IR_BUF_LOAD:
+        case IR_BUF_STORE: {
+            u32 slot = IR_BUF_SLOT(in->imm.u);
+            if (slot >= IR_MAX_BUFFERS) {
+                wgsl_fail(err, err_cap, "inst %%%u: buffer slotu %u sinir disi", i, slot);
+                return 0;
+            }
+            if (slot + 1u > buf_count) buf_count = slot + 1u;
+            if (elem_types[slot] == 0) {
+                if (IR_BUF_IS_VEC4(in->imm.u)) elem_types[slot] = (u8)MTK_TYPE_VEC4;
+                else if (op == IR_BUF_LOAD && in->type == IR_T_I32) elem_types[slot] = (u8)MTK_TYPE_U32;
+                else if (op == IR_BUF_STORE && f->insts[in->b].type == IR_T_I32) elem_types[slot] = (u8)MTK_TYPE_U32;
+                else elem_types[slot] = (u8)MTK_TYPE_F32;
+            }
+        } break;
+
+        case IR_ATOMIC_ADD: {
+            u32 slot = in->imm.u;
+            if (slot >= IR_MAX_BUFFERS) {
+                wgsl_fail(err, err_cap, "inst %%%u: atomic buffer slotu %u sinir disi", i, slot);
+                return 0;
+            }
+            if (slot + 1u > buf_count) buf_count = slot + 1u;
+            atomic_mask |= (1u << slot);
+            elem_types[slot] = (u8)MTK_TYPE_U32;
+        } break;
+
+        case IR_CONST_F32:
+        case IR_CONST_I32:
+        case IR_CONST_BOOL:
+        case IR_GLOBAL_ID:
+        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_FMIN: case IR_FMAX:
+        case IR_FNEG: case IR_FABS: case IR_FSQRT: case IR_FFLOOR: case IR_FCEIL: case IR_FTRUNC: case IR_FNEAREST:
+        case IR_IADD: case IR_ISUB: case IR_IMUL: case IR_IAND: case IR_IOR: case IR_IXOR:
+        case IR_ISHL: case IR_ISHR_S: case IR_ISHR_U: case IR_IMIN_S: case IR_IMAX_S:
+        case IR_FEQ: case IR_FNE: case IR_FLT: case IR_FLE: case IR_FGT: case IR_FGE:
+        case IR_IEQ: case IR_INE: case IR_ILT_S: case IR_ILE_S: case IR_IGT_S: case IR_IGE_S:
+        case IR_BAND: case IR_BOR: case IR_BNOT:
+        case IR_SELECT:
+        case IR_F2I: case IR_I2F: case IR_BITCAST_F2I: case IR_BITCAST_I2F:
+        case IR_IF_BEGIN: case IR_ELSE: case IR_IF_END:
+            break;
+
+        default:
+            wgsl_fail(err, err_cap, "inst %%%u: compute icinde desteklenmeyen IR komutu %u", i, (u32)op);
+            return 0;
+        }
+    }
+
+    /* IF kapsama analizi */
+    u32 if_stk[WGSL_MAX_IF];
+    u32 if_depth = 0;
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        ctx->enclosing_if[i] = (if_depth > 0) ? if_stk[if_depth - 1] : IR_NONE;
+        if (op == IR_IF_BEGIN) {
+            if_stk[if_depth++] = i;
+        } else if (op == IR_IF_END) {
+            if_depth--;
+            ctx->enclosing_if[i] = (if_depth > 0) ? if_stk[if_depth - 1] : IR_NONE;
+        }
+    }
+
+    /* Canlılık analizi (kökler: IR_BUF_STORE ve IR_ATOMIC_ADD) */
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        if (in->op == IR_BUF_STORE || in->op == IR_ATOMIC_ADD) {
+            ctx->live[i] = TRUE;
+        }
+    }
+
+    for (u32 i = f->count; i > 0; i--) {
+        u32 idx = i - 1;
+        const IrInst* in = &f->insts[idx];
+        if (in->op == IR_NOP || !ctx->live[idx]) continue;
+
+        if (in->a != IR_NONE) ctx->live[in->a] = TRUE;
+        if (in->b != IR_NONE) ctx->live[in->b] = TRUE;
+        if (in->c != IR_NONE) ctx->live[in->c] = TRUE;
+
+        u32 p_if = ctx->enclosing_if[idx];
+        if (p_if != IR_NONE) {
+            ctx->live[p_if] = TRUE;
+            ctx->live[f->insts[p_if].a] = TRUE;
+        }
+    }
+
+    /* Bölge ağacı ve kapsam dışı kullanılan değerlerin tespiti */
+    u32 cur_reg  = 0;
+    u32 next_reg = 1;
+    u32 reg_stk[WGSL_MAX_IF];
+    u32 r_depth  = 0;
+    ctx->reg_parent[0] = 0;
+
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (op == IR_NOP) {
+            ctx->inst_reg[i] = cur_reg;
+            continue;
+        }
+        if (op == IR_IF_BEGIN) {
+            ctx->inst_reg[i] = cur_reg;
+            reg_stk[r_depth++] = cur_reg;
+            if (ctx->live[i]) {
+                u32 nr = next_reg++;
+                ctx->reg_parent[nr] = cur_reg;
+                cur_reg = nr;
+            }
+            continue;
+        }
+        if (op == IR_ELSE) {
+            u32 if_id = ctx->enclosing_if[i];
+            u32 parent_r = reg_stk[r_depth - 1];
+            ctx->inst_reg[i] = parent_r;
+            if (if_id != IR_NONE && ctx->live[if_id]) {
+                u32 nr = next_reg++;
+                ctx->reg_parent[nr] = parent_r;
+                cur_reg = nr;
+            }
+            continue;
+        }
+        if (op == IR_IF_END) {
+            cur_reg = reg_stk[--r_depth];
+            ctx->inst_reg[i] = cur_reg;
+            continue;
+        }
+        ctx->inst_reg[i] = cur_reg;
+    }
+
+    for (u32 u = 0; u < f->count; u++) {
+        const IrInst* in = &f->insts[u];
+        if (in->op == IR_NOP || !ctx->live[u]) continue;
+        if (in->op == IR_ATOMIC_ADD && in->c != IR_NONE) {
+            ctx->needs_func_var[u] = TRUE;
+        }
+        u32 ops[3] = { in->a, in->b, in->c };
+        for (u32 k = 0; k < 3; k++) {
+            u32 def = ops[k];
+            if (def == IR_NONE || is_const_inst(&f->insts[def])) continue;
+            if (!region_dominates(ctx->inst_reg[def], ctx->inst_reg[u], ctx->reg_parent)) {
+                ctx->needs_func_var[def] = TRUE;
+            }
+        }
+    }
+
+    /* WGSL metnini üret */
+    WgslBuf wb;
+    wb_init(&wb, out, out_cap);
+
+    u32 group = opts ? opts->frag_group : MTK_WGSL_FRAG_GROUP;
+    const char* entry_name = (opts && opts->entry_name && opts->entry_name[0]) ? opts->entry_name : "compute";
+    u32 u_vec4_count = (u_bytes + 15u) / 16u;
+
+    wb_putf(&wb, "// Matoki WGSL compute shader (uniform_bytes=%u, buffers=%u)\n",
+            u_bytes, buf_count);
+
+    if (layout && layout->sym_count > 0) {
+        for (u32 s = 0; s < layout->sym_count; s++) {
+            const MtkSymbol* sym = &layout->syms[s];
+            if (sym->kind == MTK_SYM_UNIFORM) {
+                wb_putf(&wb, "// uniform %-12s : %-6s offset=%u (mtk_u.data[%u])\n",
+                        sym->name, mtk_type_name((MtkType)sym->type),
+                        sym->offset_or_index, sym->offset_or_index / 16u);
+            } else if (sym->kind == MTK_SYM_BUFFER) {
+                wb_putf(&wb, "// buffer  %-12s : %-12s slot=%u (@group(%u) @binding(%u))\n",
+                        sym->name, mtk_type_name((MtkType)sym->type),
+                        sym->offset_or_index, group,
+                        MTK_WGSL_BUF_BINDING(sym->offset_or_index));
+            }
+        }
+    }
+    wb_putc(&wb, '\n');
+
+    if (u_vec4_count > 0) {
+        wb_putf(&wb, "struct MtkUniforms {\n    data: array<vec4<f32>, %u>,\n};\n\n", u_vec4_count);
+        wb_putf(&wb, "@group(%u) @binding(%u) var<uniform> mtk_u: MtkUniforms;\n",
+                group, MTK_WGSL_UBO_BINDING);
+    }
+
+    for (u32 s = 0; s < buf_count; s++) {
+        const char* et = "f32";
+        if (atomic_mask & (1u << s)) {
+            et = "atomic<u32>";
+        } else if (elem_types[s] == (u8)MTK_TYPE_VEC4) {
+            et = "vec4<f32>";
+        } else if (elem_types[s] == (u8)MTK_TYPE_U32) {
+            et = "u32";
+        }
+        wb_putf(&wb, "@group(%u) @binding(%u) var<storage, read_write> buf_%u: array<%s>;\n",
+                group, MTK_WGSL_BUF_BINDING(s), s, et);
+    }
+    if (u_vec4_count > 0 || buf_count > 0) {
+        wb_putc(&wb, '\n');
+    }
+
+    wb_putf(&wb, "@compute @workgroup_size(64)\nfn %s(@builtin(global_invocation_id) gid: vec3<u32>) {\n",
+            entry_name);
+    wb_puts(&wb, "    _ = gid;\n");
+    if (u_vec4_count > 0) {
+        wb_puts(&wb, "    _ = mtk_u.data[0];\n");
+    }
+    for (u32 s = 0; s < buf_count; s++) {
+        wb_putf(&wb, "    _ = &buf_%u;\n", s);
+    }
+
+    for (u32 i = 0; i < f->count; i++) {
+        if (!ctx->live[i] || !ctx->needs_func_var[i]) continue;
+        const IrInst* in = &f->insts[i];
+        wb_putf(&wb, "    var t%u: %s = %s;\n",
+                i, ir_type_wgsl_name((IrType)in->type), ir_type_wgsl_zero((IrType)in->type));
+    }
+
+    u32 indent = 1;
+    u32 active_if_stk[WGSL_MAX_IF];
+    u32 active_if_depth = 0;
+
+    for (u32 i = 0; i < f->count; i++) {
+        const IrInst* in = &f->insts[i];
+        IrOp op = (IrOp)in->op;
+        if (op == IR_NOP) continue;
+
+        if (op == IR_IF_BEGIN) {
+            active_if_stk[active_if_depth++] = i;
+            if (ctx->live[i]) {
+                wb_indent(&wb, indent);
+                wb_puts(&wb, "if (");
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ") {\n");
+                indent++;
+            }
+            continue;
+        }
+        if (op == IR_ELSE) {
+            u32 if_id = active_if_stk[active_if_depth - 1];
+            if (ctx->live[if_id]) {
+                wb_indent(&wb, indent - 1);
+                wb_puts(&wb, "} else {\n");
+            }
+            continue;
+        }
+        if (op == IR_IF_END) {
+            u32 if_id = active_if_stk[--active_if_depth];
+            if (ctx->live[if_id]) {
+                indent--;
+                wb_indent(&wb, indent);
+                wb_puts(&wb, "}\n");
+            }
+            continue;
+        }
+
+        if (!ctx->live[i] || is_const_inst(in)) continue;
+
+        if (op == IR_BUF_STORE) {
+            u32 slot    = IR_BUF_SLOT(in->imm.u);
+            u32 comp    = IR_BUF_COMP(in->imm.u);
+            b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+
+            /* Ardışık 4-bileşenli vec4 yazımını tek vec4<f32>(...) atamasında birleştir */
+            if (is_vec4 && comp == 0 && i + 3 < f->count) {
+                const IrInst* i1 = &f->insts[i + 1];
+                const IrInst* i2 = &f->insts[i + 2];
+                const IrInst* i3 = &f->insts[i + 3];
+                if (i1->op == IR_BUF_STORE && i2->op == IR_BUF_STORE && i3->op == IR_BUF_STORE &&
+                    IR_BUF_IS_VEC4(i1->imm.u) && IR_BUF_IS_VEC4(i2->imm.u) && IR_BUF_IS_VEC4(i3->imm.u) &&
+                    IR_BUF_SLOT(i1->imm.u) == slot && IR_BUF_SLOT(i2->imm.u) == slot && IR_BUF_SLOT(i3->imm.u) == slot &&
+                    IR_BUF_COMP(i1->imm.u) == 1 && IR_BUF_COMP(i2->imm.u) == 2 && IR_BUF_COMP(i3->imm.u) == 3 &&
+                    i1->a == in->a && i2->a == in->a && i3->a == in->a &&
+                    i1->c == in->c && i2->c == in->c && i3->c == in->c &&
+                    ctx->inst_reg[i + 3] == ctx->inst_reg[i]) {
+                    u32 store_indent = indent;
+                    if (in->c != IR_NONE) {
+                        wb_indent(&wb, indent);
+                        wb_puts(&wb, "if (");
+                        emit_operand(&wb, f, in->c);
+                        wb_puts(&wb, ") {\n");
+                        store_indent++;
+                    }
+                    wb_indent(&wb, store_indent);
+                    wb_putf(&wb, "buf_%u[u32(", slot);
+                    emit_operand(&wb, f, in->a);
+                    wb_puts(&wb, ")] = vec4<f32>(");
+                    emit_operand(&wb, f, in->b);
+                    wb_puts(&wb, ", ");
+                    emit_operand(&wb, f, i1->b);
+                    wb_puts(&wb, ", ");
+                    emit_operand(&wb, f, i2->b);
+                    wb_puts(&wb, ", ");
+                    emit_operand(&wb, f, i3->b);
+                    wb_puts(&wb, ");\n");
+                    if (in->c != IR_NONE) {
+                        wb_indent(&wb, indent);
+                        wb_puts(&wb, "}\n");
+                    }
+                    i += 3;
+                    continue;
+                }
+            }
+
+            u32 store_indent = indent;
+            if (in->c != IR_NONE) {
+                wb_indent(&wb, indent);
+                wb_puts(&wb, "if (");
+                emit_operand(&wb, f, in->c);
+                wb_puts(&wb, ") {\n");
+                store_indent++;
+            }
+            wb_indent(&wb, store_indent);
+            if (atomic_mask & (1u << slot)) {
+                wb_putf(&wb, "atomicStore(&buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")], bitcast<u32>(");
+                emit_operand(&wb, f, in->b);
+                wb_puts(&wb, "));\n");
+            } else if (is_vec4) {
+                wb_putf(&wb, "buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_putf(&wb, ")].%c = ", "xyzw"[comp & 3u]);
+                emit_operand(&wb, f, in->b);
+                wb_puts(&wb, ";\n");
+            } else if (elem_types[slot] == (u8)MTK_TYPE_U32) {
+                wb_putf(&wb, "buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")] = bitcast<u32>(");
+                emit_operand(&wb, f, in->b);
+                wb_puts(&wb, ");\n");
+            } else {
+                wb_putf(&wb, "buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")] = ");
+                emit_operand(&wb, f, in->b);
+                wb_puts(&wb, ";\n");
+            }
+            if (in->c != IR_NONE) {
+                wb_indent(&wb, indent);
+                wb_puts(&wb, "}\n");
+            }
+            continue;
+        }
+
+        if (op == IR_ATOMIC_ADD && in->c != IR_NONE) {
+            wb_indent(&wb, indent);
+            wb_puts(&wb, "if (");
+            emit_operand(&wb, f, in->c);
+            wb_puts(&wb, ") {\n");
+            wb_indent(&wb, indent + 1);
+            wb_putf(&wb, "t%u = bitcast<i32>(atomicAdd(&buf_%u[u32(", i, in->imm.u);
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, ")], bitcast<u32>(");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ")));\n");
+            wb_indent(&wb, indent);
+            wb_puts(&wb, "}\n");
+            continue;
+        }
+
+        wb_indent(&wb, indent);
+        if (ctx->needs_func_var[i]) {
+            wb_putf(&wb, "t%u = ", i);
+        } else {
+            wb_putf(&wb, "let t%u: %s = ", i, ir_type_wgsl_name((IrType)in->type));
+        }
+
+        switch (op) {
+        case IR_UNIFORM_F32: {
+            u32 v_idx = in->imm.u / 16u;
+            char comp = "xyzw"[(in->imm.u / 4u) & 3u];
+            wb_putf(&wb, "mtk_u.data[%u].%c", v_idx, comp);
+        } break;
+
+        case IR_UNIFORM_I32: {
+            u32 v_idx = in->imm.u / 16u;
+            char comp = "xyzw"[(in->imm.u / 4u) & 3u];
+            wb_putf(&wb, "bitcast<i32>(mtk_u.data[%u].%c)", v_idx, comp);
+        } break;
+
+        case IR_GLOBAL_ID:
+            wb_puts(&wb, "i32(gid.x)");
+            break;
+
+        case IR_BUF_LOAD: {
+            u32 slot    = IR_BUF_SLOT(in->imm.u);
+            u32 comp    = IR_BUF_COMP(in->imm.u);
+            b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+            if (atomic_mask & (1u << slot)) {
+                wb_putf(&wb, "bitcast<i32>(atomicLoad(&buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")]))");
+            } else if (is_vec4) {
+                wb_putf(&wb, "buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_putf(&wb, ")].%c", "xyzw"[comp & 3u]);
+            } else if (elem_types[slot] == (u8)MTK_TYPE_U32) {
+                wb_putf(&wb, "bitcast<i32>(buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")])");
+            } else {
+                wb_putf(&wb, "buf_%u[u32(", slot);
+                emit_operand(&wb, f, in->a);
+                wb_puts(&wb, ")]");
+            }
+        } break;
+
+        case IR_ATOMIC_ADD:
+            wb_putf(&wb, "bitcast<i32>(atomicAdd(&buf_%u[u32(", in->imm.u);
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, ")], bitcast<u32>(");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ")))");
+            break;
+
+        case IR_FADD:
+        case IR_IADD:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " + ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FSUB:
+        case IR_ISUB:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " - ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FMUL:
+        case IR_IMUL:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " * ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FDIV:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " / ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FMIN:
+        case IR_IMIN_S:
+            wb_puts(&wb, "min(");
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, ", ");
+            emit_operand(&wb, f, in->b);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FMAX:
+        case IR_IMAX_S:
+            wb_puts(&wb, "max(");
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, ", ");
+            emit_operand(&wb, f, in->b);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FNEG:
+            wb_puts(&wb, "-(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FABS:
+            wb_puts(&wb, "abs(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FSQRT:
+            wb_puts(&wb, "sqrt(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FFLOOR:
+            wb_puts(&wb, "floor(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FCEIL:
+            wb_puts(&wb, "ceil(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FTRUNC:
+            wb_puts(&wb, "trunc(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_FNEAREST:
+            wb_puts(&wb, "round(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_IAND:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " & ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_IOR:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " | ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_IXOR:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " ^ ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_ISHL:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " << (u32(");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ") & 31u)");
+            break;
+
+        case IR_ISHR_S:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " >> (u32(");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ") & 31u)");
+            break;
+
+        case IR_ISHR_U:
+            wb_puts(&wb, "bitcast<i32>(bitcast<u32>(");
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, ") >> (u32(");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ") & 31u))");
+            break;
+
+        case IR_FEQ:
+        case IR_IEQ:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " == ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FNE:
+        case IR_INE:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " != ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FLT:
+        case IR_ILT_S:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " < ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FLE:
+        case IR_ILE_S:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " <= ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FGT:
+        case IR_IGT_S:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " > ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_FGE:
+        case IR_IGE_S:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " >= ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_BAND:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " && ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_BOR:
+            emit_operand(&wb, f, in->a);
+            wb_puts(&wb, " || ");
+            emit_operand(&wb, f, in->b);
+            break;
+
+        case IR_BNOT:
+            wb_puts(&wb, "!(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_SELECT:
+            wb_puts(&wb, "select(");
+            emit_operand(&wb, f, in->c);
+            wb_puts(&wb, ", ");
+            emit_operand(&wb, f, in->b);
+            wb_puts(&wb, ", ");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_F2I:
+            wb_puts(&wb, "i32(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_I2F:
+            wb_puts(&wb, "f32(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_BITCAST_F2I:
+            wb_puts(&wb, "bitcast<i32>(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        case IR_BITCAST_I2F:
+            wb_puts(&wb, "bitcast<f32>(");
+            emit_operand(&wb, f, in->a);
+            wb_putc(&wb, ')');
+            break;
+
+        default:
+            wgsl_fail(err, err_cap, "inst %%%u: beklenmeyen compute komutu %u", i, (u32)op);
+            return 0;
+        }
+
+        wb_puts(&wb, ";\n");
+    }
+
+    wb_puts(&wb, "}\n");
+
+    if (wb.overflow) {
+        wgsl_fail(err, err_cap, "WGSL compute cikti tamponu kapasitesi (%u bayt) yetersiz", out_cap);
         out[0] = '\0';
         return 0;
     }

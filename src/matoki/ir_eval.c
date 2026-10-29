@@ -569,3 +569,307 @@ void ir_eval_ex(const IrFunc* f, ShadeBatch* batch, u32 fuse_blend) {
 void ir_eval(const IrFunc* f, ShadeBatch* batch) {
     ir_eval_ex(f, batch, MTK_FUSE_NONE);
 }
+
+void ir_eval_compute(const IrFunc* f, MtkComputeBatch* batch) {
+    ASSERT(f != NULL && batch != NULL);
+    if (f->count > EVAL_STACK_CAP) {
+        PANIC("ir_eval_compute: instruction count %u exceeds EVAL_STACK_CAP (%u)",
+              f->count, (u32)EVAL_STACK_CAP);
+    }
+
+    EvalVal vals[EVAL_STACK_CAP];
+    u32 start = batch->start;
+    u32 end   = batch->start + batch->count;
+    u32 limit = (batch->total_count > 0) ? batch->total_count : end;
+    if (end > limit) end = limit;
+
+    for (u32 base_gid = start; base_gid < end; base_gid += 4u) {
+        __builtin_memset(vals, 0, sizeof(EvalVal) * f->count);
+
+        struct {
+            b32 is_uniform;
+            b32 u_cond;
+            b32 u_in_else;
+            u32 v_saved;
+            u32 v_cond;
+            u32 parent_active;
+        } if_stk[64];
+        u32 if_depth = 0;
+
+        b32 u_active = TRUE;
+        u32 init_mask = 0;
+        for (u32 l = 0; l < 4; l++) {
+            if (base_gid + l < end) init_mask |= (1u << l);
+        }
+        u32 v_mask = init_mask;
+
+        for (u32 pc = 0; pc < f->count; pc++) {
+            const IrInst* in = &f->insts[pc];
+            IrOp op = (IrOp)in->op;
+            if (op == IR_NOP) continue;
+
+            if (op == IR_IF_BEGIN) {
+                ASSERT(if_depth < ARRAY_LEN(if_stk));
+                b32 is_var = (f->insts[in->a].flags & IR_FLAG_VARYING) != 0;
+                if_stk[if_depth].is_uniform    = !is_var;
+                if_stk[if_depth].u_in_else     = FALSE;
+                if_stk[if_depth].parent_active = u_active;
+                if_stk[if_depth].v_saved       = v_mask;
+
+                if (!is_var) {
+                    b32 c = vals[in->a].u[0] != 0;
+                    if_stk[if_depth].u_cond = c;
+                    if_stk[if_depth].v_cond = c ? 0xFu : 0u;
+                    u_active = u_active && c;
+                } else {
+                    u32 cm = 0;
+                    for (u32 l = 0; l < 4; l++) {
+                        if (vals[in->a].u[l] != 0) cm |= (1u << l);
+                    }
+                    if_stk[if_depth].u_cond = TRUE;
+                    if_stk[if_depth].v_cond = cm;
+                    v_mask = v_mask & cm;
+                }
+                if_depth++;
+                continue;
+            }
+            if (op == IR_ELSE) {
+                ASSERT(if_depth > 0);
+                u32 top = if_depth - 1;
+                if_stk[top].u_in_else = TRUE;
+                if (if_stk[top].is_uniform) {
+                    u_active = if_stk[top].parent_active && !if_stk[top].u_cond;
+                } else {
+                    v_mask = if_stk[top].v_saved & (~if_stk[top].v_cond & 0xFu);
+                }
+                continue;
+            }
+            if (op == IR_IF_END) {
+                ASSERT(if_depth > 0);
+                if_depth--;
+                u_active = if_stk[if_depth].parent_active;
+                v_mask   = if_stk[if_depth].v_saved;
+                continue;
+            }
+
+            if (!u_active || v_mask == 0u) {
+                continue;
+            }
+
+            EvalVal r = {{0, 0, 0, 0}};
+            const EvalVal* va = (in->a != IR_NONE) ? &vals[in->a] : NULL;
+            const EvalVal* vb = (in->b != IR_NONE) ? &vals[in->b] : NULL;
+            const EvalVal* vc = (in->c != IR_NONE) ? &vals[in->c] : NULL;
+
+            switch (op) {
+            case IR_CONST_F32:
+                for (u32 l = 0; l < 4; l++) r.f[l] = in->imm.f;
+                break;
+            case IR_CONST_I32:
+                for (u32 l = 0; l < 4; l++) r.i[l] = in->imm.i;
+                break;
+            case IR_CONST_BOOL:
+                for (u32 l = 0; l < 4; l++) r.u[l] = in->imm.i ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_UNIFORM_F32: {
+                f32 v = 0.0f;
+                if (batch->uniforms) {
+                    __builtin_memcpy(&v, batch->uniforms + in->imm.u, 4);
+                }
+                for (u32 l = 0; l < 4; l++) r.f[l] = v;
+            } break;
+            case IR_UNIFORM_I32: {
+                i32 v = 0;
+                if (batch->uniforms) {
+                    __builtin_memcpy(&v, batch->uniforms + in->imm.u, 4);
+                }
+                for (u32 l = 0; l < 4; l++) r.i[l] = v;
+            } break;
+            case IR_GLOBAL_ID:
+                for (u32 l = 0; l < 4; l++) r.u[l] = base_gid + l;
+                break;
+
+            case IR_BUF_LOAD: {
+                u32 slot    = IR_BUF_SLOT(in->imm.u);
+                u32 comp    = IR_BUF_COMP(in->imm.u);
+                b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+                const u32* buf = (slot < COMPUTE_MAX_BUFFERS) ? (const u32*)batch->buffers[slot] : NULL;
+                for (u32 l = 0; l < 4; l++) {
+                    if ((v_mask & (1u << l)) && buf) {
+                        u32 elem_idx = va->u[l];
+                        u32 word_idx = is_vec4 ? (elem_idx * 4u + comp) : elem_idx;
+                        r.u[l] = buf[word_idx];
+                    }
+                }
+            } break;
+
+            case IR_BUF_STORE: {
+                u32 slot    = IR_BUF_SLOT(in->imm.u);
+                u32 comp    = IR_BUF_COMP(in->imm.u);
+                b32 is_vec4 = IR_BUF_IS_VEC4(in->imm.u);
+                u32* buf = (slot < COMPUTE_MAX_BUFFERS) ? (u32*)batch->buffers[slot] : NULL;
+                for (u32 l = 0; l < 4; l++) {
+                    b32 ok = ((v_mask & (1u << l)) != 0) && (vc == NULL || vc->u[l] != 0);
+                    if (ok && buf) {
+                        u32 elem_idx = va->u[l];
+                        u32 word_idx = is_vec4 ? (elem_idx * 4u + comp) : elem_idx;
+                        buf[word_idx] = vb->u[l];
+                    }
+                }
+            } break;
+
+            case IR_ATOMIC_ADD: {
+                u32 slot = in->imm.u;
+                u32* buf = (slot < COMPUTE_MAX_BUFFERS) ? (u32*)batch->buffers[slot] : NULL;
+                for (u32 l = 0; l < 4; l++) {
+                    b32 ok = ((v_mask & (1u << l)) != 0) && (vc == NULL || vc->u[l] != 0);
+                    if (ok && buf) {
+                        r.u[l] = __atomic_fetch_add(buf + va->u[l], vb->u[l], __ATOMIC_SEQ_CST);
+                    }
+                }
+            } break;
+
+            case IR_FADD:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fadd(va->f[l], vb->f[l]);
+                break;
+            case IR_FSUB:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fsub(va->f[l], vb->f[l]);
+                break;
+            case IR_FMUL:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fmul(va->f[l], vb->f[l]);
+                break;
+            case IR_FDIV:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fdiv(va->f[l], vb->f[l]);
+                break;
+            case IR_FMIN:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fmin(va->f[l], vb->f[l]);
+                break;
+            case IR_FMAX:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fmax(va->f[l], vb->f[l]);
+                break;
+            case IR_FNEG:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fneg(va->f[l]);
+                break;
+            case IR_FABS:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fabs(va->f[l]);
+                break;
+            case IR_FSQRT:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fsqrt(va->f[l]);
+                break;
+            case IR_FFLOOR:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_ffloor(va->f[l]);
+                break;
+            case IR_FCEIL:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fceil(va->f[l]);
+                break;
+            case IR_FTRUNC:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_ftrunc(va->f[l]);
+                break;
+            case IR_FNEAREST:
+                for (u32 l = 0; l < 4; l++) r.f[l] = wasm_fnearest(va->f[l]);
+                break;
+
+            case IR_IADD:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_iadd(va->i[l], vb->i[l]);
+                break;
+            case IR_ISUB:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_isub(va->i[l], vb->i[l]);
+                break;
+            case IR_IMUL:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_imul(va->i[l], vb->i[l]);
+                break;
+            case IR_IAND:
+                for (u32 l = 0; l < 4; l++) r.u[l] = va->u[l] & vb->u[l];
+                break;
+            case IR_IOR:
+                for (u32 l = 0; l < 4; l++) r.u[l] = va->u[l] | vb->u[l];
+                break;
+            case IR_IXOR:
+                for (u32 l = 0; l < 4; l++) r.u[l] = va->u[l] ^ vb->u[l];
+                break;
+            case IR_ISHL:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_ishl(va->i[l], vb->i[l]);
+                break;
+            case IR_ISHR_S:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_ishr_s(va->i[l], vb->i[l]);
+                break;
+            case IR_ISHR_U:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_ishr_u(va->i[l], vb->i[l]);
+                break;
+            case IR_IMIN_S:
+                for (u32 l = 0; l < 4; l++) r.i[l] = va->i[l] < vb->i[l] ? va->i[l] : vb->i[l];
+                break;
+            case IR_IMAX_S:
+                for (u32 l = 0; l < 4; l++) r.i[l] = va->i[l] > vb->i[l] ? va->i[l] : vb->i[l];
+                break;
+
+            case IR_FEQ:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] == vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_FNE:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] != vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_FLT:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] < vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_FLE:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] <= vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_FGT:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] > vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_FGE:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->f[l] >= vb->f[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+
+            case IR_IEQ:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] == vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_INE:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] != vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_ILT_S:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] < vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_ILE_S:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] <= vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_IGT_S:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] > vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_IGE_S:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->i[l] >= vb->i[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+
+            case IR_BAND:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->u[l] && vb->u[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_BOR:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (va->u[l] || vb->u[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_BNOT:
+                for (u32 l = 0; l < 4; l++) r.u[l] = (!va->u[l]) ? 0xFFFFFFFFu : 0u;
+                break;
+            case IR_SELECT:
+                for (u32 l = 0; l < 4; l++) r.u[l] = va->u[l] ? vb->u[l] : vc->u[l];
+                break;
+
+            case IR_F2I:
+                for (u32 l = 0; l < 4; l++) r.i[l] = wasm_trunc_sat_f32_s(va->f[l]);
+                break;
+            case IR_I2F:
+                for (u32 l = 0; l < 4; l++) r.f[l] = (f32)va->i[l];
+                break;
+            case IR_BITCAST_F2I:
+            case IR_BITCAST_I2F:
+                for (u32 l = 0; l < 4; l++) r.u[l] = va->u[l];
+                break;
+
+            default:
+                PANIC("ir_eval_compute: unhandled opcode %u", (u32)op);
+            }
+
+            vals[pc] = r;
+        }
+    }
+}

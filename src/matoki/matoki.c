@@ -6,6 +6,7 @@
 #include "matoki/parser.h"
 #include "matoki/sema.h"
 #include "matoki/lower.h"
+#include "thread/job.h"
 #include "core/log.h"
 
 void mtk_diag_init(MtkDiag* diag) {
@@ -94,6 +95,9 @@ const char* mtk_type_name(MtkType t) {
     case MTK_TYPE_MAT4:          return "mat4";
     case MTK_TYPE_TEXTURE2D:     return "texture2d";
     case MTK_TYPE_TEXTURE2D_F32: return "texture2d_f32";
+    case MTK_TYPE_BUF_F32:       return "buffer<f32>";
+    case MTK_TYPE_BUF_U32:       return "buffer<u32>";
+    case MTK_TYPE_BUF_VEC4:      return "buffer<vec4>";
     default:                     return "?";
     }
 }
@@ -105,13 +109,16 @@ u32 mtk_type_components(MtkType t) {
     case MTK_TYPE_U32:
     case MTK_TYPE_BOOL:
     case MTK_TYPE_TEXTURE2D:
-    case MTK_TYPE_TEXTURE2D_F32: return 1;
+    case MTK_TYPE_TEXTURE2D_F32:
+    case MTK_TYPE_BUF_F32:
+    case MTK_TYPE_BUF_U32:   return 1;
     case MTK_TYPE_VEC2:
     case MTK_TYPE_IVEC2:     return 2;
     case MTK_TYPE_VEC3:
     case MTK_TYPE_IVEC3:     return 3;
     case MTK_TYPE_VEC4:
-    case MTK_TYPE_IVEC4:     return 4;
+    case MTK_TYPE_IVEC4:
+    case MTK_TYPE_BUF_VEC4:  return 4;
     case MTK_TYPE_MAT3:      return 9;
     case MTK_TYPE_MAT4:      return 16;
     default:                 return 0;
@@ -138,6 +145,19 @@ b32 mtk_type_is_matrix(MtkType t) {
 
 b32 mtk_type_is_texture(MtkType t) {
     return t == MTK_TYPE_TEXTURE2D || t == MTK_TYPE_TEXTURE2D_F32;
+}
+
+b32 mtk_type_is_buffer(MtkType t) {
+    return t == MTK_TYPE_BUF_F32 || t == MTK_TYPE_BUF_U32 || t == MTK_TYPE_BUF_VEC4;
+}
+
+MtkType mtk_type_buffer_elem(MtkType t) {
+    switch (t) {
+    case MTK_TYPE_BUF_F32:  return MTK_TYPE_F32;
+    case MTK_TYPE_BUF_U32:  return MTK_TYPE_U32;
+    case MTK_TYPE_BUF_VEC4: return MTK_TYPE_VEC4;
+    default:                return MTK_TYPE_VOID;
+    }
 }
 
 MtkType mtk_type_scalar_base(MtkType t) {
@@ -210,4 +230,40 @@ u32 mtk_compile_wasm(const char* src, u32 len, const char* filename, const MtkCo
         mtk_diag_error(diag, filename, src, len, 1, 1, "codegen hatasi: %s", err);
     }
     return bytes;
+}
+
+typedef struct {
+    MtkComputeFn           fn;
+    const MtkComputeBatch* batch;
+    u32                    total_count;
+} ComputeDispatchCtx;
+
+static void compute_job_range(u32 g_start, u32 g_end, void* user_ctx) {
+    ComputeDispatchCtx* dctx = (ComputeDispatchCtx*)user_ctx;
+    u32 elem_start = g_start * 4u;
+    u32 elem_end   = g_end * 4u;
+    if (elem_end > dctx->total_count) {
+        elem_end = dctx->total_count;
+    }
+    if (elem_end <= elem_start) {
+        return;
+    }
+    MtkComputeBatch sub = *dctx->batch;
+    sub.start       = elem_start;
+    sub.count       = elem_end - elem_start;
+    sub.total_count = dctx->total_count;
+    dctx->fn(&sub);
+}
+
+void mtk_compute_dispatch(MtkComputeFn fn, const MtkComputeBatch* batch, u32 total_count, u32 grain) {
+    if (!fn || !batch || total_count == 0) return;
+    u32 groups = (total_count + 3u) / 4u;
+    u32 group_grain = (grain > 0) ? ((grain + 3u) / 4u) : 16u;
+    if (group_grain == 0) group_grain = 1u;
+
+    ComputeDispatchCtx dctx;
+    dctx.fn          = fn;
+    dctx.batch       = batch;
+    dctx.total_count = total_count;
+    job_parallel_for(groups, group_grain, compute_job_range, &dctx);
 }

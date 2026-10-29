@@ -145,6 +145,20 @@ static MtkType parse_type_name(Parser* p, u32* out_line, u32* out_col) {
     if (str_eq(name, "texture2d"))     return MTK_TYPE_TEXTURE2D;
     if (str_eq(name, "texture2d_f32")) return MTK_TYPE_TEXTURE2D_F32;
     if (str_eq(name, "void"))          return MTK_TYPE_VOID;
+    if (str_eq(name, "buffer")) {
+        if (!parser_consume(p, TOK_LT, "'buffer' sonrasinda '<' bekleniyordu")) {
+            return MTK_TYPE_VOID;
+        }
+        u32 el_line = 0, el_col = 0;
+        Token el_tok = p->cur;
+        MtkType elem = parse_type_name(p, &el_line, &el_col);
+        parser_consume(p, TOK_GT, "buffer<T> tipinde '>' bekleniyordu");
+        if (elem == MTK_TYPE_F32)  return MTK_TYPE_BUF_F32;
+        if (elem == MTK_TYPE_U32)  return MTK_TYPE_BUF_U32;
+        if (elem == MTK_TYPE_VEC4) return MTK_TYPE_BUF_VEC4;
+        parser_error_at(p, &el_tok, "buffer eleman tipi 'f32', 'u32' veya 'vec4' olmali");
+        return MTK_TYPE_VOID;
+    }
 
     parser_error_at(p, &tok, "bilinmeyen tip '%s'", name);
     return MTK_TYPE_VOID;
@@ -263,16 +277,28 @@ static AstExpr* parse_primary(Parser* p) {
 
 static AstExpr* parse_postfix(Parser* p) {
     AstExpr* expr = parse_primary(p);
-    while (parser_match(p, TOK_DOT)) {
-        Token member = p->cur;
-        if (!parser_consume(p, TOK_IDENT, "'.' sonrasinda bilesen/swizzle ismi bekleniyordu")) {
+    for (;;) {
+        if (parser_match(p, TOK_DOT)) {
+            Token member = p->cur;
+            if (!parser_consume(p, TOK_IDENT, "'.' sonrasinda bilesen/swizzle ismi bekleniyordu")) {
+                break;
+            }
+            AstExpr* swz = new_expr(p, AST_EXPR_SWIZZLE, member.line, member.col);
+            swz->as.swizzle.base = expr;
+            copy_name(swz->as.swizzle.mask, member.start, member.len < 7 ? member.len : 7);
+            swz->as.swizzle.len = member.len;
+            expr = swz;
+        } else if (parser_match(p, TOK_LBRACKET)) {
+            Token lbr = p->prev;
+            AstExpr* idx = parse_expr(p);
+            parser_consume(p, TOK_RBRACKET, "indeks ifadesinden sonra ']' bekleniyordu");
+            AstExpr* ie = new_expr(p, AST_EXPR_INDEX, lbr.line, lbr.col);
+            ie->as.index.base  = expr;
+            ie->as.index.index = idx;
+            expr = ie;
+        } else {
             break;
         }
-        AstExpr* swz = new_expr(p, AST_EXPR_SWIZZLE, member.line, member.col);
-        swz->as.swizzle.base = expr;
-        copy_name(swz->as.swizzle.mask, member.start, member.len < 7 ? member.len : 7);
-        swz->as.swizzle.len = member.len;
-        expr = swz;
     }
     return expr;
 }
@@ -491,7 +517,9 @@ static AstDecl* parse_uniform_decl(Parser* p) {
         return d;
     }
     d->type = parse_type_name(p, &d->type_line, &d->type_col);
-    if (d->type == MTK_TYPE_TEXTURE2D_F32) {
+    if (mtk_type_is_buffer(d->type)) {
+        d->kind = AST_DECL_BUFFER;
+    } else if (d->type == MTK_TYPE_TEXTURE2D_F32) {
         d->as.uniform_decl.tex_flags |= TEX_FLAG_F32;
     }
 
@@ -525,6 +553,35 @@ static AstDecl* parse_uniform_decl(Parser* p) {
     }
 
     if (!parser_consume(p, TOK_SEMI, "uniform bildiriminden sonra ';' bekleniyordu")) {
+        sync_decl(p);
+    }
+    return d;
+}
+
+static AstDecl* parse_buffer_decl(Parser* p) {
+    Token name_tok = p->cur;
+    if (!parser_consume(p, TOK_IDENT, "'buffer' sonrasinda isim bekleniyordu")) {
+        sync_decl(p);
+        return NULL;
+    }
+    AstDecl* d = new_decl(p, AST_DECL_BUFFER, name_tok.line, name_tok.col);
+    copy_name(d->name, name_tok.start, name_tok.len);
+
+    if (!parser_consume(p, TOK_COLON, "buffer isminden sonra ':' bekleniyordu")) {
+        sync_decl(p);
+        return d;
+    }
+    Token t_tok = p->cur;
+    MtkType t = parse_type_name(p, &d->type_line, &d->type_col);
+    if (t == MTK_TYPE_F32)       t = MTK_TYPE_BUF_F32;
+    else if (t == MTK_TYPE_U32)  t = MTK_TYPE_BUF_U32;
+    else if (t == MTK_TYPE_VEC4) t = MTK_TYPE_BUF_VEC4;
+    else if (!mtk_type_is_buffer(t) && t != MTK_TYPE_VOID) {
+        parser_error_at(p, &t_tok, "buffer tipi 'buffer<f32>', 'buffer<u32>' veya 'buffer<vec4>' olmali");
+    }
+    d->type = t;
+
+    if (!parser_consume(p, TOK_SEMI, "'buffer' bildiriminden sonra ';' bekleniyordu")) {
         sync_decl(p);
     }
     return d;
@@ -652,6 +709,11 @@ b32 parser_parse(const char* src, u32 len, const char* filename,
         AstDecl* d = NULL;
         if (parser_match(&p, TOK_UNIFORM)) {
             d = parse_uniform_decl(&p);
+        } else if (p.cur.kind == TOK_IDENT && p.cur.len == 6 &&
+                   p.cur.start[0] == 'b' && p.cur.start[1] == 'u' && p.cur.start[2] == 'f' &&
+                   p.cur.start[3] == 'f' && p.cur.start[4] == 'e' && p.cur.start[5] == 'r') {
+            parser_advance(&p);
+            d = parse_buffer_decl(&p);
         } else if (parser_match(&p, TOK_IN)) {
             d = parse_in_decl(&p);
         } else if (parser_match(&p, TOK_CONST)) {

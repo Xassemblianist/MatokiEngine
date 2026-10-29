@@ -74,8 +74,20 @@ typedef enum {
     IR_DERIV_Y,          /* (a: varying f32) 4 lane'e a[lane2] - a[lane0] */
     IR_TEX_LEVELS,       /* imm.u = slot → uniform i32 mip seviye sayısı (0 okunursa 1 kabul edilir) */
 
+    /* --- F0_A compute eklemeleri (numaralar kaymasın diye sonda) --- */
+    IR_GLOBAL_ID,        /* → varying i32 (compute global_id) */
+    IR_BUF_LOAD,         /* (a: i32 idx) imm.u = IR_BUF_IMM(slot, comp, is_vec4) → varying f32/i32 */
+    IR_BUF_STORE,        /* (a: i32 idx, b: f32/i32 val, c: bool maske veya IR_NONE) imm.u = IR_BUF_IMM(...) */
+    IR_ATOMIC_ADD,       /* (a: i32 idx, b: i32 val, c: bool maske veya IR_NONE) imm.u = slot → varying i32 */
+
     IR_OP_COUNT
 } IrOp;
+
+#define IR_MAX_BUFFERS 16u
+#define IR_BUF_IMM(slot, comp, is_vec4) (((u32)(slot) & 0xFFu) | (((u32)(comp) & 3u) << 8) | ((is_vec4) ? (1u << 10) : 0u))
+#define IR_BUF_SLOT(imm_u)              ((u32)(imm_u) & 0xFFu)
+#define IR_BUF_COMP(imm_u)              (((u32)(imm_u) >> 8) & 3u)
+#define IR_BUF_IS_VEC4(imm_u)           (((u32)(imm_u) & (1u << 10)) != 0u)
 
 #define IR_NONE 0xFFFFFFFFu   /* kullanılmayan operand */
 
@@ -97,6 +109,10 @@ typedef struct {
     u32     uniform_bytes;   /* uniform bloğu toplam boyutu (ön uç doldurur) */
     u32     varying_count;   /* skaler varying sayısı (ön uç doldurur) */
     u32     texture_count;
+    u32     buffer_count;
+    u32     buffer_atomic_mask;
+    u8      buffer_elem_types[16]; /* 0: f32, 1: u32, 4: vec4 */
+    b32     is_compute;
 } IrFunc;
 
 /* ---------- Kurucu (ir.c — D hattı) ----------
@@ -118,6 +134,10 @@ void ir_else(IrFunc* f);
 void ir_if_end(IrFunc* f);
 void ir_discard(IrFunc* f, u32 mask);
 void ir_output(IrFunc* f, u32 channel, u32 value);
+u32  ir_global_id(IrFunc* f);
+u32  ir_buf_load(IrFunc* f, IrType t, u32 slot, u32 index, u32 comp, b32 is_vec4);
+void ir_buf_store(IrFunc* f, u32 slot, u32 index, u32 val, u32 mask, u32 comp, b32 is_vec4);
+u32  ir_atomic_add(IrFunc* f, u32 slot, u32 index, u32 val, u32 mask);
 
 /* sample(tex, u, v) genişletmesi: wrap/clamp + en yakın komşu veya bilinear,
  * RGBA8 → 4 adet f32 (0..1). flags = TEX_FLAG_* (derleme zamanında bilinen örnekleyici durumu).

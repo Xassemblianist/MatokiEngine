@@ -30,6 +30,7 @@ typedef struct {
     u32         local_count;
     u32         scope_depth;
     b32         in_varying_cond;
+    b32         is_compute;
 
     /* Çağrı çizgesi: fn_idx -> çağrılan fn_idx bit maskesi (<= 64 fonksiyon) */
     u64         call_edges[64];
@@ -221,7 +222,7 @@ static MtkType check_type_ctor(Sema* s, AstExpr* e, MtkType target) {
             return target;
         }
         MtkType src_t = e->as.call.args[0]->type;
-        if (mtk_type_components(src_t) != 1 || mtk_type_is_texture(src_t)) {
+        if (mtk_type_components(src_t) != 1 || mtk_type_is_texture(src_t) || mtk_type_is_buffer(src_t)) {
             sema_error(s, e->line, e->col, "'%s' tipinden '%s' tipine donusum gecersiz",
                        mtk_type_name(src_t), mtk_type_name(target));
         }
@@ -358,6 +359,38 @@ static MtkType check_builtin_call(Sema* s, AstExpr* e, b32* out_handled) {
         }
         e->is_varying = FALSE;
         e->type = MTK_TYPE_IVEC2;
+        return e->type;
+    }
+
+    /* atomic_add(buf, idx, val) -> u32 */
+    if (str_eq(name, "atomic_add")) {
+        for (u32 i = 0; i < argc; i++) check_expr(s, e->as.call.args[i]);
+        e->type = MTK_TYPE_U32;
+        e->is_varying = TRUE;
+        if (argc != 3) {
+            sema_error(s, e->line, e->col, "'atomic_add' 3 arguman bekler: (buffer<u32>, u32, u32)");
+            return e->type;
+        }
+        AstExpr* a0 = e->as.call.args[0];
+        AstExpr* a1 = e->as.call.args[1];
+        AstExpr* a2 = e->as.call.args[2];
+        if (a1->is_int_lit) a1->type = MTK_TYPE_U32;
+        if (a2->is_int_lit) a2->type = MTK_TYPE_U32;
+        if (a0->kind != AST_EXPR_IDENT || a0->type != MTK_TYPE_BUF_U32) {
+            sema_error(s, a0->line, a0->col,
+                       "'atomic_add' ilk argumani 'buffer<u32>' olmalidir (bulunan '%s')",
+                       mtk_type_name(a0->type));
+        }
+        if (a1->type != MTK_TYPE_U32 && a1->type != MTK_TYPE_I32) {
+            sema_error(s, a1->line, a1->col,
+                       "'atomic_add' indeks argumani 'u32' veya 'i32' olmalidir (bulunan '%s')",
+                       mtk_type_name(a1->type));
+        }
+        if (a2->type != MTK_TYPE_U32 && a2->type != MTK_TYPE_I32) {
+            sema_error(s, a2->line, a2->col,
+                       "'atomic_add' deger argumani 'u32' veya 'i32' olmalidir (bulunan '%s')",
+                       mtk_type_name(a2->type));
+        }
         return e->type;
     }
 
@@ -586,6 +619,14 @@ static MtkType check_expr(Sema* s, AstExpr* e) {
             e->is_varying = TRUE;
             return e->type;
         }
+        if (str_eq(name, "global_id")) {
+            if (!s->is_compute) {
+                sema_error(s, e->line, e->col, "'global_id' yalnizca compute shader icinde kullanilabilir");
+            }
+            e->type       = MTK_TYPE_U32;
+            e->is_varying = TRUE;
+            return e->type;
+        }
         sema_error(s, e->line, e->col, "tanimlanmamis isim '%s'", name);
         e->type = MTK_TYPE_F32;
         return e->type;
@@ -647,7 +688,7 @@ static MtkType check_expr(Sema* s, AstExpr* e) {
         /* Karşılaştırmalar: ==, !=, <, <=, >, >= */
         if (op == TOK_EQ || op == TOK_NE || op == TOK_LT || op == TOK_LE || op == TOK_GT || op == TOK_GE) {
             b32 scalar_ok = (mtk_type_components(lt) == 1) && (lt == rt);
-            if (!scalar_ok || mtk_type_is_texture(lt) ||
+            if (!scalar_ok || mtk_type_is_texture(lt) || mtk_type_is_buffer(lt) ||
                 ((op != TOK_EQ && op != TOK_NE) && lt == MTK_TYPE_BOOL)) {
                 sema_error(s, e->line, e->col, "'%s' karsilastirmasi uyumsuz tipler arasinda ('%s', '%s')",
                            token_kind_name(op), mtk_type_name(lt), mtk_type_name(rt));
@@ -806,6 +847,30 @@ static MtkType check_expr(Sema* s, AstExpr* e) {
         e->type = fn->type;
         return e->type;
     }
+
+    case AST_EXPR_INDEX: {
+        MtkType bt = check_expr(s, e->as.index.base);
+        MtkType it = check_expr(s, e->as.index.index);
+        if (e->as.index.index && e->as.index.index->is_int_lit) {
+            e->as.index.index->type = MTK_TYPE_U32;
+            it = MTK_TYPE_U32;
+        }
+        e->is_varying = TRUE;
+        if (!mtk_type_is_buffer(bt) || e->as.index.base->kind != AST_EXPR_IDENT) {
+            sema_error(s, e->line, e->col,
+                       "indeksleme '[]' yalnizca 'buffer<T>' uzerinde kullanilabilir (bulunan '%s')",
+                       mtk_type_name(bt));
+            e->type = MTK_TYPE_F32;
+            return e->type;
+        }
+        if (it != MTK_TYPE_U32 && it != MTK_TYPE_I32) {
+            sema_error(s, e->as.index.index->line, e->as.index.index->col,
+                       "buffer indeksi 'u32' veya 'i32' olmalidir (bulunan '%s')",
+                       mtk_type_name(it));
+        }
+        e->type = mtk_type_buffer_elem(bt);
+        return e->type;
+    }
     }
     return MTK_TYPE_VOID;
 }
@@ -848,7 +913,7 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
         MtkType init_t = check_expr(s, st->as.var_decl.init);
         MtkType decl_t = st->as.var_decl.decl_type;
         if (decl_t != MTK_TYPE_VOID) {
-            if (mtk_type_is_texture(decl_t) || mtk_type_is_matrix(decl_t)) {
+            if (mtk_type_is_texture(decl_t) || mtk_type_is_matrix(decl_t) || mtk_type_is_buffer(decl_t)) {
                 sema_error(s, st->as.var_decl.type_line, st->as.var_decl.type_col,
                            "yerel degisken tipi '%s' olamaz", mtk_type_name(decl_t));
             }
@@ -863,7 +928,8 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
                            name, mtk_type_name(decl_t), mtk_type_name(init_t));
             }
         } else {
-            if (init_t == MTK_TYPE_VOID || mtk_type_is_texture(init_t) || mtk_type_is_matrix(init_t)) {
+            if (init_t == MTK_TYPE_VOID || mtk_type_is_texture(init_t) ||
+                mtk_type_is_matrix(init_t) || mtk_type_is_buffer(init_t)) {
                 sema_error(s, st->line, st->col, "'%s' degiskeni gecersiz '%s' tipiyle ilklendirilemez",
                            name, mtk_type_name(init_t));
                 decl_t = MTK_TYPE_F32;
@@ -903,6 +969,27 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
                     }
                 }
             }
+        }
+
+        if (base_ident && base_ident->kind == AST_EXPR_INDEX) {
+            if (val->is_int_lit && (lt == MTK_TYPE_I32 || lt == MTK_TYPE_U32)) {
+                val->type = lt;
+                rt = lt;
+            }
+            TokenKind op = st->as.assign.op;
+            if (op == TOK_ASSIGN) {
+                if (lt != rt) {
+                    sema_error(s, st->line, st->col, "'%s' tipindeki hedefe '%s' atanamaz",
+                               mtk_type_name(lt), mtk_type_name(rt));
+                }
+            } else {
+                b32 vec_scalar = mtk_type_is_vector(lt) && mtk_type_scalar_base(lt) == rt;
+                if (lt != rt && !vec_scalar) {
+                    sema_error(s, st->line, st->col, "'%s' birlesik atamasi uyumsuz tipler arasinda ('%s', '%s')",
+                               token_kind_name(op), mtk_type_name(lt), mtk_type_name(rt));
+                }
+            }
+            return FALSE;
         }
 
         if (!base_ident || base_ident->kind != AST_EXPR_IDENT) {
@@ -996,6 +1083,9 @@ static b32 check_stmt(Sema* s, AstStmt* st) {
     }
 
     case AST_STMT_DISCARD:
+        if (s->is_compute) {
+            sema_error(s, st->line, st->col, "'discard' compute shader icinde kullanilamaz");
+        }
         return FALSE;
 
     case AST_STMT_RETURN: {
@@ -1060,7 +1150,8 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
     }
 
     /* 1. Üst seviye bildirimleri ve yerleşimi doğrula */
-    AstDecl* frag_fn = NULL;
+    AstDecl* frag_fn    = NULL;
+    AstDecl* compute_fn = NULL;
     for (u32 i = 0; i < prog->decl_count; i++) {
         AstDecl* d = prog->decls[i];
 
@@ -1161,12 +1252,36 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
                 d->as.const_decl.f_vals[0] = cf;
                 d->as.const_decl.i_vals[0] = ci;
             }
+        } else if (d->kind == AST_DECL_BUFFER) {
+            if (!mtk_type_is_buffer(d->type)) {
+                sema_error(&s, d->line, d->col, "buffer '%s' gecersiz tipe sahip", d->name);
+                continue;
+            }
+            u32 slot = out_layout ? out_layout->buffer_count : 0;
+            if (slot >= 16) {
+                sema_error(&s, d->line, d->col, "en fazla 16 buffer tanimlanabilir");
+            }
+            d->as.buffer_decl.slot = slot;
+            if (out_layout) {
+                out_layout->buffer_count++;
+                if (out_layout->sym_count < 64) {
+                    MtkSymbol* sym = &out_layout->syms[out_layout->sym_count++];
+                    copy_name(sym->name, d->name);
+                    sym->kind            = MTK_SYM_BUFFER;
+                    sym->type            = d->type;
+                    sym->offset_or_index = slot;
+                    sym->components      = mtk_type_components(d->type);
+                }
+            }
         } else if (d->kind == AST_DECL_FN) {
             if (str_eq(d->name, "frag")) {
                 frag_fn = d;
+            } else if (str_eq(d->name, "compute")) {
+                compute_fn = d;
             }
         }
     }
+    s.is_compute = (compute_fn != NULL);
 
     /* 2. Fonksiyon gövdelerini kontrol et */
     for (u32 i = 0; i < prog->decl_count; i++) {
@@ -1178,7 +1293,7 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
         s.scope_depth     = 1;
         s.in_varying_cond = FALSE;
 
-        if (mtk_type_is_texture(d->type) || mtk_type_is_matrix(d->type)) {
+        if (mtk_type_is_texture(d->type) || mtk_type_is_matrix(d->type) || mtk_type_is_buffer(d->type)) {
             sema_error(&s, d->type_line, d->type_col,
                        "fonksiyon donus tipi '%s' olamaz", mtk_type_name(d->type));
         }
@@ -1186,7 +1301,7 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
         for (u32 p = 0; p < d->as.fn_decl.param_count; p++) {
             AstParam* prm = &d->as.fn_decl.params[p];
             if (prm->type == MTK_TYPE_VOID || mtk_type_is_texture(prm->type) ||
-                mtk_type_is_matrix(prm->type)) {
+                mtk_type_is_matrix(prm->type) || mtk_type_is_buffer(prm->type)) {
                 sema_error(&s, prm->line, prm->col,
                            "parametre '%s' gecersiz '%s' tipinde olamaz",
                            prm->name, mtk_type_name(prm->type));
@@ -1221,9 +1336,23 @@ b32 sema_check(AstProgram* prog, const char* src, u32 src_len, const char* filen
         }
     }
 
-    /* 4. Giriş noktası 'fn frag() -> rgba' kontrolü */
-    if (!frag_fn) {
+    /* 4. Giriş noktası 'fn frag() -> rgba' veya 'fn compute()' kontrolü */
+    if (!frag_fn && !compute_fn) {
         sema_error(&s, 1, 1, "giris noktasi 'fn frag() -> rgba' bulunamadi");
+    } else if (frag_fn && compute_fn) {
+        sema_error(&s, compute_fn->line, compute_fn->col,
+                   "ayni shader icinde hem 'frag' hem 'compute' giris noktasi olamaz");
+    } else if (compute_fn) {
+        if (out_layout) out_layout->is_compute = TRUE;
+        if (compute_fn->as.fn_decl.param_count != 0) {
+            sema_error(&s, compute_fn->line, compute_fn->col,
+                       "'compute' giris noktasi parametre alamaz");
+        }
+        if (compute_fn->type != MTK_TYPE_VOID) {
+            sema_error(&s, compute_fn->type_line, compute_fn->type_col,
+                       "'compute' giris noktasi deger dondurmemelidir (bulunan '%s')",
+                       mtk_type_name(compute_fn->type));
+        }
     } else {
         if (frag_fn->as.fn_decl.param_count != 0) {
             sema_error(&s, frag_fn->line, frag_fn->col,

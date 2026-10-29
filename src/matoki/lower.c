@@ -41,6 +41,7 @@ typedef struct {
     /* Aktif fonksiyonun dönüş değeri (frag veya inline edilen yardımcı fonksiyon) */
     LowerVal          ret_val;
     b32               has_ret;
+    u32               ret_mask_id;
 } LowerCtx;
 
 static b32 str_eq(const char* a, const char* b) {
@@ -307,11 +308,25 @@ static LowerVal lower_type_ctor(LowerCtx* ctx, const AstExpr* e) {
     return res;
 }
 
+static u32 build_active_mask(LowerCtx* ctx);
+
 static LowerVal lower_builtin_call(LowerCtx* ctx, const AstExpr* e, b32* out_handled) {
     IrFunc* f = ctx->ir;
     const char* name = e->as.call.callee;
     u32 argc = e->as.call.arg_count;
     *out_handled = TRUE;
+
+    if (str_eq(name, "atomic_add")) {
+        const AstExpr* buf_expr = e->as.call.args[0];
+        const AstDecl* d = find_top_decl(ctx->prog, buf_expr->as.ident.name);
+        ASSERT(d && d->kind == AST_DECL_BUFFER);
+        LowerVal idx_v = lower_expr(ctx, e->as.call.args[1]);
+        LowerVal val_v = lower_expr(ctx, e->as.call.args[2]);
+        u32 mask = (ctx->cond_depth > 0 || ctx->ret_mask_id != IR_NONE) ? build_active_mask(ctx) : IR_NONE;
+        LowerVal res = make_val(MTK_TYPE_U32);
+        res.id[0] = ir_atomic_add(f, d->as.buffer_decl.slot, idx_v.id[0], val_v.id[0], mask);
+        return res;
+    }
 
     if (str_eq(name, "sample")) {
         LowerVal tex = lower_expr(ctx, e->as.call.args[0]);
@@ -598,6 +613,10 @@ static LowerVal lower_expr(LowerCtx* ctx, const AstExpr* e) {
             res.id[0] = ir_frag(f, TRUE);
             return res;
         }
+        if (str_eq(name, "global_id")) {
+            res.id[0] = ir_global_id(f);
+            return res;
+        }
         PANIC("cozumlernememis kimlik: %s", name);
     }
 
@@ -702,10 +721,12 @@ static LowerVal lower_expr(LowerCtx* ctx, const AstExpr* e) {
         u32      saved_scope     = ctx->scope_depth;
         LowerVal saved_ret_val   = ctx->ret_val;
         b32      saved_has_ret   = ctx->has_ret;
+        u32      saved_ret_mask  = ctx->ret_mask_id;
 
         ctx->scope_depth++;
-        ctx->has_ret = FALSE;
-        ctx->ret_val = make_val(fn->type);
+        ctx->has_ret     = FALSE;
+        ctx->ret_mask_id = IR_NONE;
+        ctx->ret_val     = make_val(fn->type);
 
         for (u32 i = 0; i < fn->as.fn_decl.param_count; i++) {
             LowerVar* lv = &ctx->vars[ctx->var_count++];
@@ -721,15 +742,38 @@ static LowerVal lower_expr(LowerCtx* ctx, const AstExpr* e) {
         ctx->scope_depth = saved_scope;
         ctx->ret_val     = saved_ret_val;
         ctx->has_ret     = saved_has_ret;
+        ctx->ret_mask_id = saved_ret_mask;
         return fn_result;
+    }
+
+    case AST_EXPR_INDEX: {
+        const AstExpr* base_expr = e->as.index.base;
+        const AstDecl* d = find_top_decl(ctx->prog, base_expr->as.ident.name);
+        ASSERT(d && d->kind == AST_DECL_BUFFER);
+        u32 slot = d->as.buffer_decl.slot;
+        LowerVal idx_v = lower_expr(ctx, e->as.index.index);
+        b32 is_vec4 = (d->type == MTK_TYPE_BUF_VEC4);
+        IrType elem_ir_t = (d->type == MTK_TYPE_BUF_U32) ? IR_T_I32 : IR_T_F32;
+        for (u32 c = 0; c < res.comps; c++) {
+            res.id[c] = ir_buf_load(f, elem_ir_t, slot, idx_v.id[0], c, is_vec4);
+        }
+        return res;
     }
     }
     return res;
 }
 
+#define RET_MASK_ALL 0xFFFFFFFEu
+
+static u32 resolve_ret_mask(IrFunc* f, u32 rm) {
+    if (rm == IR_NONE)      return ir_const_bool(f, FALSE);
+    if (rm == RET_MASK_ALL) return ir_const_bool(f, TRUE);
+    return rm;
+}
+
 static u32 build_active_mask(LowerCtx* ctx) {
     IrFunc* f = ctx->ir;
-    if (ctx->cond_depth == 0) {
+    if (ctx->cond_depth == 0 && ctx->ret_mask_id == IR_NONE) {
         return ir_const_bool(f, TRUE);
     }
     u32 mask = IR_NONE;
@@ -739,6 +783,11 @@ static u32 build_active_mask(LowerCtx* ctx) {
             c = ir_op1(f, IR_BNOT, c);
         }
         mask = (mask == IR_NONE) ? c : ir_op2(f, IR_BAND, mask, c);
+    }
+    if (ctx->ret_mask_id != IR_NONE) {
+        u32 rm = resolve_ret_mask(f, ctx->ret_mask_id);
+        u32 not_ret = ir_op1(f, IR_BNOT, rm);
+        mask = (mask == IR_NONE) ? not_ret : ir_op2(f, IR_BAND, mask, not_ret);
     }
     return mask;
 }
@@ -786,7 +835,7 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
                     dst->id[c] = emit_scalar_binop(f, op, base, dst->id[c], rc);
                 }
             }
-        } else if (target->kind == AST_EXPR_SWIZZLE) {
+        } else if (target->kind == AST_EXPR_SWIZZLE && target->as.swizzle.base->kind == AST_EXPR_IDENT) {
             const AstExpr* base_ident = target->as.swizzle.base;
             i32 vi = find_var(ctx, base_ident->as.ident.name);
             ASSERT(vi >= 0);
@@ -801,6 +850,39 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
                     dst->id[idx] = emit_scalar_binop(f, op, base, dst->id[idx], rc);
                 }
             }
+        } else if (target->kind == AST_EXPR_INDEX ||
+                   (target->kind == AST_EXPR_SWIZZLE && target->as.swizzle.base->kind == AST_EXPR_INDEX)) {
+            const AstExpr* idx_expr = (target->kind == AST_EXPR_INDEX) ? target : target->as.swizzle.base;
+            const AstDecl* d = find_top_decl(ctx->prog, idx_expr->as.index.base->as.ident.name);
+            ASSERT(d && d->kind == AST_DECL_BUFFER);
+            u32 slot = d->as.buffer_decl.slot;
+            b32 is_vec4 = (d->type == MTK_TYPE_BUF_VEC4);
+            IrType elem_ir_t = (d->type == MTK_TYPE_BUF_U32) ? IR_T_I32 : IR_T_F32;
+            MtkType base_t = (d->type == MTK_TYPE_BUF_U32) ? MTK_TYPE_U32 : MTK_TYPE_F32;
+            LowerVal idx_v = lower_expr(ctx, idx_expr->as.index.index);
+            u32 mask = (ctx->cond_depth > 0 || ctx->ret_mask_id != IR_NONE) ? build_active_mask(ctx) : IR_NONE;
+
+            if (target->kind == AST_EXPR_INDEX) {
+                u32 comps = is_vec4 ? 4u : 1u;
+                for (u32 c = 0; c < comps; c++) {
+                    u32 rc = rhs.comps == 1 ? rhs.id[0] : rhs.id[c];
+                    if (op != TOK_ASSIGN) {
+                        u32 cur = ir_buf_load(f, elem_ir_t, slot, idx_v.id[0], c, is_vec4);
+                        rc = emit_scalar_binop(f, op, base_t, cur, rc);
+                    }
+                    ir_buf_store(f, slot, idx_v.id[0], rc, mask, c, is_vec4);
+                }
+            } else {
+                for (u32 i = 0; i < target->as.swizzle.len; i++) {
+                    u32 comp = target->as.swizzle.indices[i];
+                    u32 rc   = rhs.comps == 1 ? rhs.id[0] : rhs.id[i];
+                    if (op != TOK_ASSIGN) {
+                        u32 cur = ir_buf_load(f, elem_ir_t, slot, idx_v.id[0], comp, is_vec4);
+                        rc = emit_scalar_binop(f, op, base_t, cur, rc);
+                    }
+                    ir_buf_store(f, slot, idx_v.id[0], rc, mask, comp, is_vec4);
+                }
+            }
         }
         break;
     }
@@ -813,8 +895,9 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
         u32      pre_count = ctx->var_count;
         LowerVar pre_vars[128];
         for (u32 i = 0; i < pre_count; i++) pre_vars[i] = ctx->vars[i];
-        LowerVal pre_ret     = ctx->ret_val;
-        b32      pre_has_ret = ctx->has_ret;
+        LowerVal pre_ret      = ctx->ret_val;
+        b32      pre_has_ret  = ctx->has_ret;
+        u32      pre_ret_mask = ctx->ret_mask_id;
 
         ir_if_begin(f, cond_id);
         ctx->cond_stack[ctx->cond_depth].cond_id = cond_id;
@@ -826,18 +909,21 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
         ctx->cond_depth--;
         LowerVar then_vars[128];
         for (u32 i = 0; i < pre_count; i++) then_vars[i] = ctx->vars[i];
-        LowerVal then_ret     = ctx->ret_val;
-        b32      then_has_ret = ctx->has_ret;
+        LowerVal then_ret      = ctx->ret_val;
+        b32      then_has_ret  = ctx->has_ret;
+        u32      then_ret_mask = ctx->ret_mask_id;
 
         LowerVar else_vars[128];
-        LowerVal else_ret     = pre_ret;
-        b32      else_has_ret = pre_has_ret;
+        LowerVal else_ret      = pre_ret;
+        b32      else_has_ret  = pre_has_ret;
+        u32      else_ret_mask = pre_ret_mask;
 
         if (st->as.if_stmt.else_branch) {
             for (u32 i = 0; i < pre_count; i++) ctx->vars[i] = pre_vars[i];
-            ctx->var_count = pre_count;
-            ctx->ret_val   = pre_ret;
-            ctx->has_ret   = pre_has_ret;
+            ctx->var_count   = pre_count;
+            ctx->ret_val     = pre_ret;
+            ctx->has_ret     = pre_has_ret;
+            ctx->ret_mask_id = pre_ret_mask;
 
             ir_else(f);
             ctx->cond_stack[ctx->cond_depth].cond_id = cond_id;
@@ -848,13 +934,22 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
 
             ctx->cond_depth--;
             for (u32 i = 0; i < pre_count; i++) else_vars[i] = ctx->vars[i];
-            else_ret     = ctx->ret_val;
-            else_has_ret = ctx->has_ret;
+            else_ret      = ctx->ret_val;
+            else_has_ret  = ctx->has_ret;
+            else_ret_mask = ctx->ret_mask_id;
         } else {
             for (u32 i = 0; i < pre_count; i++) else_vars[i] = pre_vars[i];
         }
 
         ir_if_end(f);
+
+        if (then_ret_mask != else_ret_mask) {
+            u32 tm = resolve_ret_mask(f, then_ret_mask);
+            u32 em = resolve_ret_mask(f, else_ret_mask);
+            ctx->ret_mask_id = ir_select(f, cond_id, tm, em);
+        } else {
+            ctx->ret_mask_id = then_ret_mask;
+        }
 
         /* Dallarda değişen değişkenleri IR_SELECT ile birleştir */
         ctx->var_count = pre_count;
@@ -923,6 +1018,9 @@ static void lower_stmt(LowerCtx* ctx, const AstStmt* st) {
             LowerVal rv = lower_expr(ctx, st->as.ret.value);
             ctx->ret_val = rv;
             ctx->has_ret = TRUE;
+        } else {
+            ctx->ret_mask_id = RET_MASK_ALL;
+            ctx->has_ret = TRUE;
         }
         break;
     }
@@ -938,9 +1036,18 @@ b32 lower_ast(const AstProgram* prog, const MtkLayout* layout, Arena* arena, IrF
     out_ir->uniform_bytes = layout ? layout->uniform_bytes : 0;
     out_ir->varying_count = layout ? layout->varying_count : 0;
     out_ir->texture_count = layout ? layout->texture_count : 0;
+    out_ir->buffer_count  = layout ? layout->buffer_count  : 0;
+    out_ir->is_compute    = layout ? layout->is_compute    : FALSE;
 
-    const AstDecl* frag = find_top_decl(prog, "frag");
-    ASSERT(frag && frag->kind == AST_DECL_FN);
+    for (u32 i = 0; i < prog->decl_count; i++) {
+        const AstDecl* d = prog->decls[i];
+        if (d->kind == AST_DECL_BUFFER && d->as.buffer_decl.slot < IR_MAX_BUFFERS) {
+            u8 et = 0;
+            if (d->type == MTK_TYPE_BUF_U32)       et = 1;
+            else if (d->type == MTK_TYPE_BUF_VEC4) et = 4;
+            out_ir->buffer_elem_types[d->as.buffer_decl.slot] = et;
+        }
+    }
 
     LowerCtx ctx;
     __builtin_memset(&ctx, 0, sizeof(ctx));
@@ -949,7 +1056,19 @@ b32 lower_ast(const AstProgram* prog, const MtkLayout* layout, Arena* arena, IrF
     ctx.arena       = arena;
     ctx.ir          = out_ir;
     ctx.scope_depth = 1;
-    ctx.ret_val     = make_val(MTK_TYPE_VEC4);
+    ctx.ret_mask_id = IR_NONE;
+
+    if (out_ir->is_compute) {
+        const AstDecl* comp_fn = find_top_decl(prog, "compute");
+        ASSERT(comp_fn && comp_fn->kind == AST_DECL_FN);
+        ctx.ret_val = make_val(MTK_TYPE_VOID);
+        lower_stmt(&ctx, comp_fn->as.fn_decl.body);
+        return TRUE;
+    }
+
+    const AstDecl* frag = find_top_decl(prog, "frag");
+    ASSERT(frag && frag->kind == AST_DECL_FN);
+    ctx.ret_val = make_val(MTK_TYPE_VEC4);
 
     lower_stmt(&ctx, frag->as.fn_decl.body);
     ASSERT(ctx.has_ret);

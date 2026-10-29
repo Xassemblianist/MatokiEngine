@@ -125,9 +125,9 @@ kaynak → lexer → parser → AST → sema (tip + uniform/varying analizi)
 
 ## 10. v0'da OLMAYANLAR (bilinçli)
 
-Struct, dizi, pointer, özyineleme, vertex shader (vertex dönüşümü v0'da C'de), compute kernel'leri,
+Struct, genel dizi, pointer, özyineleme, vertex shader (vertex dönüşümü v0'da C'de),
 trilinear filtreleme, ince (fine) türevler.
-Bunlar v1+ için `DECISIONS.md`'de tartışılır.
+Bunlar v1+ için `DECISIONS.md`'de tartışılır (Not: `compute` çekirdekleri ve `buffer<T>` desteği Faz F0_A ile eklendi; bkz. §12).
 
 ## 11. WGSL Kod Üretimi (WebGPU Arka Ucu, D-108)
 
@@ -163,3 +163,33 @@ CPU'da quad başına 4 lane (SPMD) çalışan semantik, GPU'da piksel başına t
   `VIEW_DEPTH`, `COLOR`, `WORLD_POS`, `SHADOW_POS`) göre `@group(1) @binding(0)` altında `VsUniforms` (`mvp`,
   `model`, `normal_mat`, `shadow_mat`) ve eşleşen `@location(0..k-1)` çıkışlarını üreten WGSL vertex shader'ını üretir.
 - Türevler `IR_DERIV_X/Y` → `dpdx`/`dpdy`, `IR_DISCARD` → `if (cond) { discard; }`, `IR_SELECT` → `select(if_false, if_true, cond)` olarak çevrilir.
+
+## 12. Compute Çekirdekleri (`fn compute()`, Faz F0_A)
+
+Matoki aynı SPMD modeliyle `N` eleman üzerinde çalışan `compute` çekirdeklerini hem CPU (4-lane wasm SIMD + `job_parallel_for`) hem de WebGPU (`@compute @workgroup_size(64)`) hedeflerine derler.
+
+### 12.1 Sözdizimi ve Yerleşikler
+- **Buffer bildirimleri**: `buffer isim: buffer<f32>;`, `buffer isim: buffer<u32>;` veya `buffer isim: buffer<vec4>;`.
+  Bildirim sırasına göre `MtkLayout` içinde `MTK_SYM_BUFFER` (`slot = 0 .. buffer_count-1`, en fazla 16 adet) olarak kaydedilir.
+- **Giriş noktası**: `fn compute() { ... }` (parametre almaz, dönüş değeri yoktur; erken `return;` aktif lane maskesini günceller).
+- **`global_id`**: Yalnızca compute çekirdeğinde geçerli, `u32` (varying) yerleşik değişkeni; çalışılan elemanın küresel indeksini (`0 .. N-1`) verir.
+- **Buffer okuma/yazma**: `let v = buf[idx];`, `buf[idx] = expr;`, `buf[idx] += expr;` ve `buffer<vec4>` üzerinde bileşen/swizzle yazımı (`buf[idx].yz = vec2(...)`).
+- **Atomik toplama**: `let old: u32 = atomic_add(buf, idx, val);` — yalnızca `buffer<u32>` üzerinde geçerlidir; önceki değeri döndürür.
+- **Tamsayı literalleri**: İsteğe bağlı `u`/`U` soneki (`0u`, `255u`, `0xFFu`) doğrudan `u32` sabiti üretir.
+
+### 12.2 CPU Hedefi (`mtk_codegen_compute` & `mtk_compute_dispatch`)
+- Üretilen wasm modülü `"compute"` (ve uyumluluk için `"shade"`) adıyla `(param $batch i32)` imzalı fonksiyonu dışa aktarır.
+- `MtkComputeBatch` (`src/matoki/codegen.h`) başlangıç indeksi (`start`), eleman sayısı (`count`), toplam boyut (`total_count`), `uniforms` işaretçisi ve `buffers[0..15]` taban adreslerini taşır.
+- Çekirdek döngüsü 4'lü tam SIMD gruplarını hızlı yolda (`is_fast_body`) işler; 4'ün katı olmayan kuyruk elemanlarını (`end_gid - fast_end`) maskeli kuyruk bloğunda sınır taşması olmadan yürütür.
+- **Vektörleştirilmiş erişimler**:
+  - `buf[global_id + c]` (`buffer<f32>` / `buffer<u32>`): tek `v128.load` / `v128.store`.
+  - `buf[global_id >> 2]` (`buffer<f32>` / `buffer<u32>`): 4 lane aynı kelimeyi okuduğundan tek `v128.load32_splat`.
+  - `buf[global_id]` (`buffer<vec4>`) ve `buf[global_id * 4 + 0..3]` (`buffer<f32>` / `buffer<u32>`): 4× `v128.load` / `v128.store` + `i8x16.shuffle` ile yerinde 4×4 AoS↔SoA transpoze.
+  - `atomic_add`: aktif lane'ler üzerinde wasm `i32.atomic.rmw.add` (`0xFE 0x1E`).
+- `mtk_compute_dispatch(fn, batch, total_count, grain)` (`src/matoki/matoki.c`): 4-elemanlık SIMD gruplarını `job_parallel_for` üzerinden mevcut işçi thread'lerine (`1T..8T`) dağıtır.
+
+### 12.3 WGSL Hedefi (`mtk_wgsl_compute`)
+- `uniform_bytes > 0` ise `@group(0) @binding(0) var<uniform> mtk_u: MtkUniforms;` üretilir.
+- Her `buffer` slotu `s` için `@group(0) @binding(1 + s) var<storage, read_write> buf_<s>: array<T>;` üretilir (`T` = `f32`, `u32`, `vec4<f32>` veya `atomic_add` kullanılan tamponlarda `atomic<u32>`).
+- Giriş noktası `@compute @workgroup_size(64) fn compute(@builtin(global_invocation_id) gid: vec3<u32>)` olarak üretilir; `IR_GLOBAL_ID` → `gid.x`, `IR_ATOMIC_ADD` → `atomicAdd(&buf_<s>[idx], val)`.
+

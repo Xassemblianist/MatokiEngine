@@ -1,0 +1,26 @@
+// İki geçişli paralel prefix-sum — 1. geçiş: 4'lü blok içi tarama + blok toplamı (F0_A)
+
+buffer in_data: buffer<u32>;
+buffer out_data: buffer<u32>;
+buffer block_sums: buffer<u32>;
+
+fn compute() {
+    let b: u32 = global_id;
+    let base: u32 = b * 4u;
+
+    let x0: u32 = in_data[base];
+    let x1: u32 = in_data[base + 1u];
+    let x2: u32 = in_data[base + 2u];
+    let x3: u32 = in_data[base + 3u];
+
+    let s0: u32 = x0;
+    let s1: u32 = s0 + x1;
+    let s2: u32 = s1 + x2;
+    let s3: u32 = s2 + x3;
+
+    out_data[base]      = s0;
+    out_data[base + 1u] = s1;
+    out_data[base + 2u] = s2;
+    out_data[base + 3u] = s3;
+    block_sums[b]       = s3;
+}
